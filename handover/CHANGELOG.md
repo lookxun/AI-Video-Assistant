@@ -5,6 +5,8 @@
 ### 2026-04-30 GitHub 仓库同步和换电脑开发准备
 
 - 准备将项目推送到 GitHub 仓库：`https://github.com/lookxun/AI-Video-Assistant.git`
+- 已初始化本地 Git 仓库，主分支为 `main`
+- 已完成首次推送到 GitHub：`https://github.com/lookxun/AI-Video-Assistant.git`
 - 新增 `.env.example`，只保留环境变量名和默认非敏感模型配置，不包含真实 key
 - `.gitignore` 明确忽略 `.env.local`、`node_modules`、`.next`、`public/generated` 和 `start-project.log`
 - `public/generated` 下的本地生成图片 / 视频不上传，换电脑后由生成流程自动创建目录和文件

@@ -27,7 +27,7 @@
 
 最新接手重点：
 
-- 项目准备同步到 GitHub：`https://github.com/lookxun/AI-Video-Assistant.git`
+- 项目已同步到 GitHub：`https://github.com/lookxun/AI-Video-Assistant.git`，主分支 `main`
 - 换电脑开发时执行 `git clone`、`npm install`，复制 `.env.example` 为 `.env.local` 并填写 `OPENROUTER_API_KEY`
 - `.env.local`、`node_modules`、`.next`、`public/generated`、`start-project.log` 不上传 GitHub
 - 本地浏览器历史对话、反馈日志和当前会话保存在 `localStorage`，不会随 GitHub 同步
