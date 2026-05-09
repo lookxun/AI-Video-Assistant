@@ -28,9 +28,12 @@
 最新接手重点：
 
 - 项目已同步到 GitHub：`https://github.com/lookxun/AI-Video-Assistant.git`，主分支 `main`
-- 换电脑开发时执行 `git clone`、`npm install`，复制 `.env.example` 为 `.env.local` 并填写 `OPENROUTER_API_KEY`
+- 换电脑开发步骤：`git clone https://github.com/lookxun/AI-Video-Assistant.git` -> `cd AI-Video-Assistant` -> `npm install` -> 复制 `.env.example` 为 `.env.local` -> 填写 `OPENROUTER_API_KEY` -> `npm run dev`
+- Windows 本机也可以继续使用项目里的启动脚本；若只用命令行，开发地址通常是 `http://localhost:3000`
 - `.env.local`、`node_modules`、`.next`、`public/generated`、`start-project.log` 不上传 GitHub
 - 本地浏览器历史对话、反馈日志和当前会话保存在 `localStorage`，不会随 GitHub 同步
+- 因此从 GitHub 下载后，代码和功能会和当前一致，但旧历史对话、本机生成过的图片 / 视频、本地资产库和环境变量不会自动一致
+- 最近一次代码已提交并推送到 `origin/main`，提交为 `2094e9f Update media generation workspace`
 - Seedance 独立聚合接口因白名单 / 部署问题先暂停，后续部署服务器时再接
 - 当前视频生成已切到 OpenRouter 视频接口 `/api/v1/videos`
 - 当前默认图片模型为 `bytedance-seed/seedream-4.5`，当前本机实测只有该图片模型可用；Google / GPT 图片模型会返回地区不可用 `403`
@@ -89,3 +92,6 @@
 - 本轮修正：此前文档写“约 5 分钟停止自动等待”不准确，代码实际普通视频模型约 2 分钟就停；现已移除自动停止上限，只要 OpenRouter / 模型没有返回 `failed / error / expired`，前端会一直轮询等待。前 2 分钟每 10 秒查一次，之后每 30 秒查一次
 - 本轮修正：同一会话不再只能挂一个任务；现在同一会话允许上一条图片 / 视频 / Agent 任务未完成时继续发送新任务，每个会话最多同时挂起 `10` 个任务，达到上限后发送按钮显示“任务已满”，任一任务完成 / 失败后恢复
 - 本轮实现细节：`src/components/chat-workbench.tsx` 已从单个 `pendingRequest` 扩展为 `pendingRequests` 队列，并兼容旧的 `pendingRequest` 历史数据；媒体等待卡按各自 `requestId` 更新，不再只认最后一个任务
+- 最新预览页：点击生成图片或视频会打开全屏预览页，顶部留空，左侧是毛玻璃底媒体预览区，右侧是固定提示词区；图片默认适合尺寸，可切实际尺寸、滚轮缩放 `10% - 250%`、拖拽平移；视频按适合尺寸显示，缩放按钮透明禁用
+- 预览页右侧文件名下显示媒体参数；提示词标题为“图片提示词”，同一行右侧黑色小按钮“使用提示词”会把提示词填入输入框并关闭预览页
+- 当前对话内媒体超过 `2` 个时，预览页左侧右边显示浮层缩略图列表：`50x50`、`5px` 圆角、`2px` 描边、选中蓝色 `#367cee`；视频缩略图左上显示视频图标，图片不显示图标；列表会自动定位到当前缩略图，需要滚动时才显示上下按钮
