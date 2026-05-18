@@ -48,7 +48,7 @@
 - `/api/intent` 会调用 OpenRouter，按最近上下文分类为 `agent` / `image` / `video` / `prompt` / `clarify`，用于 Agent 模式自动路由
 - 2026-05-14 新增 `/api/agent-plan`，用于 Agent 模式的结构化任务规划。它比 `/api/intent` 更重要，会返回 `intent / needsClarification / count / subject / quality / ratio / resolution / duration / prompt / constraints / suggestions`，前端执行器再决定追问、对话、生图或生视频
 - 当前对话模型固定为 `bytedance-seed/seed-2.0-lite`
-- 当前品牌名已改为中文 `启星`、英文 `NovaStar`；OpenRouter 请求头 `X-Title` 使用 `NovaStar`，Agent 自称和意图分类器提示词使用 `启星`
+- 当前中文品牌名为 `闪念`，英文名为 `FlashMuse`；OpenRouter 请求头 `X-Title` 使用 `FlashMuse`，Agent 自称、Planner 和意图分类器提示词使用 `闪念`
 - 曾误用 `seed/seed-2.0-lite`，OpenRouter 会报 invalid model ID，正确模型 ID 是 `bytedance-seed/seed-2.0-lite`
 - `/api/intent` 已做轻量 JSON 结构化输出解析，失败时回退到 `agent`
 - AI 回复当前使用轻量标记做排版：`#` / `##` / `###` 标题、`**加粗**`、`[red]...[/red]`、`[blue]...[/blue]`、`---` 分隔线
@@ -65,12 +65,14 @@
 - Agent Planner 阶段不携带 base64 参考图，只传文字和“本轮带了几张参考图”的提示，避免规划阶段请求体过大；真正生成阶段仍会按参考图链路传图
 - 所有前端红字错误和主要 API 错误都应通过 `src/lib/error-message.ts` 的 `toUserErrorMessage` 清洗，避免 HTML、堆栈、代码直接展示给用户
 - 公网部署前必须改造参考图传参链路：本地开发阶段 `/generated/...` 图片会转 base64 传给 OpenRouter，正式部署后应先把上传图、资产图、历史参考图保存到可公网访问的 HTTPS 地址，再把 HTTPS URL 传给 OpenRouter。不要继续用 base64 传公网参考图，否则容易触发 `413 Request Entity Too Large`，也会损失原图质量和稳定性。
+- 2026-05-18 补充：用户多次提到“红框中的样子 / 参考这张图”，但本地 Planner 阶段为避免 413 默认不携带历史图片，只能用文字猜。部署到公网并具备 HTTPS 图片 URL 后，应让 Planner 在这些明确看图语义下携带最新 1-2 张低清参考图 URL，提升上下文理解。
 
 ## OpenRouter 视频生成
 
 用途：
 
 1. 视频生成
+2. 首页背景视频素材生成
 
 当前接法：
 
@@ -86,6 +88,26 @@
 
 - `src/lib/openrouter-video.ts`
 - `src/app/api/video/route.ts`
+
+首页素材补充：
+
+- 2026-05-15 首页背景视频手动通过 OpenRouter 视频接口生成，最终文件已保存进 `public/home-assets/` 并随 GitHub 提交。
+- 当前首页轮播 5 个视频：`hero-background.mp4`、`hero-dragon.mp4`、`hero-great-wall.mp4`、`hero-global-human.mp4`、`hero-mecha-robot.mp4`。
+- 第一条抽象背景视频使用文本生成；后四条使用对应参考图生成：`hero-dragon-reference.jpg`、`hero-great-wall-reference.jpg`、`hero-global-human-reference.jpg`、`hero-mecha-robot-reference.jpg`。
+- 首页视频生成记录在 `public/home-assets/reference-videos-manifest.json`；第一条抽象背景记录在 `manifest.json`。
+- 使用模型主要为 `google/veo-3.1`，参数为 `8秒 / 1080p / 16:9 / generate_audio: false`。参考图是脚本里转 base64 作为 `input_references` 传给视频接口。
+
+## OpenRouter 音频 / 音乐模型调研
+
+2026-05-15 记录：
+
+1. `google/lyria-3-pro-preview`：音乐生成，完整歌曲，OpenRouter 页面显示约 `$0.08 / 首`，输入可为文字 / 图片，输出音频。
+2. `google/lyria-3-clip-preview`：音乐生成，30 秒片段，OpenRouter 页面显示约 `$0.04 / 30秒片段`。
+3. `openai/gpt-audio`：`text/audio -> text/audio`，适合语音回复 / 自然配音；价格按文本 token 和音频 token 计费。
+4. `openai/gpt-audio-mini`：GPT Audio 低成本版本，适合先做 MVP 语音测试。
+5. `openai/gpt-4o-audio-preview`：页面说明支持音频输入，但当前音频输出暂不支持，更适合音频理解。
+6. 当前没有确认 OpenRouter 里有可直接用上传音频做“音色克隆 / 参考音色”的稳定模型；角色固定音色建议后续接 ElevenLabs、MiniMax Speech、火山语音、Fish Audio 等专门 TTS / voice cloning 服务。
+7. 调研结果已写成 `AI-Video-Assistant_Project Planning\OpenRouter 音频模型功能和价格.docx`，规划目录未跟踪，不要直接提交。
 
 ## 注意事项
 
@@ -166,6 +188,7 @@
 25. 2026-05-15 更新：`/api/video` 创建任务和查询到本地视频后会写 `src/lib/video-manifest.ts` 管理的 `public/generated/videos/manifest.json`，记录 `taskId / prompt / model / settings / localVideoUrl / remoteVideoUrl` 等信息。该 manifest 只用于记录排查，不会自动恢复到聊天对话流。
 26. 2026-05-15 注意：曾短暂加入启动时扫描本地 `public/generated/videos` 并自动把未归档视频补回当前对话流的功能，但会误恢复旧测试视频，已按用户要求删除。后续不要再默认自动恢复旧视频，除非用户明确确认恢复范围和目标会话。
 27. 2026-05-15 费用估算记录：OpenRouter 当前 `Seedance 2.0` 页面显示 `from $7/M tokens`，video token 公式为 `(height * width * duration * 24) / 1024`。按 100 分钟、`1280x720` 和汇率 `7.2` 算，约 `$907.20` / `¥6532`；`Seedance 2.0 Fast` 当前 `video_tokens: 0.0000056`，同规格约 `¥5225`。费用估算不是固定报价，后续以 OpenRouter 当前价格和真实输出尺寸为准。
+28. 2026-05-18 图片模型补充：曾用当前 4 个图片模型尝试生成透明 Logo，结果保存到 `public/home-assets/text/`。结论是模型不能可靠直接输出真实 alpha 透明 PNG，常见结果是棋盘格假透明或绿幕背景，后续 Logo 透明图仍应优先使用设计源文件或生成纯色背景后做后处理抠图。
 
 ## 敏感信息说明
 

@@ -408,3 +408,21 @@ select {
     translate: 0 -8px;
   }
 }
+
+@keyframes home-login-slide-in {
+  from {
+    transform: translateX(100%);
+  }
+
+  to {
+    transform: translateX(0);
+  }
+}
+
+.home-login-close-mark {
+  transition: transform 0.42s ease;
+}
+
+button:hover > .home-login-close-mark {
+  transform: rotate(360deg);
+}

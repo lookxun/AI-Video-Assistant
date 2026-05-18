@@ -67,7 +67,7 @@ export function getOpenRouterHeaders(apiKey: string) {
     Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
     "HTTP-Referer": "http://localhost:3000",
-    "X-Title": "NovaStar",
+    "X-Title": "FlashMuse",
   };
 }
 

@@ -64,6 +64,10 @@ import {
   RiRobot2Line,
   RiTBoxLine,
   RiTiktokFill,
+  RiLogoutBoxRLine,
+  RiSettings3Line,
+  RiShieldUserLine,
+  RiUserLine,
 } from "react-icons/ri";
 import { ADVANCED_CHAT_MODEL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_VIDEO_MODEL, getExpectedImageDimensions, getExpectedVideoDimensions, getImageQualityBadgeLabel, getImageResolutionLabel, getSupportedImageResolutions, getSupportedVideoRatios, getSupportedVideoResolutions, imageGenerationModels, isNonStandardVideoSize, normalizeImageResolutionForModel, normalizeVideoRatioForModel, normalizeVideoResolutionForModel, videoGenerationModels, type GenerationModel, type ModelName } from "@/lib/models";
 import { toUserErrorMessage } from "@/lib/error-message";
@@ -593,7 +597,7 @@ function getAgentGenerationSettings(text: string, generationMode: WorkMode, mode
       ratio,
       resolution: normalizeImageResolutionForModel(model, resolution),
       style: styleOptions[0],
-      imageCount: getRequestedImageCount(text),
+      imageCount: wantsCombinedLayoutRequest(text) ? "1张" : getRequestedImageCount(text),
     };
   }
 
@@ -623,7 +627,7 @@ function getAgentGenerationSettingsFromPlan(plan: AgentPlanResponse | undefined,
     const supportedResolutions = getSupportedImageResolutions(model);
     const ratio = plan?.ratio && ratioOptions.includes(plan.ratio) ? plan.ratio : fallback?.ratio;
     const resolution = plan?.resolution && supportedResolutions.some((item) => item === plan.resolution) ? plan.resolution : fallback?.resolution;
-    const count = plan?.count && plan.count > 0 ? `${Math.floor(plan.count)}张` : fallback?.imageCount;
+    const count = wantsCombinedLayoutRequest(text) ? "1张" : plan?.count && plan.count > 0 ? `${Math.floor(plan.count)}张` : fallback?.imageCount;
 
     return {
       ratio,
@@ -667,6 +671,8 @@ function buildAgentSingleImagePrompt(basePrompt: string, constraints: string[], 
   const combinedText = [sourceText, plan?.subject, basePrompt, ...constraints].filter(Boolean).join("，");
   const requestedCount = plan?.count && Number.isFinite(plan.count) ? plan.count : parseChineseNumber(sourceText.match(/(\d+|[一二两三四五六七八九十]{1,3})\s*张/)?.[1]) ?? 1;
   const noPeopleScene = wantsNoPeopleScene(combinedText);
+  const combinedLayout = wantsCombinedLayoutRequest(sourceText);
+  const noCollageRequested = wantsNoCollage(combinedText);
   const asksSingleSubject = /(每张|单张|一张)[^，。；]*?(只要|只有|保留|一个|一位|一名|单人|单主体)|单人|单主体|一个美女|一位美女|一名女性|只有一位|只有一个/.test(combinedText);
   const isPersonSubject = /(美女|女性|女人|女孩|女生|人物|角色|男生|男人|男性|男孩)/.test(combinedText);
   const explicitMultiPerson = /(合照|群像|多人|两个人|三个人|双人|情侣|团队|一群)/.test(combinedText);
@@ -674,20 +680,19 @@ function buildAgentSingleImagePrompt(basePrompt: string, constraints: string[], 
     .replace(/(\d+|[一二两三四五六七八九十]{1,3})\s*张\s*/g, "")
     .replace(/\d+张图片[^，。；]*(不同|彼此)[^，。；]*/g, "")
     .replace(/每张[^，。；]*(不同|彼此|需体现|必须)[^，。；]*/g, "")
-    .replace(/每张(?:都)?(?:要)?不同(?:的)?(?:人物|角色|国家|国籍|性别|时代|年代|服装|造型)(?:[，、和及与\s]*(?:不同(?:的)?(?:人物|角色|国家|国籍|性别|时代|年代|服装|造型)))*/g, "")
-    .replace(/不同(?:的)?(?:人物|角色|国家|国籍|性别|时代|年代|服装|造型)/g, "")
-    .replace(/(一组|一套|系列|组图|合集|拼图|九宫格|多宫格|分屏|多张照片排版|多图排版|照片墙|拼接图|排版图|参考图集|基础版本)/g, "")
+    .replace(/每张(?:都)?(?:要)?不同(?:的)?(?:人物|角色|国家|国籍|性别|时代|年代|服装|造型)(?:[，、和及与\s]*(?:不同(?:的)?(?:人物|角色|国家|国籍|性别|时代|年代|服装|造型)))*/g, combinedLayout ? "" : "")
+    .replace(/不同(?:的)?(?:人物|角色|国家|国籍|性别|时代|年代|服装|造型)/g, combinedLayout ? "$&" : "")
+    .replace(/(一组|一套|系列|组图|合集|拼图|九宫格|多宫格|分屏|多张照片排版|多图排版|照片墙|拼接图|排版图|参考图集|基础版本)/g, combinedLayout ? "$&" : "")
     .replace(/[，、\s]+/g, "，")
     .replace(/^，|，$/g, "");
-  const singleSubjectConstraint = !noPeopleScene && (asksSingleSubject || (requestedCount > 1 && isPersonSubject && !explicitMultiPerson)) ? "画面中只有一位人物主体" : undefined;
+  const singleSubjectConstraint = !combinedLayout && !noPeopleScene && (asksSingleSubject || (requestedCount > 1 && isPersonSubject && !explicitMultiPerson)) ? "画面中只有一位人物主体" : undefined;
   const hardConstraints = [
-    noPeopleScene ? "纯场景画面，没有任何人物、角色、行人、人影、剪影或人形主体" : "只生成一张独立照片",
+    noPeopleScene ? "纯场景画面，没有任何人物、角色、行人、人影、剪影或人形主体" : undefined,
     noPeopleScene ? "画面主体只能是场景、环境、建筑、自然景观或空间氛围" : undefined,
     noPeopleScene ? "no people, no person, no human, no character, no figure, no silhouette, no man, no woman" : undefined,
     singleSubjectConstraint,
-    "禁止拼图、合集、九宫格、多宫格、分屏、多张照片排版、照片墙",
-    "禁止把多张图片内容放进同一画面",
-    singleSubjectConstraint ? "禁止多人同框、多个主体" : undefined,
+    noCollageRequested && !combinedLayout ? "不要拼图或合集" : undefined,
+    singleSubjectConstraint ? "不要多人同框" : undefined,
   ];
 
   return [cleanedPrompt || basePrompt, ...hardConstraints].filter(Boolean).join("，");
@@ -695,6 +700,14 @@ function buildAgentSingleImagePrompt(basePrompt: string, constraints: string[], 
 
 function wantsNoPeopleScene(text: string) {
   return /(只要|仅要|只生成|生成|换成|改成).{0,10}(场景|风景|环境|背景|空镜)|(不要|不需要|别要|不能有|没有|去掉|去除|无).{0,8}(人物|人像|角色|行人|人影|人类|人形|剪影|主体)|纯场景|无人物|无人场景|空镜/.test(text);
+}
+
+function wantsCombinedLayoutRequest(text: string) {
+  return /(合并|整合|汇总|放在|放到|排在|排版|组合|组合成).{0,12}(一张|同一张|一个画面|同一画面|图上|画面)|(一张|同一张|一个画面|同一画面).{0,12}(放|排|展示|呈现|包含|容纳|合并|整合|多个|多款|几款|方案)|多款.{0,8}(放一起|放在一张)|多个方案.{0,12}(一张|同一张)/.test(text);
+}
+
+function wantsNoCollage(text: string) {
+  return /(不要|别|不能|避免|不要再|不做|禁止).{0,10}(拼图|合集|九宫格|多宫格|分屏|组图|照片墙)|(拼图|合集|九宫格|多宫格|分屏|组图|照片墙).{0,10}(不对|错|不要|别|避免|不行)/.test(text);
 }
 
 function removePeopleTerms(prompt: string) {
@@ -746,6 +759,8 @@ function getAgentImageVariantPrompt(prompt: string, sourceText: string, index: n
   if (total <= 1) return prompt;
 
   const noPeopleScene = wantsNoPeopleScene(`${sourceText}，${prompt}`);
+  const combinedLayout = wantsCombinedLayoutRequest(sourceText);
+  if (combinedLayout) return prompt;
   const countries = ["中国", "法国", "埃及", "日本", "印度", "英国", "墨西哥", "肯尼亚", "美国", "土耳其"];
   const eras = ["现代", "19世纪", "古代", "江户时代", "中世纪", "维多利亚时代", "20世纪初", "未来时代", "文艺复兴时期", "1920年代"];
   const genders = ["女性", "男性"];
@@ -759,7 +774,7 @@ function getAgentImageVariantPrompt(prompt: string, sourceText: string, index: n
     needsGender ? `本张只选择一个性别：${genders[index % genders.length]}` : undefined,
     needsEra ? `本张只选择一个时代：${eras[index % eras.length]}` : undefined,
     noPeopleScene ? "不要出现人物、角色、行人、人影、剪影或人形主体" : "不要在同一张图里展示多个国家、多个性别、多个时代或多个角色对比",
-    noPeopleScene ? "no people, no person, no human, no character, no figure, no silhouette" : "不要生成拼图、合集、九宫格、角色设定表、服装展示板或多人物阵列",
+    noPeopleScene ? "no people, no person, no human, no character, no figure, no silhouette" : undefined,
   ];
 
   return [prompt, ...variantParts].filter(Boolean).join("，");
@@ -1477,12 +1492,13 @@ function TypewriterFormattedMessage({
   onTick: () => void;
   leadingIcon?: ReactNode;
 }) {
-  const characters = Array.from(content);
+  const displayContent = sanitizeMessageContentForDisplay(content);
+  const characters = Array.from(displayContent);
   const [visibleCount, setVisibleCount] = useState(isComplete ? characters.length : 0);
-  const visibleContent = isComplete ? content : characters.slice(0, visibleCount).join("");
+  const visibleContent = isComplete ? displayContent : characters.slice(0, visibleCount).join("");
 
   useEffect(() => {
-    const contentCharacters = Array.from(content);
+    const contentCharacters = Array.from(displayContent);
 
     if (isComplete) {
       return;
@@ -1494,7 +1510,7 @@ function TypewriterFormattedMessage({
     }
 
     const startedAt = performance.now();
-    const duration = getTypingDuration(content);
+    const duration = getTypingDuration(displayContent);
     let frameId = 0;
 
     const tick = (now: number) => {
@@ -1515,7 +1531,7 @@ function TypewriterFormattedMessage({
     frameId = window.requestAnimationFrame(tick);
 
     return () => window.cancelAnimationFrame(frameId);
-  }, [content, isComplete, messageId, onComplete, onTick]);
+  }, [displayContent, isComplete, messageId, onComplete, onTick]);
 
   return (
     <>
@@ -2233,9 +2249,10 @@ function renderInlineFormatting(text: string) {
   const pattern = /(\*\*[^*]+\*\*|\[red\][\s\S]+?\[\/red\]|\[blue\][\s\S]+?\[\/blue\])/g;
   const nodes: ReactNode[] = [];
   let lastIndex = 0;
+  const cleanText = (value: string) => value.replace(/\*\*/g, "").replace(/__/g, "");
 
   text.replace(pattern, (match, _token, index: number) => {
-    if (index > lastIndex) nodes.push(text.slice(lastIndex, index));
+    if (index > lastIndex) nodes.push(cleanText(text.slice(lastIndex, index)));
 
     if (match.startsWith("**")) {
       nodes.push(
@@ -2261,8 +2278,15 @@ function renderInlineFormatting(text: string) {
     return match;
   });
 
-  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
-  return nodes.length > 0 ? nodes : text;
+  if (lastIndex < text.length) nodes.push(cleanText(text.slice(lastIndex)));
+  return nodes.length > 0 ? nodes : cleanText(text);
+}
+
+function sanitizeMessageContentForDisplay(content: string) {
+  return content
+    .replace(/^```[\w-]*\s*$/gm, "")
+    .replace(/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/gm, "")
+    .trim();
 }
 
 function InlineAgentIcon() {
@@ -2270,7 +2294,8 @@ function InlineAgentIcon() {
 }
 
 function FormattedMessage({ content, leadingIcon }: { content: string; leadingIcon?: ReactNode }) {
-  const blocks = content.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
+  const displayContent = sanitizeMessageContentForDisplay(content);
+  const blocks = displayContent.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
 
   if (blocks.length === 0) return null;
 
@@ -2278,9 +2303,10 @@ function FormattedMessage({ content, leadingIcon }: { content: string; leadingIc
     const redCallout = line.match(/^\[red\]([\s\S]+)\[\/red\]$/);
     const blueCallout = line.match(/^\[blue\]([\s\S]+)\[\/blue\]$/);
     const divider = /^-{3,}$/.test(line);
-    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    const heading = line.match(/^(#{1,6})\s*(.*)$/);
     const boldHeading = line.match(/^\*\*([^*]{2,24})\*\*$/);
     const labeledListItem = line.match(/^(?:[-*]|\d+[.、])\s*(.{2,30}?[：:])\s*([\s\S]*)$/);
+    const bulletItem = line.match(/^[-*]\s+([\s\S]+)$/);
 
     if (divider) {
       return <hr key={key} className="my-4 border-[#e5e5e5]" />;
@@ -2298,12 +2324,15 @@ function FormattedMessage({ content, leadingIcon }: { content: string; leadingIc
 
     if (heading) {
       const level = heading[1].length;
+      const headingText = heading[2]?.trim() ?? "";
+
+      if (!headingText) return null;
 
       if (level === 1) {
         return (
           <h1 key={key} className="pt-2 text-[22px] font-semibold leading-8 tracking-[-0.02em] text-[#111111]">
             {lineLeadingIcon}
-            {renderInlineFormatting(heading[2])}
+            {renderInlineFormatting(headingText)}
           </h1>
         );
       }
@@ -2311,12 +2340,12 @@ function FormattedMessage({ content, leadingIcon }: { content: string; leadingIc
       return level === 2 ? (
         <h2 key={key} className="pt-2 text-[19px] font-semibold leading-7 tracking-[-0.01em] text-[#111111]">
           {lineLeadingIcon}
-          {renderInlineFormatting(heading[2])}
+          {renderInlineFormatting(headingText)}
         </h2>
       ) : (
         <h3 key={key} className="pt-1 text-[16px] font-semibold leading-6 text-[#111111]">
           {lineLeadingIcon}
-          {renderInlineFormatting(heading[2])}
+          {renderInlineFormatting(headingText)}
         </h3>
       );
     }
@@ -2338,6 +2367,18 @@ function FormattedMessage({ content, leadingIcon }: { content: string; leadingIc
             {lineLeadingIcon}
             <strong className="font-semibold text-[#111111]">{labeledListItem[1]}</strong>
             {labeledListItem[2] ? renderInlineFormatting(labeledListItem[2]) : null}
+          </p>
+        </div>
+      );
+    }
+
+    if (bulletItem) {
+      return (
+        <div key={key} className="flex gap-2">
+          <span className="mt-[0.72em] h-1.5 w-1.5 shrink-0 rounded-full bg-[#111111]" aria-hidden="true" />
+          <p className="min-w-0 flex-1">
+            {lineLeadingIcon}
+            {renderInlineFormatting(bulletItem[1])}
           </p>
         </div>
       );
@@ -2428,7 +2469,13 @@ function getEditableText(element: HTMLElement) {
   };
 
   walk(element);
-  return text.replace(/\u00a0/g, " ");
+  const normalizedText = text.replace(/\u00a0/g, " ");
+
+  // Browsers keep an empty contenteditable focusable by inserting a lone <br>.
+  // Treat that browser placeholder as empty input, not as a real newline.
+  if (normalizedText.replace(/\n/g, "") === "") return "";
+
+  return normalizedText;
 }
 
 function appendEditorText(element: HTMLElement, text: string) {
@@ -2620,7 +2667,7 @@ function PlainMentionEditor({
     setSelectionTextOffset(element, caretOffset ?? nextValue.length);
   }, [editorRef, validReferences]);
 
-  const commitInput = useCallback((rawValue: string, caretOffset: number) => {
+  const commitInput = useCallback((rawValue: string, caretOffset: number, options?: { syncDom?: boolean }) => {
     if (disabled) return;
 
     const nextValue = Array.from(rawValue).slice(0, MAX_DRAFT_INPUT_LENGTH).join("");
@@ -2630,7 +2677,7 @@ function PlainMentionEditor({
 
     onCursorChange(nextCaretOffset);
     onChange(nextValue);
-    syncEditor(nextValue, nextCaretOffset);
+    if (options?.syncDom || rawValue !== nextValue) syncEditor(nextValue, nextCaretOffset);
 
     if (getAtQueryAtCursor(nextValue, nextCaretOffset)) {
       onAtTrigger();
@@ -2702,6 +2749,7 @@ function PlainMentionEditor({
 
         const files = Array.from(event.clipboardData.files ?? []);
         if (files.some((file) => file.type.startsWith("image/"))) {
+          event.preventDefault();
           onPasteImages(files);
           return;
         }
@@ -2716,7 +2764,7 @@ function PlainMentionEditor({
         const selection = window.getSelection();
         const selectedTextLength = selection?.rangeCount && element.contains(selection.getRangeAt(0).commonAncestorContainer) ? selection.getRangeAt(0).toString().length : 0;
         const nextText = `${currentText.slice(0, selectionOffset)}${text}${currentText.slice(selectionOffset + selectedTextLength)}`;
-        commitInput(nextText, selectionOffset + text.length);
+        commitInput(nextText, selectionOffset + text.length, { syncDom: true });
       }}
       onKeyDown={(event) => {
         if (disabled) {
@@ -2735,7 +2783,7 @@ function PlainMentionEditor({
         const element = event.currentTarget;
         const selectionOffset = getSelectionTextOffset(element);
         const currentText = getEditableText(element);
-        commitInput(`${currentText.slice(0, selectionOffset)}\n${currentText.slice(selectionOffset)}`, selectionOffset + 1);
+        commitInput(`${currentText.slice(0, selectionOffset)}\n${currentText.slice(selectionOffset)}`, selectionOffset + 1, { syncDom: true });
       }}
       onKeyUp={syncCursorFromDom}
       onMouseUp={syncCursorFromDom}
@@ -3533,6 +3581,7 @@ export function ChatWorkbench() {
   const [activeSessionId, setActiveSessionId] = useState("");
   const [openWorkflowMenuId, setOpenWorkflowMenuId] = useState("");
   const [openSessionMenuId, setOpenSessionMenuId] = useState("");
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [openMessageMenuId, setOpenMessageMenuId] = useState("");
   const [sessionMenuPlacement, setSessionMenuPlacement] = useState<"top" | "bottom">("bottom");
   const [renamingSessionId, setRenamingSessionId] = useState("");
@@ -3696,9 +3745,10 @@ export function ChatWorkbench() {
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
+    if (draftCursorOffset < activeInput.length) return;
 
     editor.scrollTop = editor.scrollHeight;
-  }, [activeInput]);
+  }, [activeInput, draftCursorOffset]);
 
   useEffect(() => {
     if (!previewAssetId) return;
@@ -4138,6 +4188,8 @@ export function ChatWorkbench() {
     });
   }, []);
 
+  const keepTypingInPlace = useCallback(() => undefined, []);
+
   const rememberIntentCorrection = useCallback((source: string, targetMode: IntentMode) => {
     setIntentMemoryRules((current) => upsertIntentMemoryRule(current, source, targetMode));
   }, []);
@@ -4430,6 +4482,15 @@ export function ChatWorkbench() {
 
     return () => window.removeEventListener("click", closeMenu);
   }, [openMessageMenuId]);
+
+  useEffect(() => {
+    if (!isUserMenuOpen) return;
+
+    const closeMenu = () => setIsUserMenuOpen(false);
+    window.addEventListener("click", closeMenu);
+
+    return () => window.removeEventListener("click", closeMenu);
+  }, [isUserMenuOpen]);
 
   useEffect(() => {
     if (!openAssetMenuId) return;
@@ -5403,11 +5464,13 @@ export function ChatWorkbench() {
             try {
               const itemPrompt = pendingRequest.agentGenerated ? pendingRequest.agentItemPrompts?.[index] ?? getAgentImageVariantPrompt(prompt, sourceText, index, imageCount) : prompt;
               const imageResult = await createImageWithRetry(itemPrompt);
+              const resultImages = pendingRequest.agentGenerated ? imageResult.images.slice(0, 1) : imageResult.images;
+              const resultDimensions = Object.fromEntries(resultImages.map((url) => [url, imageResult.imageDimensions[url]]).filter((item): item is [string, ImageDimensions] => Boolean(item[1])));
               addSessionUsage(sessionId, imageResult.usage);
-              const imagePrompts = Object.fromEntries(imageResult.images.map((url) => [url, itemPrompt]));
-              appendImagesToAssistantMessage(sessionId, pendingRequest.id, imageResult.images, imageResult.imageDimensions, 1, imagePrompts, pendingRequest.retryFailedIndex);
-              addGeneratedAssets(sessionId, pendingRequest.mode, itemPrompt, imageResult.images, undefined, pendingRequest.assetTargetType, contextText);
-              return imageResult.images;
+              const imagePrompts = Object.fromEntries(resultImages.map((url) => [url, itemPrompt]));
+              appendImagesToAssistantMessage(sessionId, pendingRequest.id, resultImages, resultDimensions, 1, imagePrompts, pendingRequest.retryFailedIndex);
+              addGeneratedAssets(sessionId, pendingRequest.mode, itemPrompt, resultImages, undefined, pendingRequest.assetTargetType, contextText);
+              return resultImages;
             } catch (error) {
               markAssistantImageFailure(sessionId, pendingRequest.id, pendingRequest.retryFailedIndex);
               throw error;
@@ -6323,12 +6386,14 @@ export function ChatWorkbench() {
     <section className={isSidebarCollapsed ? "grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white" : "grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[262px_minmax(0,1fr)]"}>
       <aside className={isSidebarCollapsed ? "hidden" : "hidden h-screen min-h-0 flex-col overflow-hidden border-r border-[#e5e5e5] bg-[#f9f9f9] px-3 py-4 lg:flex"}>
           <div className="mb-5 flex items-center gap-3 px-2">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#6667ff] text-white">
-            <RiStarSmileLine className="h-6 w-6" aria-hidden="true" />
+          <div className="flex h-[50px] w-[50px] items-center justify-center">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/home-assets/logo.png" alt="闪念 FlashMuse" className="h-[50px] w-[50px] object-contain" />
           </div>
-          <div className="min-w-0">
-            <div className="text-[16px] font-semibold leading-5 tracking-tight text-[#111111]">启星</div>
-            <div className="mt-1 text-xs text-[#8a8a8a]">AI影片助手</div>
+          <div className="flex min-w-0 flex-col justify-center">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/home-assets/logo-text.png" alt="闪念" className="w-auto object-contain" style={{ height: 26 }} />
+            <div className="mt-1 whitespace-nowrap text-xs leading-4 text-[#8a8a8a]">AI影片助手</div>
           </div>
         </div>
         <div className="mb-[22px] space-y-[5px]">
@@ -6513,6 +6578,40 @@ export function ChatWorkbench() {
             </div>
           </>
         )}
+        <div className="relative mt-0 py-2.5">
+          <div aria-hidden="true" style={{ position: "absolute", left: -12, right: -12, top: 0, height: 1, background: "#e5e5e5" }} />
+          {isUserMenuOpen ? (
+            <div onClick={(event) => event.stopPropagation()} className="absolute bottom-[58px] left-1/2 z-40 w-[222px] -translate-x-1/2 overflow-hidden rounded-[12px] border border-[#e0e0e0] bg-white pt-2 shadow-[0_10px_28px_rgba(0,0,0,0.12)]">
+              <button type="button" className="mx-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-[6px] px-2 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#e9e9e9]">
+                <RiUserLine className="h-4 w-4 text-[#777777]" aria-hidden="true" />
+                <span style={{ fontSize: 13 }}>用户信息</span>
+              </button>
+              <button type="button" className="mx-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-[6px] px-2 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#e9e9e9]">
+                <RiShieldUserLine className="h-4 w-4 text-[#777777]" aria-hidden="true" />
+                <span style={{ fontSize: 13 }}>用户安全</span>
+              </button>
+              <button type="button" className="mx-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-[6px] px-2 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#e9e9e9]">
+                <RiSettings3Line className="h-4 w-4 text-[#777777]" aria-hidden="true" />
+                <span style={{ fontSize: 13 }}>设置</span>
+              </button>
+              <div className="mt-2 border-t border-[#e7e7e7] bg-[#f4f4f4]">
+                <button type="button" className="flex h-14 w-full items-center gap-3 px-3 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#eeeeee]">
+                  <RiLogoutBoxRLine className="h-4 w-4 text-[#777777]" aria-hidden="true" />
+                  <span style={{ fontSize: 13 }}>退出登录</span>
+                </button>
+              </div>
+            </div>
+          ) : null}
+          <button type="button" onClick={(event) => { event.stopPropagation(); setIsUserMenuOpen((current) => !current); }} className="mx-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-lg px-2 text-left transition hover:bg-[#ececec]" style={{ transform: "translateY(4px)" }}>
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#e5e5e5] text-[13px] font-medium text-[#777777]">
+              U
+            </div>
+            <div className="flex min-w-0 flex-col justify-center">
+              <div className="truncate text-[13px] font-medium leading-4 text-[#333333]">用户头像</div>
+              <div className="truncate text-[12px] leading-4 text-[#8a8a8a]">user@example.com</div>
+            </div>
+          </button>
+        </div>
       </aside>
 
       <section className="flex h-screen min-h-screen flex-col bg-white">
@@ -6704,7 +6803,7 @@ export function ChatWorkbench() {
                     >
                       {message.role === "assistant" ? (
                         message.mode === "agent" || isAgentMediaMessage ? (
-                          isAgentMediaMessage ? <><InlineAgentIcon /><ReferencedTextContent content={message.content} references={mediaPromptReferences} /></> : <TypewriterFormattedMessage messageId={message.id} content={message.content} isComplete={isAssistantMessageComplete} onComplete={markTypingComplete} onTick={keepTypingAtBottom} leadingIcon={<InlineAgentIcon />} />
+                          isAgentMediaMessage ? <><InlineAgentIcon /><ReferencedTextContent content={message.content} references={mediaPromptReferences} /></> : <TypewriterFormattedMessage messageId={message.id} content={message.content} isComplete={isAssistantMessageComplete} onComplete={markTypingComplete} onTick={keepTypingInPlace} leadingIcon={<InlineAgentIcon />} />
                         ) : message.mode === "image" || message.mode === "video" ? <MediaPromptBlock message={message} references={mediaPromptReferences} onUsePrompt={(item) => void copyPrompt(item)} copyState={copyFeedback?.messageId === message.id ? copyFeedback.state : undefined} displayImageUrl={displayedMessageImages[0]} variantIndex={selectedImageVariantIndex} variantCount={imageVariantCount} onPreviousVariant={() => setImageVariantIndex(selectedImageVariantIndex - 1)} onNextVariant={() => setImageVariantIndex(selectedImageVariantIndex + 1)} /> : <TypewriterFormattedMessage messageId={message.id} content={message.content} isComplete={isAssistantMessageComplete} onComplete={markTypingComplete} onTick={keepTypingAtBottom} />
                       ) : (
                         <UserMessageContent content={message.content} references={userImageReferences} />
