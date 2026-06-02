@@ -50,6 +50,20 @@ function getExtensionFromUrl(url: string) {
   }
 }
 
+function parseDataUrl(dataUrl: string) {
+  if (!dataUrl.startsWith("data:")) return undefined;
+  const commaIndex = dataUrl.indexOf(",");
+  if (commaIndex < 0) return undefined;
+
+  const header = dataUrl.slice(5, commaIndex);
+  if (!/;base64(?:;|$)/i.test(header)) return undefined;
+
+  return {
+    mimeType: header.split(";")[0],
+    base64: dataUrl.slice(commaIndex + 1),
+  };
+}
+
 function createPublicAssetPath(type: AssetType, extension: string) {
   const folder = getAssetFolder(type);
   const filename = `${Date.now()}-${randomUUID()}.${extension}`;
@@ -77,32 +91,32 @@ function toCurlHeaderArgs(headers?: HeadersInit) {
 }
 
 export async function saveDataUrlAsset(dataUrl: string, type: AssetType) {
-  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  const parsed = parseDataUrl(dataUrl);
 
-  if (!match) {
+  if (!parsed) {
     throw new Error("图片数据格式不正确，无法保存到本地。请稍后再试。");
   }
 
-  const extension = getExtensionFromMime(match[1]) ?? (type === "image" ? "png" : "mp4");
+  const extension = getExtensionFromMime(parsed.mimeType) ?? (type === "image" ? "png" : "mp4");
   const asset = createPublicAssetPath(type, extension);
 
   await mkdir(asset.directory, { recursive: true });
-  await writeFile(asset.filePath, Buffer.from(match[2], "base64"));
+  await writeFile(asset.filePath, Buffer.from(parsed.base64, "base64"));
 
   return asset.publicUrl;
 }
 
-export async function saveUploadedImageAsset(dataUrl: string) {
-  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+export async function saveUploadedImageAsset(dataUrl: string, folder = "upload_image") {
+  const parsed = parseDataUrl(dataUrl);
 
-  if (!match) {
+  if (!parsed) {
     throw new Error("图片数据格式不正确，无法保存到本地。请稍后再试。");
   }
 
-  const buffer = Buffer.from(match[2], "base64");
-  const extension = getExtensionFromMime(match[1]) ?? "png";
+  const buffer = Buffer.from(parsed.base64, "base64");
+  const extension = getExtensionFromMime(parsed.mimeType) ?? "png";
   const hash = createHash("sha256").update(buffer).digest("hex").slice(0, 24);
-  const directory = join(GENERATED_ROOT, "upload_image");
+  const directory = join(GENERATED_ROOT, folder);
   const filePath = join(directory, `${hash}.${extension}`);
 
   await mkdir(directory, { recursive: true });
@@ -111,7 +125,11 @@ export async function saveUploadedImageAsset(dataUrl: string) {
     await writeFile(filePath, buffer);
   }
 
-  return `/generated/upload_image/${hash}.${extension}`;
+  return `/generated/${folder}/${hash}.${extension}`;
+}
+
+export async function saveUserAvatarAsset(dataUrl: string) {
+  return saveUploadedImageAsset(dataUrl, "user_avatar");
 }
 
 export async function saveRemoteAsset(url: string, type: AssetType, init?: RequestInit) {

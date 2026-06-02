@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: flashmuse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: flashmuse
+      POSTGRES_PASSWORD: flashmuse_dev_password
+      POSTGRES_DB: flashmuse
+    ports:
+      - "5432:5432"
+    volumes:
+      - flashmuse_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  flashmuse_postgres_data:

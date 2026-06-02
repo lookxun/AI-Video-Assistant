@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
+import { assertUserCanUseCredits, chargeCredits } from "@/lib/credits";
 import { createOpenRouterVideoTask, getOpenRouterHeaders, getOpenRouterVideoTask, getRequiredOpenRouterApiKey } from "@/lib/openrouter-video";
 import { saveGeneratedAsset } from "@/lib/local-assets";
-import { toUserErrorMessage } from "@/lib/error-message";
+import { createCodedApiError } from "@/lib/error-code";
 import { upsertVideoManifestEntry } from "@/lib/video-manifest";
+import { isConversationVideoModelEnabled } from "@/lib/system-settings";
 
 type UsageMeta = {
   promptTokens?: number;
@@ -34,6 +37,21 @@ function getUsageMeta(value: unknown): UsageMeta | undefined {
   }
 
   return undefined;
+}
+
+function withBytePlusVideoUsd(usage: UsageMeta | undefined, model: string | undefined, settings?: { resolution?: string }) {
+  if (!usage || usage.usd !== undefined || !model?.startsWith("byteplus:video.")) return usage;
+  const outputTokens = Math.max(0, usage.completionTokens ?? usage.totalTokens ?? 0);
+  const pricePerMillion = model === "byteplus:video.seedance-2-0-fast" ? 5.6 : settings?.resolution === "1080p" ? 7.7 : 7.0;
+  return { ...usage, usd: (outputTokens / 1_000_000) * pricePerMillion };
+}
+
+function isBytePlusVideoModel(model?: string) {
+  return Boolean(model?.startsWith("byteplus:video."));
+}
+
+function logVideoTiming(label: string, data: Record<string, unknown>) {
+  console.log(`[video-generation] ${label}`, data);
 }
 
 function getCreateTaskId(value: unknown): string | undefined {
@@ -160,13 +178,19 @@ export async function POST(request: Request) {
       taskId?: string;
       referenceImages?: string[];
       settings?: { ratio?: string; resolution?: string; duration?: string };
+      conversationId?: string;
+      conversationTitle?: string;
+      requestId?: string;
+      usage?: UsageMeta;
     };
 
     const taskId = body.taskId?.trim();
     const prompt = body.prompt?.trim();
 
     if (taskId) {
+      const startedAt = Date.now();
       const task = await getOpenRouterVideoTask(taskId);
+      const queryDoneAt = Date.now();
       const videoError = getVideoErrorMessage(task);
 
       if (videoError) {
@@ -178,25 +202,55 @@ export async function POST(request: Request) {
 
       if ((status === "succeeded" || status === "success" || status === "completed" || status === "complete") && videoUrl) {
         let localVideoUrl = videoUrl;
+        let saveError: string | undefined;
 
         try {
           const needsOpenRouterAuth = videoUrl.startsWith("https://openrouter.ai/api/v1/videos/");
           localVideoUrl = await saveGeneratedAsset(videoUrl, "video", needsOpenRouterAuth ? { headers: getOpenRouterHeaders(getRequiredOpenRouterApiKey()) } : undefined);
-        } catch {
+        } catch (error) {
+          saveError = error instanceof Error ? error.message : String(error);
           localVideoUrl = videoUrl;
         }
+        const saveDoneAt = Date.now();
+
+        logVideoTiming(isBytePlusVideoModel(body.model) ? "BytePlus completed" : "OpenRouter completed", {
+          model: body.model,
+          taskId,
+          status,
+          queryMs: queryDoneAt - startedAt,
+          saveMs: saveDoneAt - queryDoneAt,
+          totalMs: saveDoneAt - startedAt,
+          savedLocal: localVideoUrl.startsWith("/generated/"),
+          saveFailed: Boolean(saveError),
+          saveError: saveError ? saveError.slice(0, 160) : undefined,
+        });
 
         await upsertVideoManifestEntry({ taskId, prompt: "", localVideoUrl, remoteVideoUrl: videoUrl });
+
+        const user = await getCurrentUser();
+        const usage = withBytePlusVideoUsd(getUsageMeta(task) ?? body.usage, body.model, body.settings);
+        const credit = user ? await chargeCredits(user.id, "video", usage, { conversationId: body.conversationId, conversationTitle: body.conversationTitle, requestId: body.requestId ?? taskId, label: "视频生成", model: body.model, videoCount: 1, metadata: { mediaUrls: [localVideoUrl], remoteMediaUrls: [videoUrl], delivered: true } }) : undefined;
 
         return NextResponse.json({
           ...task,
           status: "succeeded",
-          usage: getUsageMeta(task),
+          usage,
+          credit,
           content: {
             ...task.content,
             video_url: localVideoUrl,
             remote_video_url: videoUrl,
           },
+        });
+      }
+
+      if (isBytePlusVideoModel(body.model)) {
+        logVideoTiming("BytePlus polling", {
+          model: body.model,
+          taskId,
+          status,
+          queryMs: queryDoneAt - startedAt,
+          hasVideoUrl: Boolean(videoUrl),
         });
       }
 
@@ -206,25 +260,45 @@ export async function POST(request: Request) {
     if (!prompt) {
       return NextResponse.json({ error: "缺少提示词" }, { status: 400 });
     }
+    if (body.model && !isConversationVideoModelEnabled(body.model)) return NextResponse.json({ error: "连接不到模型，请联系管理员！" }, { status: 400 });
 
+    const user = await getCurrentUser();
+    await assertUserCanUseCredits(user, "video");
+
+    const createStartedAt = Date.now();
     const task = await createOpenRouterVideoTask(prompt, Array.isArray(body.referenceImages) ? body.referenceImages : [], body.settings, body.model);
+    const createDoneAt = Date.now();
     const videoError = getVideoErrorMessage(task);
 
     if (videoError) {
-      return NextResponse.json({ error: `视频任务创建失败：${videoError}`, raw: task }, { status: 502 });
+      const codedError = await createCodedApiError(new Error(videoError), "视频任务创建失败，请稍后再试。", "video task create failed");
+      return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
     }
 
     const id = task.polling_url ?? task.pollingUrl ?? getCreateTaskId(task);
 
     if (!id) {
-      return NextResponse.json({ error: "视频接口已调用，但返回里没有找到任务编号。", raw: task }, { status: 502 });
+      const codedError = await createCodedApiError(new Error("Missing video task id"), "任务失败，请联系管理员！", "video task id missing");
+      return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
     }
 
     await upsertVideoManifestEntry({ taskId: id, prompt, model: body.model, settings: body.settings });
 
+    if (isBytePlusVideoModel(body.model)) {
+      logVideoTiming("BytePlus created", {
+        model: body.model,
+        taskId: id,
+        createMs: createDoneAt - createStartedAt,
+        ratio: body.settings?.ratio,
+        resolution: body.settings?.resolution,
+        duration: body.settings?.duration,
+        referenceCount: Array.isArray(body.referenceImages) ? body.referenceImages.length : 0,
+      });
+    }
+
     return NextResponse.json({ ...task, id, job_id: getCreateTaskId(task), usage: getUsageMeta(task) });
   } catch (error) {
-    const message = toUserErrorMessage(error, "视频请求失败，请稍后再试。");
-    return NextResponse.json({ error: message }, { status: 500 });
+    const codedError = await createCodedApiError(error, "视频请求失败，请稍后再试。", "video request failed");
+    return NextResponse.json(codedError, { status: 500 });
   }
 }

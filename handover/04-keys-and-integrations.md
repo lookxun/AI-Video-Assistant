@@ -2,16 +2,75 @@
 
 ## 集成概览
 
-当前项目使用两套核心能力：
+当前项目使用三套核心能力：
 
 1. `OpenRouter`
 2. `OpenRouter 视频生成`
+3. `BytePlus ModelArk`
 
 另有一个 `MiniMax Coding Plan` 信息存在于外部记录里，但用户明确说：
 
 - 第一个 MiniMax 不用管
 
 所以当前项目没有使用 MiniMax。
+
+## BytePlus ModelArk
+
+用途：
+
+1. 文本对话 / Agent 规划 / 意图识别 / 提示词反推和优化
+2. 图片生成：`Seedream 4.5 / Seedream 5.0`
+3. 视频生成：`Seedance 2.0 Fast / Seedance 2.0`
+
+当前接法：
+
+- API Key 来自 `E:\project\【1】Api key\Byteplus\Byteplus.md`，使用 `ark-...` Data Plane Key。
+- Region 固定为 `ap-southeast-1`。
+- 文本类接口：`POST https://ark.ap-southeast.bytepluses.com/api/v3/chat/completions`。
+- 图片接口：`POST https://ark.ap-southeast.bytepluses.com/api/v3/images/generations`。
+- 视频创建任务：`POST https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks`。
+- 视频查询任务：`GET https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/{id}`。
+
+模型映射：
+
+- `byteplus:conversation-image.seedream-4-5` -> 默认模型名 `seedream-4-5-251128`；后台打开 `解除限制` 后使用 `ep-20260514174622-n9qfb`
+- `byteplus:conversation-image.seedream-5-0` -> 默认模型名 `seedream-5-0-260128`；后台打开 `解除限制` 后使用 `ep-20260514142211-p2wdk`
+- `byteplus:video.seedance-2-0-fast` -> 默认模型名 `dreamina-seedance-2-0-fast-260128`；后台打开 `解除限制` 后使用 `ep-20260521134040-vf2jf`
+- `byteplus:video.seedance-2-0` -> 默认模型名 `dreamina-seedance-2-0-260128`；后台打开 `解除限制` 后使用 `ep-20260521133841-nn8bg`
+
+关键文件：
+
+- `src/lib/system-settings.ts`
+- `src/lib/openrouter.ts`
+- `src/lib/openrouter-video.ts`
+- `src/app/api/model-availability/route.ts`
+- `src/app/api/image/route.ts`
+- `src/app/api/video/route.ts`
+- `src/components/byteplus-icon.tsx`
+
+当前实现说明：
+
+- 后台 `系统设置` 里 OpenRouter 和 BytePlus 模型互斥。前台模型下拉会通过 `/api/model-availability` 同时读取启用的 OpenRouter 与 BytePlus 图片/视频模型。
+- 供应商隔离规则：OpenRouter 是当前稳定基线，相关参数、请求体、尺寸显示、扣费 metadata 和后台明细不能被 BytePlus 改动影响。BytePlus 能复用 OpenRouter 规则时先复用；不能复用时必须单独写 BytePlus 分支、尺寸表或适配函数。后续新增任何供应商也按这个规则做 provider 隔离。
+- 后台 `BytePlus API` 行右侧有 `解除限制` 开关，保存为 `.env.local` 的 `BYTEPLUS_UNLOCK_LIMITS`。关闭时实际请求 `model` 使用模型名；打开时实际请求 `model` 使用 `BYTEPLUS_MODEL_SELECTIONS` 中的 `ep-...` Endpoint ID。前端和后台显示模型名称不随开关变化。
+- BytePlus 图标来自用户提供的 BytePlus logo SVG，只使用前置图形，不带文字，颜色继承前端模型图标灰色。
+- BytePlus 文本类路由已接入 `sendToOpenRouter()`、`planAgentTask()`、`classifyOpenRouterIntent()`，同样受 `解除限制` 开关影响：关闭时用 Endpoint 对应模型名，打开时用 Endpoint ID。
+- BytePlus 图片已支持文生图、单图图生图、多图融合。图片响应读取 `data[].url`，usage 读取 `usage.output_tokens / usage.total_tokens`。对话流专业模式的多张图按张数并发多次单图请求，不使用官方 `max_images` 来保证张数。
+- BytePlus 官方多图 `sequential_image_generation: "auto"` 和 `sequential_image_generation_options.max_images` 只表示最多返回几张，实测不保证返回用户选的张数，因此当前普通 `2/3/4张` 不走官方批量。流式 `stream: true` 暂未接入，只记录了 SSE 格式。
+- BytePlus 视频已支持创建和查询任务。创建响应只有 `id`；查询成功响应 `status=succeeded`，视频 URL 在 `content.video_url`，usage 在 `usage.completion_tokens / usage.total_tokens`。
+- BytePlus 视频参考图片使用 `{ type: "image_url", image_url: { url }, role: "reference_image" }`。当前未接参考视频、参考音频、严格首尾帧模式、取消任务和删除任务。
+
+BytePlus 图片尺寸实测：
+
+- 测试脚本：`scripts/test-byteplus-image-size-matrix.mjs`
+- 测试结果：`AI-Video-Assistant_Project Planning/test/byteplus-image-size-test-results.md`
+- 原始结果：`AI-Video-Assistant_Project Planning/test/byteplus-image-size-test-raw.json`
+- `Seedream 4.5 / 5.0` 都不支持 `1K`，都支持 `2K / 4K`。
+- `Seedream 4.5` 不支持 `output_format` 参数，正式代码仅对 `Seedream 5.0` 传 `output_format=png`。
+- `2K` 稳定尺寸：`16:9 2848x1600`、`9:16 1600x2848`、`1:1 2048x2048`、`4:3 2304x1728`、`3:4 1728x2304`、`21:9 3136x1344`。
+- `4K` 稳定尺寸：`16:9 5504x3040`、`9:16 3040x5504`、`1:1 4096x4096`、`4:3 4704x3520`、`3:4 3520x4704`、`21:9 6240x2656`。
+- 本轮 `Seedream 5.0` 的部分 4K 非宽高比请求超过 10 分钟超时，详见测试表。前台 BytePlus 图片分辨率应保持只显示 `2K / 4K`，不要显示 `1K`。
+- 正式请求时，BytePlus 已知成功尺寸会把 `比例 + K数` 转成具体 `WIDTHxHEIGHT` 写入 `size`，例如 `21:9 / 2K -> 3136x1344`。未知组合回退传 `2K / 4K`，前端显示 `未知`。OpenRouter 仍走自己的 `image_config.aspect_ratio + image_config.image_size`。
 
 ## OpenRouter
 
@@ -192,19 +251,37 @@
 
 ## 敏感信息说明
 
-当前 `.env.local` 里已经写入敏感信息。
+当前 `.env.local` 和 `.env` 里已经写入敏感信息。
 
 这只是当前本地开发为了快速推进使用。
+
+2026-05-19 最新补充：
+
+1. `.env` 现在包含本地 PostgreSQL `DATABASE_URL`、`AUTH_SECRET` 和网易邮箱 SMTP 配置。
+2. 官方网易邮箱资料和 SMTP 授权码保存在 `AI-Video-Assistant_Project Planning\闪念官方邮箱.txt`，该规划目录仍不应直接提交。
+3. SMTP 发信通过 `nodemailer` 和 `src/lib/mailer.ts` 实现；配置项为 `SMTP_HOST / SMTP_PORT / SMTP_SECURE / SMTP_USER / SMTP_PASS / SMTP_FROM`。
+4. 本机 Docker Desktop / WSL2 已安装，PostgreSQL 容器服务名为 `postgres`，容器名为 `flashmuse-postgres`，配置见 `docker-compose.yml`。
+5. 如果登录时前端显示“请求失败”，优先检查 Docker Desktop 是否启动、`docker compose ps` 是否显示 `flashmuse-postgres` 正在运行、`DATABASE_URL` 是否指向 `localhost:5432/flashmuse`。
+6. 认证数据表：`User` 保存邮箱、密码 hash、昵称、手机、头像 URL、语言、提醒开关、自动保存开关、生成图片/视频计数；`Session` 保存登录态 token hash；`EmailVerificationCode` 保存验证码 hash；`UserWorkspaceState` 保存登录用户的工作台 JSON 状态。
+7. 2026-05-19 最新补充：用户中心资料不再放在 `UserWorkspaceState.state`，已拆成 `User` 表独立字段。接口 `/api/user-profile` 专门读写用户资料；`/api/auth/me` 也返回完整用户资料。`/api/workspace-state` 会兼容迁移旧 JSON 中的用户资料字段并清理。
+8. 2026-05-19 最新补充：头像上传使用 `/api/upload-avatar`，本地开发保存到 `public/generated/user_avatar/`，数据库 `User.avatarUrl` 只保存 URL。普通聊天/资产上传仍走 `/api/upload-image`，保存到 `public/generated/upload_image/`。正式上线如文件系统不持久化，应把 `/api/upload-avatar` 和其它生成文件链路改为对象存储/CDN。
+9. 2026-05-19 最新补充：忘记密码流程新增 `/api/auth/check-code` 和 `/api/auth/reset-password`。`check-code` 用于验证码输入满 6 位后先校验；`reset-password` 用当前登录用户邮箱验证码重设密码。
+10. 2026-05-19 最新补充：`/api/auth/send-code` 发验证码前会做邮箱域名收信能力校验，逻辑在 `src/lib/auth.ts` 的 `canEmailDomainReceiveMail`：先查 MX，失败再查 A/AAAA。明显不存在的域名返回 `邮箱或域名不存在，请检查后重新输入`，不调用 SMTP 发信。
+11. 2026-05-20 最新补充：后台管理员白名单通过 `ADMIN_EMAILS` 配置，`.env.example` 已新增该变量。本地 `.env` 已按用户要求写入管理员邮箱，但 `.env` 不提交，后续不要在公开提交或回复里展开完整环境变量。
+12. 2026-05-20 最新补充：后台登录不使用前台 `flashmuse-session`，而是使用独立 Cookie `flashmuse-admin-session`，只作用于 `/admin`，有效期 8 小时。实现位于 `src/lib/admin-auth.ts`，用 `AUTH_SECRET` 派生 HMAC 签名，不写入数据库 `Session` 表。
+13. 2026-05-20 最新补充：后台专用接口为 `/api/admin/send-code`、`/api/admin/verify-code`、`/api/admin/login-password`、`/api/admin/logout`。验证码仍复用 `EmailVerificationCode` 表和 SMTP 邮件发送能力，但接口会先校验 `ADMIN_EMAILS` 白名单。
 
 GitHub 同步规则：
 
 1. `.env.local` 不上传 GitHub
-2. `.env.example` 可以上传，只保留变量名和非敏感默认模型配置
-3. 换电脑后复制 `.env.example` 为 `.env.local`，再手动填写 `OPENROUTER_API_KEY`
-4. Seedance 独立聚合接口当前暂停，本地 MVP 阶段不填 Seedance 也可以继续使用 OpenRouter 对话、图片和视频链路
+2. `.env` 不上传 GitHub
+3. `.env.example` 可以上传，只保留变量名和非敏感默认模型配置
+4. 换电脑后复制 `.env.example` 为 `.env.local`，再手动填写 `OPENROUTER_API_KEY`
+5. 换电脑后还需要准备 `.env` 或等效环境变量，用于数据库、认证密钥、SMTP 和后台 `ADMIN_EMAILS`
+6. Seedance 独立聚合接口当前暂停，本地 MVP 阶段不填 Seedance 也可以继续使用 OpenRouter 对话、图片和视频链路
 
 后续建议：
 
 1. 本地继续用 `.env.local`
-2. 服务器改成真正的环境变量
-3. 不要把这些 key 暴露到前端
+2. 本地 `.env` 只用于 Prisma / Docker 开发环境，服务器改成真正的环境变量
+3. 不要把这些 key、邮箱密码或 SMTP 授权码暴露到前端

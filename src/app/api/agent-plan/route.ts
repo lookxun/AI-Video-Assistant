@@ -1,13 +1,18 @@
 import { NextResponse } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
+import { assertUserCanUseCredits, chargeCredits } from "@/lib/credits";
 import { planAgentTask } from "@/lib/openrouter";
 import { DEFAULT_CHAT_MODEL, isModelName } from "@/lib/models";
-import { toUserErrorMessage } from "@/lib/error-message";
+import { createCodedApiError } from "@/lib/error-code";
 
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as {
       model?: string;
       messages?: Array<{ role: "user" | "assistant"; content: string; images?: string[] }>;
+      conversationId?: string;
+      conversationTitle?: string;
+      requestId?: string;
     };
 
     const model = body.model || DEFAULT_CHAT_MODEL;
@@ -16,11 +21,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "参数不完整" }, { status: 400 });
     }
 
-    const result = await planAgentTask({ model, messages: body.messages });
+    const user = await getCurrentUser();
+    await assertUserCanUseCredits(user, "text");
 
-    return NextResponse.json(result);
+    const result = await planAgentTask({ model, messages: body.messages });
+    const credit = user ? await chargeCredits(user.id, "text", result.usage, { conversationId: body.conversationId, conversationTitle: body.conversationTitle, requestId: body.requestId ? `${body.requestId}:plan` : undefined, label: "Agent 规划", model }) : undefined;
+
+    return NextResponse.json({ ...result, credit });
   } catch (error) {
-    const message = toUserErrorMessage(error, "Agent 规划失败，请稍后再试。");
-    return NextResponse.json({ error: message }, { status: 500 });
+    const codedError = await createCodedApiError(error, "Agent 规划失败，请稍后再试。", "agent-plan request failed");
+    return NextResponse.json(codedError, { status: 500 });
   }
 }

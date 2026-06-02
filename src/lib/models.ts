@@ -18,7 +18,7 @@ export type ImageModelRule = {
   resolutions: ImageResolution[];
   defaultResolution: ImageResolution;
   modalities: string[];
-  dimensions: Partial<Record<ImageResolution, Record<ConcreteImageRatio, ImageDimensions>>>;
+  dimensions: Partial<Record<ImageResolution, Partial<Record<ConcreteImageRatio, ImageDimensions>>>>;
 };
 
 export type VideoModelRule = {
@@ -44,6 +44,16 @@ export const imageGenerationModels: GenerationModel[] = [
   { label: "GPT-5.4 Image 2", id: "openai/gpt-5.4-image-2" },
 ] as const;
 
+export const bytePlusImageGenerationModels: GenerationModel[] = [
+  { label: "Seedream 4.5", id: "byteplus:conversation-image.seedream-4-5" },
+  { label: "Seedream 5.0 Lite", id: "byteplus:conversation-image.seedream-5-0" },
+] as const;
+
+export const frontendImageGenerationModels: GenerationModel[] = [
+  ...bytePlusImageGenerationModels,
+  ...imageGenerationModels,
+] as const;
+
 export const videoGenerationModels: GenerationModel[] = [
   { label: "Seedance 2.0 Fast", id: "bytedance/seedance-2.0-fast", durations: ["5秒", "10秒", "15秒"] },
   { label: "Seedance 2.0", id: "bytedance/seedance-2.0", durations: ["5秒", "10秒", "15秒"] },
@@ -51,6 +61,13 @@ export const videoGenerationModels: GenerationModel[] = [
   { label: "Kling v3.0 Pro", id: "kwaivgi/kling-v3.0-pro", durations: ["5秒", "10秒", "15秒"] },
   { label: "Kling Video O1", id: "kwaivgi/kling-video-o1", durations: ["5秒", "10秒"] },
   { label: "Veo 3.1", id: "google/veo-3.1", durations: ["4秒", "6秒", "8秒"] },
+] as const;
+
+const bytePlusSeedanceDurations = ["4秒", "5秒", "6秒", "7秒", "8秒", "9秒", "10秒", "11秒", "12秒", "13秒", "14秒", "15秒"];
+
+export const bytePlusVideoGenerationModels: GenerationModel[] = [
+  { label: "Seedance 2.0 Fast", id: "byteplus:video.seedance-2-0-fast", durations: bytePlusSeedanceDurations },
+  { label: "Seedance 2.0", id: "byteplus:video.seedance-2-0", durations: bytePlusSeedanceDurations },
 ] as const;
 
 export const DEFAULT_IMAGE_MODEL = imageGenerationModels[0].id;
@@ -72,6 +89,29 @@ const seedream4KDimensions: Record<ConcreteImageRatio, ImageDimensions> = {
   "21:9": { width: 4096, height: 1756 },
   "4:3": { width: 4096, height: 3072 },
   "3:4": { width: 3072, height: 4096 },
+};
+
+const bytePlusSeedream2KDimensions: Record<ConcreteImageRatio, ImageDimensions> = {
+  "1:1": { width: 2048, height: 2048 },
+  "16:9": { width: 2848, height: 1600 },
+  "9:16": { width: 1600, height: 2848 },
+  "21:9": { width: 3136, height: 1344 },
+  "4:3": { width: 2304, height: 1728 },
+  "3:4": { width: 1728, height: 2304 },
+};
+
+const bytePlusSeedream4KDimensions: Record<ConcreteImageRatio, ImageDimensions> = {
+  "1:1": { width: 4096, height: 4096 },
+  "16:9": { width: 5504, height: 3040 },
+  "9:16": { width: 3040, height: 5504 },
+  "21:9": { width: 6240, height: 2656 },
+  "4:3": { width: 4704, height: 3520 },
+  "3:4": { width: 3520, height: 4704 },
+};
+
+const bytePlusSeedream50Dimensions = {
+  "2K": bytePlusSeedream2KDimensions,
+  "4K": bytePlusSeedream4KDimensions,
 };
 
 const gemini1KDimensions: Record<ConcreteImageRatio, ImageDimensions> = {
@@ -127,6 +167,24 @@ export const imageModelRules: Record<string, ImageModelRule> = {
     dimensions: {
       "2K": seedream2KDimensions,
       "4K": seedream4KDimensions,
+    },
+  },
+  "byteplus:conversation-image.seedream-4-5": {
+    resolutions: ["2K", "4K"],
+    defaultResolution: "2K",
+    modalities: ["image"],
+    dimensions: {
+      "2K": bytePlusSeedream2KDimensions,
+      "4K": bytePlusSeedream4KDimensions,
+    },
+  },
+  "byteplus:conversation-image.seedream-5-0": {
+    resolutions: ["2K", "4K"],
+    defaultResolution: "2K",
+    modalities: ["image"],
+    dimensions: {
+      "2K": bytePlusSeedream50Dimensions["2K"],
+      "4K": bytePlusSeedream50Dimensions["4K"],
     },
   },
   "google/gemini-3.1-flash-image-preview": {
@@ -259,7 +317,23 @@ export const videoModelRules: Record<string, VideoModelRule> = {
     sizes: seedanceFastVideoSizes,
     nonStandardSizes: seedanceFastNonStandardVideoSizes,
   },
+  "byteplus:video.seedance-2-0-fast": {
+    resolutions: ["480p", "720p"],
+    ratios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+    defaultResolution: "720p",
+    defaultRatio: "16:9",
+    sizes: seedanceFastVideoSizes,
+    nonStandardSizes: seedanceFastNonStandardVideoSizes,
+  },
   "bytedance/seedance-2.0": {
+    resolutions: ["480p", "720p", "1080p"],
+    ratios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+    defaultResolution: "720p",
+    defaultRatio: "16:9",
+    sizes: seedanceVideoSizes,
+    nonStandardSizes: seedanceNonStandardVideoSizes,
+  },
+  "byteplus:video.seedance-2-0": {
     resolutions: ["480p", "720p", "1080p"],
     ratios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
     defaultResolution: "720p",
@@ -396,7 +470,7 @@ export function getExpectedImageDimensions(modelId: string | undefined, resoluti
   const safeResolution = resolvedSettings.resolution;
   const safeRatio = resolvedSettings.ratio;
 
-  return rule.dimensions[safeResolution]?.[safeRatio] ?? rule.dimensions[rule.defaultResolution]?.[safeRatio] ?? { width: 0, height: 0 };
+  return rule.dimensions[safeResolution]?.[safeRatio] ?? { width: 0, height: 0 };
 }
 
 export function getImageQualityBadgeLabel(resolution?: string) {

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { classifyOpenRouterIntent } from "@/lib/openrouter";
 import { DEFAULT_CHAT_MODEL, isModelName } from "@/lib/models";
-import { toUserErrorMessage } from "@/lib/error-message";
+import { createCodedApiError } from "@/lib/error-code";
 
 export async function POST(request: Request) {
   try {
@@ -20,7 +20,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result);
   } catch (error) {
-    const message = toUserErrorMessage(error, "意图识别失败，请稍后再试。");
-    return NextResponse.json({ error: message }, { status: 500 });
+    const codedError = await createCodedApiError(error, "意图识别失败，请稍后再试。", "intent request failed");
+    return NextResponse.json(codedError, { status: 500 });
   }
 }

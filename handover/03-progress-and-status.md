@@ -2,6 +2,18 @@
 
 ## 当前已完成内容
 
+### 2026-06-01 本轮最新更新：后台生成记录和积分扣费开关
+
+- 后台积分管理 `选择积分消耗项` 已新增 `反推/优化提示词` 开关。四个开关已做实：`对话/规划` 控制 Agent/对话模型扣分，`图片` 控制所有图片生成扣分，`视频` 控制所有视频生成扣分，`反推/优化提示词` 控制所有反推和优化提示词扣分。关闭开关时不扣对应积分，但仍写 0 分流水；后台明细显示 `0（扣分关闭）`。
+- 数据库 `CreditSetting` 新增 `chargePromptTool` 字段，迁移为 `20260601120000_credit_prompt_tool_switch`。已运行 `npx prisma generate` 和 `npx prisma migrate deploy`。
+- 后台 `生成记录` 页面已做实，新增 `src/app/admin/admin-records-panel.tsx`。顶部卡片显示历史对话、图片生成、视频生成、上传图片、上传文件总数。主表显示 ID、用户和五类数量，且按五类记录最新时间排序。
+- 生成记录展开区现在四列：第一列为 `对话流图片 / 对话流视频 / 资产库图片 / 历史对话 / 工作区保存`；第二列为 `对话流生成图片列表 / 对话流生成视频列表 / 资产库生成图片列表`；第三列为 `对话流上传图片列表 / 对话流上传文件列表 / 资产库上传图片列表`；第四列复用积分管理里的三类消耗明细。
+- `对话流图片` 包含对话流生成图片和对话流上传图片；`资产库图片` 包含资产库生成图片和资产库上传图片。用户管理里的对应文案也已同步。`对话流图片` 和 `资产库图片` 打开的是大图预览弹窗，右侧缩略图不再悬停显示全图。
+- 第二列三个生成列表已合并为同一个 `生成列表` 弹窗，左侧三分类，点哪个按钮默认定位哪个分类。第三列三个上传列表已合并为同一个 `上传记录` 弹窗，左侧三分类，点哪个按钮默认定位哪个分类。
+- 中间两列列表弹窗的表格列已从 `生成内容 / 积分扣除 / 消耗美元 / 折算人民币` 改为 `生成内容 / 积分扣除 / 复制提示词`。有提示词才显示复制按钮；生成提示词和反推提示词都可复制。
+- 本轮重新确认后台记录准则：生成记录必须以 workspace 真实记录为准，用户生成和上传过的内容都要显示；扣分异常只影响扣分显示，后续需要显示为 `0（扣分异常）`，不能影响记录是否出现。旧数据不强行追平，只保证后续新记录遵守。
+- 本轮验证：多次 `npm run lint` 通过，仅剩原有两个 warning；多次 `npm run build` 通过。
+
 ### 1. 项目初始化
 
 目录：`E:\project\AI-Video-Assistant`
@@ -155,6 +167,9 @@
 - 本轮最新更新：右侧预览信息区文件名下显示参数，分辨率使用 `CompactResolutionIcon`；提示词标题统一为“图片提示词”，右侧黑色“使用提示词”按钮会填入输入框并关闭预览页
 - 本轮最新更新：当前对话媒体超过 `2` 个时，左侧右边出现浮层缩略图列表，`50x50`、`5px` 圆角、`2px` 描边，选中蓝色 `#367cee`；打开预览会自动定位到当前缩略图，列表能完整显示时不显示上下按钮，需要滚动时才显示上下按钮，滚动条隐藏
 - 本轮最新更新：已把这些代码提交并推送到 GitHub `main`，提交 `2094e9f Update media generation workspace`；换电脑时按 `00-README.md` 执行 `git clone`、`npm install`、配置 `.env.local`、`npm run dev`
+- 2026-05-26 后续更新：角色图片生成界面右侧继续细调为竖版输入框式 UI。当前顶部控件为比例下拉、风格下拉、模型下拉和 K 数下拉；参数行只显示比例、尺寸和分辨率图标；提示词输入框和生成按钮按用户要求调整了边距、高度、圆角、聚焦描边和按钮位置。
+- 2026-05-26 后续更新：角色生成界面默认独立为 `GPT-5.4 Image 2` + `2K`，K 数按该界面当前模型支持项动态显示。该设置不再跟随对话流图片生成模型当前选择。
+- 2026-05-26 后续更新：资产库预览已加 `previewMeta` 回填，优先通过资产的 `sessionId / messageId / url` 反查原 assistant 消息，并标准化 URL 后匹配。旧资产如果历史消息里没有对应生成消息，仍可能没有参数。
 - 2026-05-11 更新：本地 OpenRouter API key 已改用 `E:\project\【1】Api\api key.txt` 中的公用 key，项目中不再使用原个人 key；`.env.local` 仍不上传 GitHub。
 - 2026-05-11 更新：图片 / 视频任务并发规则已升级。多批任务之间并发；单批图片内部也并发，`1-4` 张同时发起单图请求；哪张先完成哪张先显示，未完成位置继续等待，失败位置显示失败卡。
 - 2026-05-11 更新：图片结果支持部分成功和部分失败。成功图、等待卡、失败卡可在同一批里混排；如果部分失败，红字显示失败数量，其它已完成图片保留。
@@ -341,7 +356,732 @@
 
 ## 当前待完成内容
 
+## 2026-06-02 本轮继续：BytePlus 开关落实、费用计算和前端显示修正
+
+本轮完成：
+
+1. 后台系统设置里的 `OpenRouter API / BytePlus API` 输入框临时改成明文显示，方便核对 Key。只改 UI 显示，不改保存和调用逻辑。
+2. 修复视频等待卡尺寸：专业视频成功/等待/失败卡固定 `640x360`；Agent 自动视频仍保留两列紧凑布局。图片生成卡不受影响。
+3. 去掉对话流主视频播放器的 `muted`，模型返回有声音时可以播放；缩略图和首页背景仍静音。
+4. `Seedream 5.0` 显示名统一改为 `Seedream 5.0 Lite`，模型 ID 和 Endpoint 不变。
+5. `Seedream 5.0 Lite` 当前 `output_format` 按用户测试要求从 `png` 改为 `jpg` 后又改为 `jpeg`。如果后续 `jpeg` 仍返回参数不支持，应回退为 `png` 或不传该参数。
+6. `Seedream 5.0 Lite` 尺寸表已和 `Seedream 4.5` 对齐，`2K / 4K` 六个比例全部传具体 px，不再显示未知。
+7. 资产库图片生成开关已真正接入前端和服务端。`/api/model-availability` 返回 `assetImageModels`；资产生成页模型菜单按后台 `资产库图片生成` 开关过滤；`/api/image` 会按 `creditSource` 区分对话流图片开关和资产库图片开关。
+8. BytePlus 资产库图片生成会使用 `asset-image.seedream-4-5 / asset-image.seedream-5-0` 的 Endpoint 配置；对话流图片继续使用 `conversation-image.*` 配置。
+9. 后台 BytePlus 文本模型下拉在该行 BytePlus 启用时会灰掉不可点，需先关闭 BytePlus 才能切换下拉模型。
+10. 后台 `Agent 自动生成策略` 里 `高质图片` 右侧 `Seedream 5.0 Lite` 已去除，只保留左侧 `GPT-5.4 Image 2`。
+11. 前端所有图片模型下拉顺序统一：`Seedream 4.5` 第一、`Seedream 5.0 Lite` 第二，其它模型排后面；对话流图片和资产库图片都走同一排序。
+12. 后台明细模型显示已识别 BytePlus 图片/视频模型，不再显示 `byteplus:...` 原始 ID。
+13. 取消模型信息查询的前端拼接回答。用户问当前模型时走正常 Agent 回答，不再由前端生成带 AI 图标的假助手消息。
+14. BytePlus 费用计算已接入：文本按 token 单价，图片按成功输出张数，视频按 `completion_tokens`。前端和后台展示结构不改，仍沿用现有 usage / usd / cny / credits 字段。
+15. BytePlus 文本价格：`seed-2-0-lite-260428` 输入 `$0.25/M`、输出 `$2.00/M`；`seed-2-0-pro-260328` 输入 `$0.50/M`、输出 `$3.00/M`；`glm-4-7-251222` 输入 `$0.60/M`、输出 `$2.20/M`。`seed-2-0-lite/pro` 超过 `128K` prompt tokens 按第二档翻倍。
+16. BytePlus 图片价格：`seedream-4-5-251128` 为 `$0.04 / 张`，`seedream-5-0-260128` 为 `$0.035 / 张`。
+17. BytePlus 视频价格：`dreamina-seedance-2-0-fast-260128` 为 `$5.60/M tokens`；`dreamina-seedance-2-0-260128` 为 `480p/720p $7.00/M tokens`、`1080p $7.70/M tokens`。
+18. OpenRouter 计费逻辑未改，供应商隔离继续保持。
+19. 本轮多次 `npm run lint` 通过，仅剩 `chat-workbench.tsx` 原有两个 warning；多次 `npm run build` 通过。
+
+后续待做：
+
+1. 如果用户继续使用 `Seedream 5.0 Lite + output_format=jpeg` 测试失败，优先回退为 `png` 或不传 `output_format`。
+2. 后台 `Agent 自动生成策略` 的媒体模型开关仍需后续单独接入执行策略，目前 Agent 自动媒体模型仍主要由代码策略和当前前台选择决定。
+3. 继续测试 BytePlus `Seedance 2.0 Fast / Seedance 2.0` 的比例、分辨率和秒数能力。
+
+主要文件：
+
+- `src/lib/openrouter.ts`
+- `src/app/api/image/route.ts`
+- `src/app/api/video/route.ts`
+- `src/lib/openrouter-video.ts`
+- `src/lib/system-settings.ts`
+- `src/lib/models.ts`
+- `src/app/api/model-availability/route.ts`
+- `src/app/admin/admin-system-settings-panel.tsx`
+- `src/app/admin/page.tsx`
+- `src/components/chat-workbench.tsx`
+
+## 2026-06-02 本轮追加：BytePlus 图片/视频真实接口、前台模型显示和图片尺寸测试
+
+本轮完成：
+
+0. 本轮后续继续补齐 BytePlus 图片参数和调用策略。供应商隔离规则已确认：OpenRouter 稳定逻辑不能被 BytePlus 改动影响；BytePlus 能复用 OpenRouter 规则则复用，不能复用时必须单独拆规则。
+
+1. 后台系统设置顶部 API 输入区宽度已调整。`OpenRouter API / BytePlus API` 所在区域改为 `min-w-[860px]`，内部宽度 `960px`，低于下方模型列表 `min-w-[1180px]`。
+2. 新增 `src/components/byteplus-icon.tsx`。BytePlus 图标取用户提供 SVG 的前置图形，不带文字。后台 BytePlus 模型列和前台 BytePlus 模型按钮都使用该图标，颜色保持和原模型图标一致的灰色。
+3. 修复 `.env.local` JSON 配置解析问题。`MODEL_PROVIDER_PREFERENCES` 和 `BYTEPLUS_MODEL_SELECTIONS` 如果被 `JSON.stringify()` 包了一层引号，现在能正确反解析，解决 BytePlus 对话模型下拉保存后弹回默认值的问题。
+4. 前台 `/api/model-availability` 已改为同时返回启用的 OpenRouter 和 BytePlus 图片/视频模型。新增 BytePlus 前台模型 ID：`byteplus:conversation-image.seedream-4-5`、`byteplus:conversation-image.seedream-5-0`、`byteplus:video.seedance-2-0-fast`、`byteplus:video.seedance-2-0`。工作台模型下拉会显示后台启用的 BytePlus 模型，并以 BytePlus 图标区分。`byteplus:video.seedance-2-0` 也按金色模型显示。
+5. BytePlus 图片生成已接真实 API。接口为 `POST https://ark.ap-southeast.bytepluses.com/api/v3/images/generations`。默认使用模型名 `seedream-4-5-251128 / seedream-5-0-260128`；后台 `解除限制` 开关打开后使用对应 `ep-...` Endpoint ID。返回 `data[].url` 会保存到本地，`usage.output_tokens / total_tokens` 会写入 usage。
+6. BytePlus 图片参考图规则已按文档接入。无参考图不传 `image`；一张参考图传字符串；多张参考图传数组。官方 `sequential_image_generation: "auto" + max_images` 只表示最多返回几张，不保证用户选几张就返回几张；因此当前对话流专业图片模式已恢复为按用户选择数量并发发起多个单图请求，每次 `/api/image` 传 `count: 1`。
+7. BytePlus 图片流式返回暂未接。已记录格式：`stream: true` 后 SSE 事件 `image_generation.partial_succeeded` 返回单张图片 URL，`image_generation.completed` 返回 usage，最后 `data: [DONE]`。后续如果要一张张显示，应基于该流式格式重新设计 `/api/image` 推送。
+8. BytePlus 视频生成已接创建和查询任务。创建：`POST https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks`；查询：`GET https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/{id}`。`Seedance 2.0 Fast` 使用 `dreamina-seedance-2-0-fast-260128`，`Seedance 2.0` 使用 `dreamina-seedance-2-0-260128`。查询成功读取 `content.video_url`，保存到本地并写视频扣费 metadata。
+9. BytePlus 视频参考图已按文档使用 `role: "reference_image"`。当前只接文字和图片参考，未接参考视频、参考音频、首尾帧严格模式或 `return_last_frame`。
+10. 新增脚本 `scripts/test-byteplus-image-size-matrix.mjs`，结果写入 `AI-Video-Assistant_Project Planning/test/byteplus-image-size-test-results.md` 和 `byteplus-image-size-test-raw.json`。测试覆盖两个 BytePlus 图片模型、六个提示比例和 `1K / 2K / 4K`。
+11. BytePlus 图片尺寸实测结论：`Seedream 4.5 / 5.0` 都不支持 `1K`；两者支持 `2K / 4K`。`Seedream 4.5` 不支持 `output_format`，正式代码已改为只有 `Seedream 5.0` 传 `output_format=png`。`2K` 稳定尺寸为 `16:9 2848x1600`、`9:16 1600x2848`、`1:1 2048x2048`、`4:3 2304x1728`、`3:4 1728x2304`、`21:9 3136x1344`。`4K` 稳定尺寸为 `16:9 5504x3040`、`9:16 3040x5504`、`1:1 4096x4096`、`4:3 4704x3520`、`3:4 3520x4704`、`21:9 6240x2656`；但 `Seedream 5.0` 的部分 4K 非宽高比请求本轮超时。
+12. BytePlus 图片 `size` 字段已改为独立方案：已知成功尺寸传具体像素 `WIDTHxHEIGHT`，例如 `21:9 / 2K -> 3136x1344`；未知/超时组合回退传 `2K / 4K` 并在前端尺寸位置显示 `未知`。不额外给用户提示词加比例前缀。
+13. 已新增后台 `BytePlus API` 行右侧 `解除限制` 开关，写入 `.env.local` 的 `BYTEPLUS_UNLOCK_LIMITS`。关闭时请求使用模型名；打开时请求使用 `BYTEPLUS_MODEL_SELECTIONS` 中的 Endpoint ID。显示名称不变。
+14. 已保留 BytePlus 图片耗时日志 `[image-generation] BytePlus timing`，用于区分 `providerMs` 生成/返回耗时、`saveMs` 远程图片 URL 下载保存耗时、`dimensionsMs` 读尺寸耗时。d26 最近测试中模型返回多为 `7-15秒`，下载保存可能 `40-75秒`，说明慢经常卡在远程图片下载。
+15. 本轮验证：多次 `npm run lint` 通过，仅剩 `chat-workbench.tsx` 原有两个 warning；多次 `npm run build` 通过。
+
+后续待做：
+
+1. 继续测试 BytePlus `Seedance 2.0 Fast / Seedance 2.0` 的比例、分辨率、秒数能力，并把测试结果写入 `AI-Video-Assistant_Project Planning/test`。
+2. 根据 BytePlus 视频实测结果调整 `src/lib/models.ts` 中 BytePlus 视频模型能力表。
+3. 继续观察 BytePlus `解除限制` 开关打开后，图片/视频用 Endpoint ID 是否解除尺寸或调用限制。
+4. 如果用户要求 BytePlus 图片官方单请求流式，再单独接 `stream: true` SSE；但普通“生成 N 张”当前不要用官方 `max_images` 批量模式，因为它不保证返回 N 张。
+
+主要文件：
+
+- `src/components/byteplus-icon.tsx`
+- `src/app/admin/admin-system-settings-panel.tsx`
+- `src/app/api/model-availability/route.ts`
+- `src/app/api/image/route.ts`
+- `src/app/api/video/route.ts`
+- `src/lib/models.ts`
+- `src/lib/openrouter.ts`
+- `src/lib/openrouter-video.ts`
+- `src/lib/system-settings.ts`
+- `src/components/chat-workbench.tsx`
+- `scripts/test-byteplus-image-size-matrix.mjs`
+
+## 2026-06-01 本轮追加：后台系统设置、BytePlus 接入和模型开关
+
+本轮完成：
+
+1. 后台 `系统设置` 页面已从占位继续做实。顶部现在是左右并排的 `OpenRouter API` 和 `BytePlus API` 输入框，二者宽度和上下位置对齐。两个输入框都遵守同一规则：关闭开关时可编辑，打开开关时保存并启用当前 Key；状态 `已启用 / 已关闭` 显示在输入框右侧内部。
+2. `BytePlus API` 已接入后台配置。Region 固定为 `ap-southeast-1`，界面不再展示 Region 下拉。配置写入 `.env.local`：`BYTEPLUS_API_KEY / BYTEPLUS_API_KEY_ENABLED / BYTEPLUS_REGION / MODEL_PROVIDER_PREFERENCES / BYTEPLUS_MODEL_SELECTIONS`。后续如果要改 Region，再改 `src/lib/system-settings.ts` 和后台 UI。
+3. BytePlus 的 Key 和 Endpoint ID 来源是 `E:\project\【1】Api key\Byteplus\Byteplus.md`。其中 Data Plane Key 是 `ark-...`，Endpoint ID 包括 `Seed 2.0 Lite / Pro / GLM-4.7 / Seedream 4.5 / Seedream 5.0 / Seedance 2.0 Fast / Seedance 2.0` 等。
+4. 后台模型使用表已改为四列：`使用位置 / OpenRouter / 说明 / BytePlus`。OpenRouter 列不在每个模型框内重复显示 OpenRouter；`普通 / 高级 / 优先 / 第二 / 第三 / 默认图片 / 高质图片 / 快速图片 / 默认视频 / 高质视频 / 4K视频` 等说明统一放在中间说明列。左右无对应模型时显示空灰底，保证两列对齐。
+5. OpenRouter 左列所有模型都加了开关。BytePlus 右列所有模型也加了图标和开关。左右两边有对应关系时互斥：打开 OpenRouter 会关闭同一行 BytePlus，打开 BytePlus 会关闭同一行 OpenRouter。`Seedream 5.0` 是 BytePlus 单独新增模型，左侧 OpenRouter 为空灰底；打开它就是额外启用该模型。
+6. BytePlus 对话模型下拉只保留三个选项：`Seed 2.0 Lite / Seed 2.0 Pro / GLM-4.7`。`对话 / Agent 规划 / 意图识别` 的 `普通 / 高级` 都有 BytePlus 对话模型下拉；`反推提示词 / 优化提示词` 的 `优先 / 第二 / 第三` 也都有 BytePlus 对话模型下拉。选择 BytePlus 后，文本路由会用对应 Endpoint ID。
+7. BytePlus 图片/视频不再用下拉。`Seedream 4.5` 对应 OpenRouter `Seedream 4.5`；`Seedream 5.0` 单独显示；`Seedance 2.0 Fast / Seedance 2.0` 分别对应 OpenRouter 同名视频模型。`Agent 自动生成策略` 里 `高质图片` 左侧 `GPT-5.4 Image 2` 和右侧 `Seedream 5.0` 已互斥。
+8. 文本类 BytePlus 路由已接入 `src/lib/openrouter.ts`。`sendToOpenRouter()`、`planAgentTask()`、`classifyOpenRouterIntent()` 会按后台 `MODEL_PROVIDER_PREFERENCES` 判断走 OpenRouter 还是 BytePlus。选择 BytePlus 时请求 `https://ark.ap-southeast.bytepluses.com/api/v3/chat/completions`，Header 为 `Authorization: Bearer <BYTEPLUS_API_KEY>`，`model` 使用后台选择的 Endpoint ID。
+9. 前端模型可用性接口新增 `/api/model-availability`。工作台加载后会读取可用图片/视频模型，关闭的 OpenRouter 模型不会显示在对话流图片/视频模型下拉里。如果一类模型全关，下拉显示 `暂无可用模型`；用户发送时对话流插入红字系统消息 `连接不到模型，请联系管理员！`。
+10. `/api/image` 和 `/api/video` 服务端也做了模型开关兜底校验，关闭模型不能绕过前端调用。注意：目前 BytePlus 图片/视频只完成后台配置和开关展示，实际生成调用仍未切到 BytePlus 图片/视频专用 API；后续需要继续接 BytePlus Image generation API 和 Video generation API 的真实请求/轮询/保存/扣费链路。
+11. 本轮多次 `npm run lint` 通过，只剩 `chat-workbench.tsx` 原有两个 warning；多次 `npm run build` 通过。
+
+主要文件：
+
+- `src/app/admin/admin-system-settings-panel.tsx`
+- `src/app/admin/api/system-settings/route.ts`
+- `src/app/api/model-availability/route.ts`
+- `src/app/api/image/route.ts`
+- `src/app/api/video/route.ts`
+- `src/lib/system-settings.ts`
+- `src/lib/openrouter.ts`
+- `src/components/chat-workbench.tsx`
+
+## 2026-06-01 本轮追加：后台积分明细规则收敛、反推/优化闭环、删除/上传记录
+
+本轮完成：
+
+1. 后台积分明细顶部汇总已重做。`对话流消耗积分详细` 显示 `生成图片 / 生成视频 / 上传图片 / 上传文件`；`资产库消耗积分详细` 显示 `生成图片 / 生成视频 / 上传图片`；`反推提示词` 显示 `反推图片`；`优化提示词` 显示 `优化次数 / 消耗Token`。
+2. `对话流消耗积分详细` 已加入 0 分上传记录。对话流上传图片显示缩略图和名称，参数为 `对话流上传`；上传文件显示文件占位和文件名，参数为 `对话流上传文件`。上传类行的积分、美元、人民币都显示 `--`。
+3. `资产库消耗积分详细` 已加入 0 分资产库上传图记录。按角色/场景/分镜分类显示图片和名称，参数为 `资产库上传`，积分、美元、人民币显示 `--`。
+4. 后台所有图片缩略图已支持悬停大图预览，新增 `src/app/admin/admin-hover-image-preview.tsx`。预览层按浏览器尺寸和鼠标位置自动避让边界，尽量大且不出界。
+5. 前端删除图片、资产或对话后，后台不删除积分流水。后台明细保留记录，文件名/图片名照常显示，后面追加红字 `用户已删除 删除时间`，参数行照常显示。资产回收站使用真实 `deletedAt`；对话流单图删除没有独立删除时间时用扣费/生成时间兜底。
+6. 用户管理也同步删除态。历史对话、对话流生成图片/视频、资产库生成图片如果用户已删除，仍显示记录并标红 `用户已删除`，缩略图底部也显示 `用户已删除`。
+7. 修复资产恢复逻辑。删除时写 `previousType`；恢复时优先恢复原分类。旧资产没有 `previousType` 时按 `systemName` 兜底。已修复本机 `角色57` 从 `other` 回到 `character_image`。
+8. 资产生成任务状态持久化。`assetGenerateJobs` 写入 workspace，刷新后失败卡恢复；刷新中的生成任务会恢复为失败卡。删除某个成功生成资产时，同 URL 的成功任务卡会同步清除，避免角色页残留。
+9. 图片生成多返图策略已改。每个子请求只返回一张最匹配当前参数比例/尺寸的图片；模型额外返回图不再全部展示。多返图选择会写后端日志。
+10. 图片生成无图错误已加强。OpenRouter 返回成功但没有图片时，后端记录 `message.content / refusal / finish_reason / native_finish_reason / responseId / model`，前端生成页显示真实原因；资产库外部失败卡不显示原因。
+11. 反推提示词规则重做。只有上传图显示反推按钮；生成图不显示。成功后不再显示反推按钮，改为正常提示词、复制、使用提示词。每张上传图只能成功反推一次。三轮模型都失败时写 0 分失败流水并前端红字 `服务器繁忙，请稍候再试！`。
+12. 反推模型兜底顺序固定为 `openai/gpt-5.5 -> openai/gpt-5.4 -> bytedance-seed/seed-2.0-lite`。前两轮失败不写流水，全部失败才写一条失败流水；成功只显示一条成功记录。
+13. 优化提示词规则做实。优化可以多次成功，每次成功扣分并写 `outputPrompt`；每次模型尝试失败写 0 分失败流水。前端优化失败不弹提示，只结束 loading；后台显示成功提示词或失败原因。
+14. 反推/优化明细不再猜旧数据。反推只显示有精确 `mediaUrls` 且有 `outputPrompt` 或失败原因的新数据；优化只显示有 `outputPrompt` 的成功记录或有失败原因的失败记录。旧的缺字段流水不再显示。
+15. 本轮多次 `npm run build` 通过，多次 `npm run lint` 通过；当前仅剩 `chat-workbench.tsx` 原有两个 warning。
+
+主要文件：
+
+- `src/app/admin/page.tsx`
+- `src/app/admin/admin-credits-panel.tsx`
+- `src/app/admin/admin-users-panel.tsx`
+- `src/app/admin/admin-hover-image-preview.tsx`
+- `src/app/api/chat/route.ts`
+- `src/app/api/image/route.ts`
+- `src/lib/credits.ts`
+- `src/lib/openrouter.ts`
+- `src/lib/error-message.ts`
+- `src/components/chat-workbench.tsx`
+
+## 2026-06-01 本轮追加：后台积分明细弹窗、媒体绑定和额外返回图展示
+
+本轮完成：
+
+1. 后台 `对话流消耗积分详细` 弹窗继续完善。左侧对话名称前显示 `【d编号】`；右侧改为表格，列为 `生成内容 / 积分扣除 / 消耗美元 / 折算人民币`。表格上方显示图片数量、视频数量和右侧居右的 `积分扣除` 汇总。
+2. 对话流明细中的图片/视频名称改为优先显示系统名；如果用户改名，显示 `系统名 / 用户改名`。图片失败行左侧灰框显示 `生成失败`，右侧用红字显示真实失败原因，下一行只显示时间。成功媒体参数行按前端同款格式显示：`模型 | 比例 | 尺寸 分辨率 | 时长`。
+3. 对话流明细修复旧流水误挂问题。旧流水如果是明确 `requestId:image:序号` 但找不到对应 URL，不再退回挂到同批第一张图，避免一张图显示多笔扣费。
+4. `/api/image` 扣费 metadata 已加强。现在写入 `mediaUrls / allMediaUrls / extraMediaUrls / requestedImageCount / returnedImageCount / billableImageCount / delivered`。对话流图片生成不丢弃模型额外返回图，全部显示并分页；额外不计费图片显示 `-0 / $0.0000 / ¥0.00`。资产库生成只保留最匹配当前比例/尺寸的一张，额外图不进入资产库也不显示。
+5. 后台 `资产库消耗积分详细` 已做实。左侧分类固定为 `角色 / 场景 / 分镜`，右侧同款表格。新数据优先按流水 `metadata.mediaUrls` 显示图片；旧数据没有 URL 时，按同用户、同分类、生成时间最接近的资产图兜底。参数从资产 `previewMeta` 读取。
+6. 后台 `反推/优化提示词消耗积分详细` 已做实。左侧分类为 `反推提示词 / 优化提示词`。反推提示词显示图片；新数据按 `metadata.mediaUrls` 精确匹配，旧数据按时间就近匹配且避免同一弹窗内重复使用同一张图。
+7. `/api/chat` 扣费 metadata 已加强。现在会写入 `outputPrompt`；反推提示词请求会带 `mediaUrls`；优化提示词请求会带 `originalPrompt`。后台反推/优化明细主标题优先显示输出提示词，旧反推数据可用图片 `sourcePrompt` 兜底。
+8. 后台反推/优化明细 UI 已调整。长提示词在当前列宽内换行，缩略图保持现有大小并与提示词顶部对齐；下方信息行前面显示使用模型名称，后面显示时间。
+9. 本轮多次 `npm run build` 通过，多次 `npm run lint` 通过；仍只有原有两个 warning。
+
+主要文件：
+
+- `src/app/admin/page.tsx`
+- `src/app/admin/admin-credits-panel.tsx`
+- `src/app/admin/admin-users-panel.tsx`
+- `src/app/api/image/route.ts`
+- `src/app/api/chat/route.ts`
+- `src/components/chat-workbench.tsx`
+
+## 2026-05-29 本轮追加：对话流媒体命名、资产库预览一致性和 d22 修复
+
+本轮完成：
+
+1. 工作台会话新增稳定编号 `conversationCode`，格式为 `d1 / d2 / d3...`。旧会话按 `updatedAt` 从早到晚补编号；删除会话后编号不复用。工作区状态新增 `nextConversationNumber`，用于后续新会话继续分配编号。
+2. 对话流模型生成图片/视频新增消息级永久系统名 `mediaSystemNames`。图片命名为 `image_序号_d编号`，例如 `image_1_d22`；视频命名为 `video_序号_d编号`。同一对话内按已有最大编号继续递增，重试失败图也先扫描已有编号并跳过，避免重复。
+3. 资产新增 `systemName`。模型生成资产初始显示名 `name` 等于 `systemName`；用户后续重命名只改 `name`，`systemName` 保留给后台和排查。资产库生成继续使用中文系统名 `角色1 / 场景1 / 分镜1`，并写入 `systemName`。
+4. 上传图不使用 `image_... / video_...` 编号。对话流上传图和资产库上传图都保留上传时名字；预览参数位置显示 `对话流上传` 或 `资产库上传`，提示词区显示 `暂无提示词`，显示蓝色 `反推提示词` 按钮。
+5. 预览数据源已收敛。对话流和资产库点开同一张图片/视频时，名称、参数和提示词必须一致。名称优先读资产库当前记录，没有资产记录才读 `mediaSystemNames`；提示词和参数统一通过 URL 回查对话流 assistant 消息，不再优先读资产对象里可能过期的 `sourcePrompt / previewMeta`。
+6. 图片预览缩略图列表改为按 `imageResultSlots` 顺序构建，避免 `message.images` 顺序和对话流卡片顺序不一致导致切图后名称、提示词或参数错位。
+7. 图片结果分页规则改为只对 `Gemini 3 Pro Image Preview` 生效。其它图片模型不显示参数分页。Gemini 3 Pro 如果多返回图，第一页先显示用户选择数量内的图片，额外多出的第 5 张及以后进入后续页。图片区域右下角旧分页已移除，只保留参数行分页。
+8. 临时修复本地用户 `ID_779117` 的 `d22` 会话：数据库里该会话原先只保存 1 张图，但 `public/generated/images` 最后 4 张是同一批生成图。已补回 d22 的 `images`、`imageResultSlots`、`mediaSystemNames` 和资产记录，命名为 `image_1_d22` 到 `image_4_d22`。
+9. 当前验证：多次 `npm run lint` 通过，仅剩原有两个 warning；`npm run build` 多次通过。中途出现过 Google Fonts `Geist Mono` 拉取失败导致 build 失败，这是网络问题，不是代码错误。
+
+主要文件：
+
+- `src/components/chat-workbench.tsx`
+
+## 2026-05-29 本轮继续：后台用户管理、积分管理和弹窗细化
+
+本轮完成：
+
+1. 后台用户管理媒体预览弹窗已调整。`对话流生成图片 / 对话流生成视频 / 资产库生成图片` 三类弹窗左侧大图区域下方改为先显示参数，再显示完整提示词；提示词不再截断，内容过长时走弹窗内滚动。
+2. 后台资产库生成图片预览中，无生成参数的上传图参数位置显示 `资产库上传`。如果上传图的提示词是反推出来的，提示词前增加蓝色描边标识 `反推提示词`，带 `RiQuillPenAiLine` 图标。
+3. 新增通用 `useBodyScrollLock`。打开弹窗时锁住页面 `body` 滚动，并给主要遮罩加 `overscroll-contain`，避免鼠标滚轮影响弹窗背后的页面。已接入首页登录抽屉、工作台资产上传/资产生成/用户中心/重命名/媒体预览/文档预览、后台用户管理历史/媒体弹窗、后台积分调积分浮层。
+4. 后台积分管理用户行支持多项同时展开，和用户管理一致，不再互斥。用户管理和积分管理的展开三角都统一移动到列表最前面，后面列宽让出小列给三角。
+5. 后台积分管理表头 `最后活跃时间` 改为 `最后积分变动时间`。该时间按用户最新一条 `CreditLedger` 计算，包含模型消耗、注册送积分、后台加分、后台减分以及后续充值/活动等所有积分流水变动。
+6. 后台用户管理的 `最后登录时间` 显示和排序已修正。显示取 `User.lastLoginAt` 与最新 `Session.lastSeenAt` 中更晚的值；排序改为 `lastLoginAt / Session.lastSeenAt / workspace.updatedAt / createdAt` 的最大时间，确保最新用户排最前。
+7. 后台积分管理展开区改为三列灰底横条。第一列显示 `当前积分 / 已赠送积分 / - 注册送积分 / - 后台调整赠送积分`；第二列显示 `已消耗积分 / - 对话流消耗积分详细 / - 资产库消耗积分详细 / - 反推/优化提示词消耗积分详细`；第三列显示 `消耗Token / 消耗美元 / 折算人民币`。
+8. 后台积分管理展开区中，明细前统一用加粗 `-` 标识层级；可点击文字保留下划线，但 `-` 本身不加下划线。展开区所有数值使用普通颜色，不再把消耗明细标红，主表仍按原规则显示红/绿。
+9. 后台积分数据新增拆分：`signup` 汇总为 `注册送积分`，`admin_adjust` 汇总为 `后台调整赠送积分`，两者共同组成 `已赠送积分` 净值。对话流、资产库生成、反推/优化提示词三类消耗也分别聚合显示。
+10. `对话流消耗积分详细` 已做成真实弹窗。弹窗大小和左侧列表结构与用户管理里的历史对话弹窗一致；左侧按当前工作区 `sessions` 顺序和标题显示，只展示有对话流积分流水的会话。旧本地历史或未接积分流水时期的对话不会显示，这是正常现象。
+11. `对话流消耗积分详细` 右侧列表规则：第一条显示 `对话积分` 汇总，第二条显示 `规划积分` 汇总，下面逐条显示该对话流里的图片/视频积分记录。数据来自 `CreditLedger`，并排除资产库生成、反推提示词、优化提示词来源。
+12. 对话流积分明细右侧的图片/视频记录已尝试直接显示缩略图。匹配逻辑会按工作区 assistant 消息的 `requestId` 生成索引，支持精确 `requestId:image:序号 / requestId:video:序号`、基础 `requestId`、`requestId:image / requestId:video` 兜底。部分旧数据如果没有足够 `requestId` 或媒体 URL，仍可能只能显示文字。
+13. 对话流积分明细已补失败图片占位。对于工作区消息里有 `failedImageCount` / `imageResultSlots` 的多图部分失败任务，失败项会显示同缩略图尺寸的灰框，中间写 `生成失败`，扣分显示真实值，失败项为 `0`。
+14. 当前已确认所有新的对话流扣费接口都会带 `conversationId` 和 `conversationTitle`：`/api/agent-plan`、`/api/chat`、`/api/image`、`/api/video`。以后新产生的对话流积分应能匹配到当前工作区历史对话；不显示的主要是旧数据或非对话流来源。
+15. 本轮验证：多次 `npm run lint` 通过，无错误；仍有项目原有 `chat-workbench.tsx` 的 `Unused eslint-disable directive` warning，以及后台积分明细缩略图使用 `<img>` 的 Next warning。本轮未运行 `npm run build`。
+
+主要文件：
+
+- `src/app/admin/page.tsx`
+- `src/app/admin/admin-users-panel.tsx`
+- `src/app/admin/admin-credits-panel.tsx`
+- `src/app/page.tsx`
+- `src/components/chat-workbench.tsx`
+- `src/components/use-body-scroll-lock.ts`
+
+## 2026-05-28 本轮继续：后台积分设置保护、tooltip 统一和用户中心积分流水显示
+
+本轮完成：
+
+1. 后台积分管理设置区布局继续调整。`美元汇率 / 1人民币兑换积分 / 注册送积分` 三项的开关已移到输入框同一行右侧；每个输入框固定变窄，设置项总宽度保持不变；整条设置栏强制同一行不换行。
+2. `选择积分消耗项` 下方三项文案去掉 `扣` 字，改为 `对话/规划 / 图片 / 视频`。开关去掉固定最小宽度和 `justify-between`，改为紧跟文字后面；第一项左内边距去掉，保证下面一行与上方小标题左对齐。
+3. 后台积分设置新增有效值保护。`美元汇率` 只接受 `1.00-20.00` 且不支持负数；`1人民币兑换积分` 只接受 `10 / 100 / 1000 / 10000` 四个整数；`注册送积分` 按当前兑换比例折算价值不能超过 `200人民币`。
+4. 三个设置项的“有效值”定义为上一次点击启用并保存成功的值。输入无效值后点击启用，会恢复上一次启用过的有效值；输入过程中经过的中间值不会被记为有效值。后端 `src/lib/credits.ts` 的 `updateCreditSettings()` 也做同样保护，绕过前端提交无效值不会写库。
+5. 后台积分设置三项后面已加说明图标，悬停显示各自规则。说明框继续使用黑色样式，并增加左右边缘检测，靠近浏览器右侧时向左展开，靠近左侧时向右展开。
+6. 前台通用黑框 tooltip 已增加边缘检测。新增/调整 `BlackHoverTooltip`：默认居中，左右空间不足时改为左/右对齐；顶部空间不足时可向下显示。文档预览复制/下载、AI 反馈按钮、预览页 `实际尺寸 / 适合尺寸` 等都走黑框。
+7. 用户反馈模型按钮和缩略图不需要悬停说明，已移除这些位置的 tooltip：对话流图片/视频模型按钮、资产生成模型按钮、对话/资产参考图缩略图、输入框上传图缩略图、资产生成引用图缩略图。保留原本点击和显示功能。
+8. 用户中心 `我的积分` 表已改为同时显示增加和扣除。表头 `积分消耗来源` 改为 `积分来源`，`扣除` 改为 `积分变动`；增加积分显示绿色 `+数字`，扣除积分显示红色 `-数字`。
+9. `/api/credits/me` 现在会返回增加流水。注册送积分和后台正向调积分会逐条显示，不合并；后台调积分在前台显示名改为 `赠送积分`。后台负向调积分仍写数据库并影响余额和净赠送积分，但不显示在前台明细表。
+10. 用户中心上方 `已赠送积分` 改为净赠送积分，统计所有 `CreditLedger.direction = "increase"`，包括注册送分、后台加分和后台减分的负值。也就是说后台减分会被记录并体现在净值里，但不会作为明细行展示。
+11. 后台积分管理统计卡文案 `消耗积分` 改为 `消耗积分总数`。
+12. 本轮验证：多次 `npm run lint` 通过，仅剩项目原有 `Unused eslint-disable directive` warning；涉及 tooltip/积分流水的中间版本跑过 `npm run build` 通过，最后统计卡文案小改只跑了 lint。
+
+主要文件：
+
+- `src/app/admin/admin-credits-panel.tsx`
+- `src/lib/credits.ts`
+- `src/app/api/credits/me/route.ts`
+- `src/components/chat-workbench.tsx`
+
+## 2026-05-28 本轮追加：资产生成规则、积分显示、后台积分/用户管理和禁用拦截
+
+本轮完成：
+
+1. 资产库 `角色生成 > 单人9:16` 强规则已加强。必须生成单人站立正面全身角色设定图，纯白背景，正面朝镜头，头到脚完整，脚不能裁切；禁止室内外场景、环境、建筑、家具、道具堆叠、复杂背景、半身、头像、特写、侧身、背身、3/4侧身、坐姿、躺姿、多人。
+2. 资产库生成规则对 `Seedream 4.5` 单独强化。角色单人、角色三视图、场景单图、场景四宫格、分镜图都有 Seedream 专用规则。该改动只作用于资产库生成，不影响对话流图片/视频、Agent 自动生成或对话流优化。
+3. 资产库生成命名固定为 `角色1 / 角色2...`、`场景1 / 场景2...`、`分镜1 / 分镜2...`。不再从提示词提取名称，不再出现 `角色三视图`、`场景多角度`。对话流命名和上传图命名不变。
+4. 等待卡百分比改为非线性显示：`0-30秒` 到约 `45%`，`30-90秒` 到约 `75%`，`90-180秒` 到约 `95%`，`3分钟后` 固定停在 `95%-99%` 之间。只改显示，不改轮询和真实任务状态。
+5. 用户中心 `我的积分` 来源文案改为 `资产库_角色图片 / 资产库_场景图片 / 资产库_分镜图片`。这三项图标统一为资产库第一态 `RiFolderLine`；普通对话图标改为 `RiChat3Line`；反推提示词和优化提示词不变。
+6. 后台用户管理每页显示 `15` 条。排序改为最近活跃优先：`lastLoginAt`、最近 Session、工作区更新时间、注册时间依次兜底。
+7. 后台用户管理展开区中 `生成图片 / 生成视频` 改为 `对话流生成图片 / 对话流生成视频`，新增 `资产库生成图片`。点击资产库生成图片会打开媒体预览弹窗，右侧顶部三按钮切换 `角色 / 场景 / 分镜`，数据来自 workspace assets 中 `librarySource: "asset_generation"` 的图片。
+8. 后台 `禁用 / 启用` 按钮已做实。新增 `/admin/api/users/disabled`，按钮点击更新 `User.disabled`，并阻止行展开。禁用时会删除该用户所有前台 Session。
+9. 禁用用户前台拦截已做实。`getCurrentUser()` 会清理禁用用户 Session 和 Cookie；登录检查、密码登录、验证码登录遇到禁用用户返回 `用户名错误！请联系管理员！`；工作台每 `5秒` 和窗口聚焦检查 `/api/auth/me`，禁用后会退回首页。模型接口没有有效登录用户会禁止调用。
+10. 后台积分管理改为按单个用户显示，每页 `15` 条。列为 `ID号 / 用户 / 当前积分 / 已赠送积分 / 已消耗积分 / 最后活跃时间 / 调积分`。最后活跃时间为积分流水最后变化时间。
+11. 后台积分统计卡调整：`赠送积分总数`、`消耗美元/折算人民币` 合并卡、数值下对齐、卡片高度降到 `98px`。
+12. 后台调积分已做实。新增 `/admin/api/credits/adjust`，点击每行 `调积分` 在按钮左侧弹小计算器浮层，无黑底遮罩，点击其它区域关闭，支持负数。后台调积分只影响赠送积分，正负都写 `CreditLedger.direction = "increase"`，负数写负值，不写消耗流水。
+13. 后台积分设置区重做。去掉保存按钮和白底，四段竖线分隔。`美元汇率 / 1人民币兑换积分 / 注册送积分` 各自开关控制输入框是否可编辑，重新开启时立即保存；`扣对话/规划 / 扣图片 / 扣视频` 三个独立开关点击即保存。`选择积分消耗项` 后有 `RiInformation2Line` 悬停说明。
+14. 本轮验证：多次 `npm run lint` 通过，仅剩项目原有 warning；本轮未重新运行 `npm run build`。
+
+主要文件：
+
+- `src/components/chat-workbench.tsx`
+- `src/lib/auth.ts`
+- `src/lib/credits.ts`
+- `src/app/api/auth/check-email/route.ts`
+- `src/app/api/auth/login-password/route.ts`
+- `src/app/api/auth/verify-code/route.ts`
+- `src/app/admin/page.tsx`
+- `src/app/admin/admin-users-panel.tsx`
+- `src/app/admin/admin-credits-panel.tsx`
+- `src/app/admin/api/users/disabled/route.ts`
+- `src/app/admin/api/credits/adjust/route.ts`
+
+## 2026-05-28 本轮补充：优化/反推体验、积分来源和预览缩略图分页
+
+本轮完成：
+
+1. 我的积分新增统一来源 `优化提示词`。新增 `prompt_optimization` 来源，资产生成优化提示词、对话流图片/视频专业模式优化提示词全部聚合到这一条。该来源使用 `RiQuillPenAiLine` 图标，`图片/视频` 显示为 `--/--`。
+2. `/api/credits/me` 已识别 `prompt_optimization`，前端 `UserCreditSource` 也已加入该来源。优化提示词请求写入 `metadata: { creditSource: "prompt_optimization" }`。
+3. 对话流图片/视频专业模式优化中，整个主输入框禁用并变淡，包括正文、上传、`@`、模式、模型、比例、数量/时长、发送和清空输入框。曾修复 `isThinking` 初始化顺序导致的运行时错误。
+4. 资产生成页优化中，右侧设置栏全部禁用：比例、风格、模型、K 数、引用资产、优化、清空、输入框、参考图移除/点击、生成按钮。优化开始时关闭已打开菜单。无输入文字时，资产生成里的 `清空输入框` 也禁用。
+5. 新增通用 `LoadingSpinner`。实现采用 `radial-gradient + conic-gradient + mask`，蓝色为 `#367cee`，用于以后通用 loading。优化提示词和反推提示词的输入/右侧区域中间都使用该组件。
+6. 反推提示词时，预览页右侧整体禁用、变淡，并显示通用 Loading；复制、使用提示词、反推按钮不可点。曾尝试外部资产卡禁用和 loading，但用户要求先撤回，当前外部资产库缩略图反推时不显示 loading 或禁用态。
+7. 资产库打开预览时，右侧缩略图只显示资产库当前分类/来源，不再混入对话流缩略图。对话流打开预览时仍显示当前对话流媒体缩略图。注意判断资产库预览只能用资产 `id`，不要用 URL，否则对话流图片已入库时会被误判。
+8. 预览页缩略图从自由滚动列表改成分页列表。当前页只渲染一屏缩略图；鼠标滚轮只移动蓝色选中框；越过当前页边界才整页切换；第一张往上和最后一张往下不再循环。上下按钮也改为整页翻页。
+9. 缩略图整列区域都接管滚轮，包括上下按钮、缩略图之间空隙和列表区域，避免空隙处触发主图缩放。
+10. 预览缩略图增加分布式预加载：DOM 只渲染当前页；打开预览时预加载前两页；翻到后续页时继续预加载后两页；已加载 URL 不重复加载。视频缩略图不额外预加载。
+11. 预览主图滚轮切图尺寸错乱已多轮修复。处理包括：切图前重置预览状态；主图加 `key` 强制重新挂载；`onLoad` 校验当前图，避免旧图加载回调覆盖当前图；缓存图切换后主动读取真实尺寸并重新计算适合比例。
+12. `适合尺寸` 现在按真实图片尺寸乘以 `previewFitScale` 渲染，能把 512 小图放大到适合窗口。此前尝试 `max-width/max-height` 只能缩小不能放大，已撤回。
+13. 点击已选中的缩略图不再做任何事，避免第二次点击触发重置导致图片异常放大。预览区和缩略图区也额外拦截了双击默认行为。
+14. 预览页左上 `实际尺寸` 和 `适合尺寸` 按钮增加 tooltip：`显示图片的实际尺寸`、`显示适合屏幕的完整图片`。
+15. 本轮验证：多次 `npm run lint` 通过，仅剩项目原有 warning；`npm run build` 通过。
+
+主要文件：
+
+- `src/components/chat-workbench.tsx`
+- `src/app/api/credits/me/route.ts`
+- `handover/00-README.md`
+- `handover/03-progress-and-status.md`
+- `handover/05-chat-history-highlights.md`
+- `handover/CHANGELOG.md`
+
+## 2026-05-27 本轮后续补充：分镜生成做实、资产生成并发、输入框优化和使用量 UI
+
+本轮完成：
+
+1. `资产生成 > 分镜图片` 已做实，新增固定入口 `分镜生成`，点击后复用角色/场景同款全屏生成页。成功图写入 `资产生成 > 分镜图片`，带 `librarySource: "asset_generation"`、`type: "shot_image"`、`lockedType: true` 和预览参数。
+2. 分镜生成强规则：结果必须像电影或电视剧单帧截图；不是角色设定图、场景设定图、海报、漫画格、分镜表或拼贴图；不能出现字幕、文字、Logo、水印、UI、二维码、边框、分割线、网格、多宫格、画中画、海报标题或说明标签。
+3. 分镜比例菜单为 `竖屏分镜9:16 / 横屏分镜16:9`，默认 `竖屏分镜9:16`。参数行沿用资产生成规则，生成页不显示模型，资产预览页显示完整参数。
+4. 分镜图片命名规则改为简单递增：`分镜1 / 分镜2 / 分镜3...`。此规则只影响 `shot_image`，`shot_video` 仍保留旧剧名/镜头编号命名规则。
+5. 资产生成页顶部 `角色生成 / 场景生成 / 分镜生成` 按钮已做实，点击等同对应虚线入口；按钮图标跟左侧分类一致，颜色加深，避免看起来像不可点。
+6. 资产生成任务支持并发。点击虚线框或顶部生成按钮会打开新生成界面，不会抢占旧任务；只有点击某个等待卡才回到该任务自己的生成页。关闭生成页不停止任务。
+7. 资产生成任务卡原位更新：生成中显示通用蓝色动态等待卡，左上角显示百分比、左下角显示已等待时间；成功后原地变图片卡；失败后原地变失败卡。
+8. 失败卡不会无声消失。失败卡右上角有关闭按钮可手动清除，点击中间可回到失败页。重试失败任务时失败卡会原地变等待卡；成功后同类型旧失败卡会被清理。
+9. 成功后的原位图片卡已补齐普通资产卡功能：左下角 `@资产名`，右下角三点菜单，支持 `重命名 / 移动到 / 删除`。同时隐藏下方资产列表里同 URL 的重复卡，避免成功图出现两次。
+10. 资产卡右下三点菜单新增浏览器边缘判断。靠右时一级菜单向左展开，`移动到` 二级菜单也向左展开，避免被浏览器右边裁切。
+11. 资产生成页生成中允许点击右上角关闭和遮罩关闭。生成完成绿色提醒层级调到 `z-[9999]`，不会被全屏生成页挡住。
+12. 对话流图片/视频专业模式输入框上方新增 `优化提示词` 按钮，放在 `清空输入框` 前。两者同规格并使用通用蓝色。仅当当前模式为图片/视频且输入框有文字时显示。
+13. 对话流专业模式优化提示词接真实 `/api/chat`，模型兜底顺序为 `openai/gpt-5.5` -> `openai/gpt-5.4` -> `bytedance-seed/seed-2.0-lite`。图片模式按图片提示词优化，视频模式按视频提示词优化；成功后替换输入框内容并聚焦。
+14. 对话流右上角使用量浮窗已调整：`Token` 改为 `Tk`；美元和人民币改用 `RiMoneyDollarCircleLine / RiMoneyCnyCircleLine` 图标，不再显示 `$ / ¥` 字符；顶部按钮图标改为 `RiCopperDiamondLine`，尺寸 `22px`，和左侧收起按钮一致。
+15. 本轮验证：多次 `npm run lint` 通过，仅剩项目原有 warning；多次 `npm run build` 通过。
+
+主要文件：
+
+- `src/components/chat-workbench.tsx`
+- `handover/00-README.md`
+- `handover/03-progress-and-status.md`
+- `handover/05-chat-history-highlights.md`
+- `handover/CHANGELOG.md`
+
+## 2026-05-27 本轮后续补充：场景生成、资产预览反推和积分表调整
+
+本轮完成：
+
+1. `资产生成 > 场景图片` 已新增固定入口 `场景生成`，点击后打开和角色生成共用的全屏生成界面。成功图写入 `资产生成 > 场景图片`，带 `librarySource: "asset_generation"`、`type: "scene_image"`、`lockedType: true` 和预览参数。
+2. 资产生成分类筛选已修复，场景页不会再显示角色图。资产生成分类必须同时匹配 `librarySource: "asset_generation"` 和当前分类 `type`。
+3. 角色入口和生成页标题已从 `角色图片生成` 改为 `角色生成`。媒体预览页右侧栏已改为始终显示，固定 `360px`，整体最小宽度 `920px`。
+4. 场景生成比例菜单为 `单场景9:16 / 单场景16:9 / 四宫格16:9`。四宫格必须是一张 `16:9` 横图，四格分别为同一场景的正面、45度侧面、俯视、仰视。
+5. 场景生成强规则：必须是纯场景，绝对不能有人、人物、角色、人形、剪影、人群、脸、手脚；不能有文字、Logo、水印、UI、二维码、边框、分割线、海报排版等。用户提示词里的人物信息必须忽略。
+6. 资产生成输入框关闭后会保留提示词草稿和参数选择。角色生成和场景生成分别保存提示词，互不覆盖；重新打开只清空生成结果、缩放、下载和菜单状态。
+7. 资产生成输入框里的有效 `@资产` 会在提示词上方显示同对话流输入框风格的一行缩略图，超出有左右按钮和渐隐，点击 `X` 会移除对应 `@资产名`。
+8. 资产生成参数行规则改为：生成页不显示模型，只显示 `类型+比例 | 尺寸 + K数 | 风格`；资产库预览页显示 `模型 | 类型+比例 | 尺寸 + K数 | 风格`。对话流参数显示不改。
+9. 资产生成风格强绑定已加强。优化提示词返回后和最终生图前都会本地清理冲突风格词，并强行加当前风格前缀。写实/2D/3D 三种互斥，以菜单选择为准。
+10. 资产生成 `优化提示词` 模型顺序改为三级兜底：`openai/gpt-5.5` -> `openai/gpt-5.4` -> `bytedance-seed/seed-2.0-lite`。`/api/chat` 已允许特殊模型 `openai/gpt-5.5`。
+11. 上传图资产预览页显示来源：无生成参数的图片会在参数行位置显示 `资产库上传` 或 `对话流上传`，提示词区显示 `暂无提示词`。
+12. 上传图预览页新增 `反推提示词`：按钮为通用蓝底，图标 `RiQuillPenAiLine`。点击后用图片调用 `/api/chat`，模型顺序同上：`openai/gpt-5.5` -> `openai/gpt-5.4` -> `bytedance-seed/seed-2.0-lite`。成功后写回资产 `sourcePrompt` 并显示在提示词区。
+13. 资产预览页提示词标题栏新增无底复制图标按钮。复制成功后显示灰色较大对勾，失败显示红叉。
+14. 我的积分表已重构为按 `积分消耗来源` 聚合。角色图片生成、场景图片生成、分镜图片生成和图片反推提示词各自聚合为单独来源；普通对话仍按历史对话名聚合。来源写在 `CreditLedger.metadata.creditSource`，旧数据无法可靠拆分。
+15. 我的积分新增 `对话Token` 列，普通对话优先读取工作区 `usageSummary.totalTokens`，没有再用流水 token。普通对话扣除积分也用工作区 `usageSummary.credits` 兜底，避免旧数据出现 Token 很多但扣除 `-0`。
+16. 我的积分 `图片` 和 `视频` 合并为 `图片/视频` 一列，如 `22/0`、`9/--`、`--/--`。`最后活跃` 显示规则：24小时内显示时分，超过24小时显示月日，超过一年只显示年份；列宽降到 `72px` 且不换行。
+17. 当前我的积分表格列间临时显示浅灰竖线，用于继续观察和调整列宽。
+18. 本轮验证：多次 `npm run lint` 通过，仅剩项目原有 warning；多次 `npm run build` 通过。
+
+主要文件：
+
+- `src/components/chat-workbench.tsx`
+- `src/app/api/chat/route.ts`
+- `src/app/api/credits/me/route.ts`
+- `handover/00-README.md`
+- `handover/03-progress-and-status.md`
+- `handover/05-chat-history-highlights.md`
+- `handover/CHANGELOG.md`
+
+## 2026-05-26 本轮后续补充：角色图片生成做实、规则增强、资产菜单调整
+
+本轮完成：
+
+1. `资产生成 > 角色图片` 的虚线入口文案已改为 `角色图片生成`。
+2. 角色图片生成界面改成真正全屏，去掉顶部留空和顶部圆角；右侧设置栏固定 `360px`，始终显示，整体最小宽度 `920px`。
+3. 右侧设置栏顶部新增 `RiAccountBoxLine + 角色图片生成` 标题。
+4. 重新打开角色生成界面时，只保留四个菜单上一次选择；输入框、生成结果、缩放/下载状态、`@` 菜单、优化状态全部清空。
+5. 角色输入框已复用 `PlainMentionEditor`，支持蓝色 `@资产名`；正文为 `13px / 22px`；滚动条靠右贴边。
+6. 角色输入框顶部按钮为 `@ 引用资产 / 优化提示词 / 清空输入框`，蓝色无底。`优化提示词` 已接真实 `/api/chat`，并按内部角色优化规则只保留角色相关内容。
+7. 角色生成页的 `@` 菜单向左展开，宽 `380px`，右对齐输入框；打开逻辑已稳定化，点 `@ 引用资产` 不再先插入 `@`，手动输入 `@` 也会打开，选择资产会替换光标前 `@xxx` 或插入到当前光标。
+8. `@` 菜单数据源按新资产库结构重做：`角色图片 / 场景图片 / 分镜图片` 只显示 `asset_generation` 图片，`对话流图片` 显示非 `asset_generation` 图片；不显示待分类、回收站或视频。
+9. 角色生成已接 `/api/image`。生成中左侧显示等待卡；成功后在当前生成页显示图片，不可点击进入预览；失败显示同尺寸失败卡并可原地重试。
+10. 成功图顶部缩放、实际尺寸、适合尺寸、下载按钮可用；实际尺寸可拖拽平移，滚轮可缩放。未生成前这些按钮禁用。
+11. 生成中右侧全部禁用：四个菜单、`@`、优化、清空、输入框、生成按钮、顶部关闭按钮和点击遮罩关闭。
+12. 角色生成成功后写入 `资产生成 > 角色图片`，显示在入口按钮后面；写入 `librarySource: "asset_generation"`、`type: "character_image"`、`lockedType: true` 和预览参数。
+13. 角色生成内部强规则已接入且不显示到输入框。`单人9:16` 强制纯白背景、单人全身站立、头脚完整；`三视图16:9` 强制纯白背景和四视图角色参考。
+14. 风格菜单已强绑定：写实、2D、3D 互斥；用户提示词和风格冲突时以菜单选择为准。
+15. 三视图规则按模型拆分。`GPT-5.4 Image 2` 和 `Gemini 3.1 Flash` 当前相对可用；`Gemini 3 Pro` 和 `Seedream 4.5` 不稳定。`Seedream 4.5` 已改为纯正向描述，避免反向触发分隔线。
+16. 左侧 `分镜图片（首帧）` 文案统一改为 `分镜图片`，内部类型仍是 `shot_image`。
+17. 删除资产后普通分类不再显示回收状态资产，只有回收站显示倒计时资产。
+18. 图片资产右上角文件夹移动菜单已移除。移动功能合并到右下角三点菜单，顺序为 `重命名 / 移动到 > / 删除`；只有鼠标悬停 `移动到` 才显示二级菜单。对话流视频和回收站资产没有 `移动到`。
+19. 移动二级菜单内容为 `角色图片 / 场景图片 / 分镜图片 / 对话流图片`，标题 `移动位置`，宽 `168px`；图标 `16px`、文字 `13px`、行高 `36px`。右下角三点操作菜单图标、文字和行高同步统一。
+20. 本轮验证：多次 `npm run lint` 通过，仅剩项目原有 warning；角色生成做实后曾跑过 `npm run build` 通过。
+
+主要文件：
+
+- `src/components/chat-workbench.tsx`
+- `handover/00-README.md`
+- `handover/03-progress-and-status.md`
+- `handover/05-chat-history-highlights.md`
+- `handover/CHANGELOG.md`
+
+## 2026-05-26 本轮补充：去除游客模式、资产库重构和角色图片生成界面
+
+本轮完成：
+
+1. 首页右上角去掉游客入口。未登录只显示 `登录`；已登录显示 `进入工作台` 和用户头像。`进入工作台` 按钮样式大小颜色与登录按钮一致。
+2. 工作台游客模式入口已移除。`/workspace?guest=1` 不再生效；`src/app/workspace/page.tsx` 不再读取 `guest` 参数；`ChatWorkbench` 已移除 `forceGuestMode` props。
+3. 未登录或认证失败进入 `/workspace` 时，不再读取本地游客工作区，而是直接回首页。登录用户仍读取数据库 `/api/workspace-state`。
+4. 游客本地保存逻辑已移除：不再把会话、资产、工作流、输入设置、意图记忆、反馈日志写入旧 `yinzao-*` localStorage key。旧 key 未主动清除，但代码不再用它们作为工作台数据源。
+5. `src/app/workspace/page.tsx` 加了 `export const dynamic = "force-dynamic";`，解决构建时预渲染工作台触发 `window is not defined` 的问题。
+6. 后台里旧文案 `游客模式开关：下一版接入` 改成 `访问控制：下一版接入`。
+7. 左侧主菜单 `资产管理` 改为 `资产库`；顶部标题也改为 `资产库`。点击主菜单资产库会自动切到 `角色图片`，不再进入 `全部资产` 页面。
+8. 资产库二级结构改为三组：`资产生成`、`对话流资产`、`回收资产30天删除`。每组小标题前有圆点，所有数量列统一右对齐。
+9. `资产生成` 分类包含 `角色图片 / 场景图片 / 分镜图片`。该区域只显示 `librarySource: "asset_generation"` 的图片。
+10. `对话流资产` 分类包含 `对话流图片 / 对话流视频`。旧资产和后续对话流生成的图片/视频默认都进入这里，即没有 `librarySource: "asset_generation"` 的非回收站资产。
+11. `AssetItem` 新增前端字段 `librarySource?: "asset_generation" | "conversation"`。资产库上传会写 `asset_generation`；对话流提取和生成写 `conversation`；旧资产未带字段时按对话流资产处理。
+12. 回收站为两个分类共用，删除/恢复/30 天删除规则保持不变。
+13. 后续对话流资产命名规则改为随机数字：图片 `image_随机5-10位数字`，视频 `video_随机5-10位数字`。旧资产不批量重命名。
+14. 对话流视频右上角分类按钮已去除。对话流图片右上角分类按钮已做实，支持在 `角色图片 / 场景图片 / 分镜图片 / 对话流图片` 之间切换。
+15. 对话流图片切到角色/场景/分镜后，会移动到 `资产生成` 对应分类；切回 `对话流图片` 会回到 `对话流资产`。
+16. `对话流视频` 页面卡片改为横向矩形，默认 `16:9`，大屏一行显示 4 个。其它图片分类仍为正方形网格。
+17. 所有媒体预览页的 `使用提示词` 按钮已改：填入输入框、关闭预览页，并自动切回 `对话模式` 工作台。
+18. `资产生成 > 角色图片` 网格第一个固定显示虚线 `生成角色` 按钮，图标为 Remix `add-large-line`，文字为 `生成角色`。没有角色图时仍显示该按钮，不再显示空状态。
+19. 点击 `生成角色` 打开角色图片生成界面。界面使用和媒体预览页同款全屏底、顶部留空、毛玻璃左侧生成区和右侧设置区。
+20. 角色图片生成界面左侧为生成区，当前为空白占位，不要虚线底框。左上缩放、实际尺寸、适合尺寸按钮和右上下载按钮在没有生成图片前禁用。
+21. 角色图片生成界面右侧为输入区，上方参数按钮目前是占位：模型占位、比例占位、分辨率占位、数量占位；下方是提示词输入框；生成按钮当前禁用。
+22. 注意：角色图片生成界面当前只做 UI 占位，未接真实生成。下一步如果继续做，需要在该界面调用 `/api/image`，成功后把图片写入 `资产生成 > 角色图片`，并显示在 `生成角色` 按钮后面。
+23. 本轮验证：`npm run lint` 和 `npm run build` 均通过。
+
+主要文件：
+
+- `src/app/page.tsx`
+- `src/app/workspace/page.tsx`
+- `src/components/chat-workbench.tsx`
+- `src/app/admin/page.tsx`
+
 公网部署重点待办：上传图、资产图、历史参考图当前在本地开发阶段会转 base64 传给 OpenRouter，容易触发 `413 Request Entity Too Large`。正式部署前必须改成先保存到可公网访问的 HTTPS 地址（对象存储 / CDN / 静态资源服务），再把 HTTPS URL 传给 OpenRouter，不再传 base64；同时要处理 URL 持久化、旧本地路径兼容和生成接口传参。
+
+已完成：文档读取解析 + Agent 激活第一版。`.md / .txt / .csv` 前端读取文本，读取中保留细进度条；发送时把已读取文本带给 `/api/agent-plan` 和 `/api/chat`。智能体规则 / 工作流说明类文档可通过“激活这个智能体”触发 `XXX已激活` 回复并进入文档规则上下文。`pdf/docx/xlsx/pptx` 仍只展示附件，后续再接服务端解析库。
+
+当前后续待办：文档原件正式部署时要走对象存储 + CDN；Agent 不应每次直接读 CDN 原文件，应由服务端解析文本/分块入库后读取。后续还需支持 `pdf/docx/xlsx/pptx` 服务端解析、文档文本入库、检索和长期上下文管理。
+
+## 2026-05-25 本轮后续补充：文档解析、文档预览、滚动条和用户中心积分页
+
+本轮完成：
+
+1. `.md / .txt / .csv` 文档读取已接入。上传后前端读取文本并保存到文档对象，发送 Agent 时会把已读取文本拼进最新用户消息上下文。只上传文档不输入文字也允许发送；读取中发送提示 `文件读取中`。
+2. 文档卡片底部显示规则改为始终显示 `文档类型 · 文件大小`，不显示 `已读取 / 读取中 / 读取失败` 文字；读取中仍有底部细进度条。输入框文件卡片和发送后的用户消息文件卡片都可点击预览。
+3. Agent 文档激活规则已写入 `src/lib/openrouter.ts`。如果文档像智能体规则/工作流说明，用户说“激活这个智能体”时，Agent 用普通长回复排版，首行如 `XXX已激活`，并按文档规则继续。激活类回复前置图标改为 `RiTerminalWindowFill`。
+4. 右侧文档预览面板已完成。`.md` 用现有 `FormattedMessage` 渲染标题、加粗、列表和分隔线；`.txt/.csv` 保留换行显示；未解析文件提示暂不支持预览。标题栏显示文档名、类型和大小，右侧有复制全文、下载文档、关闭三个图标；复制成功显示对勾。
+5. 文档预览不再覆盖对话流，而是并列分栏。默认对话流 : 文档预览为 `5:4`；中间分隔线可拖动，拖动后保留用户宽度。分隔线默认浅灰，中间有小竖向胶囊，hover 时轻微变深。文档预览层级降为 `z-40`，不会盖住用户中心黑色遮罩。
+6. 新增全局滚动条控制组件 `src/components/global-scrollbar-controller.tsx`。全局滚动条默认透明隐藏，滚动时显示原灰色滚动条，停止 `2秒` 后消失；`yinzao-hidden-scrollbar` 和 `yinzao-upload-row-scroll` 仍强制永不显示。左侧历史/工作流列表增加 `yinzao-scrollbar-hover`，鼠标移入也显示滚动条。
+7. 用户中心右侧结构统一：标题和关闭按钮同一行，关闭按钮放大并改为圆角矩形底；右侧整体下移 `12px`。覆盖用户信息、我的积分、帐号安全、设置四页。
+8. 左下角 `个人免费版` 按钮现在打开用户中心 `我的积分`。我的积分页新增免费套餐概览卡：标签 `免费套餐`、标题 `个人免费版 + RiLeafLine`、说明文案 `当前为免费版本，暂无升级套餐功能。如有疑问请联系管理员！`、真实总积分和 `已赠送积分`。
+9. `/api/credits/me` 新增 `giftedCredits`，统计当前用户 `CreditLedger.direction = "increase"` 的积分总和。后续后台手动加分只要使用 `grantCredits(..., "admin_adjust")` 或写入 `direction: increase`，就会显示到已赠送积分。
+10. 新增 `/api/credits/conversation-title`。用户重命名对话时会同步更新当前用户该 `conversationId` 下的 `CreditLedger.conversationTitle`；删除对话不删除积分流水，因此我的积分扣费记录仍保留。
+11. 我的积分表格 UI 细调：外框圆角改为 `5px`；分页按钮常态无边框，颜色与关闭按钮一致，hover 淡灰底，带左右箭头，禁用态淡化。
+12. 本轮验证：多次 `npm run lint` 和 `npm run build` 均通过。
+
+主要文件：
+
+- `src/components/chat-workbench.tsx`
+- `src/lib/openrouter.ts`
+- `src/app/globals.css`
+- `src/components/global-scrollbar-controller.tsx`
+- `src/app/layout.tsx`
+- `src/app/api/credits/me/route.ts`
+- `src/app/api/credits/conversation-title/route.ts`
+
+## 2026-05-25 本轮补充：后台积分增强、首页登录态和拖拽上传
+
+本轮完成：
+
+1. 后台左侧五个大菜单已加 Remix 图标，`积分管理` 图标已统一为前台同款 `RiVipDiamondLine`。
+2. 后台积分管理统计卡已从 4 个改为 6 个：总积分、增加积分总数、消耗积分、消耗 Token、消耗美元、消耗人民币。增加积分绿色；消耗类红色，不显示负号。
+3. `CreditLedger` 新增 `direction` 字段，迁移目录为 `prisma/migrations/20260522143000_credit_ledger_direction`。迁移会给现有用户回填 `signup + increase` 增加流水，数值为当前积分余额加历史消耗积分。
+4. `src/lib/credits.ts` 新增 `grantCredits()`。注册送积分现在先创建用户 `credits = 0`，再调用 `grantCredits(user.id, signupCredits, "signup")` 写增加流水。涉及 `/api/auth/verify-code` 和 `/api/admin/verify-code`。
+5. 模型扣费继续通过 `chargeCredits()` 写 `direction: consume`；后台统计、后台用户详情消耗数据、前台我的积分页都已按真实流水方向统计。
+6. 首页 `/` 已接入前台登录态。已登录时右上角显示用户头像，点击头像显示用户信息、我的积分、帐号安全、设置、退出登录；点前四项会跳到 `/workspace` 并打开对应用户中心页。
+7. 首页输入框已做实。已登录空输入点发送直接进工作台；未登录空输入点发送弹登录框；已登录有输入点发送会在工作台新建对话并自动按 Agent 发送进入思考。
+8. 工作台右侧对话流已支持拖拽上传。拖拽文件时出现白色半透明遮罩、背景模糊、虚线边框、中间 `在此处拖放文件`、文件类型提示和绿色圆形箭头图标。跟随鼠标的小白框已删除。
+9. 拖拽和输入框 `+` 支持图片和文档：`pdf, txt, csv, docx, doc, xlsx, xls, pptx, ppt, md`。图片上限 `10` 张，文档上限 `8` 个。电子书格式 `mobi/epub` 已删除。
+10. 输入框附件显示重做：文档单独一行在上，图片单独一行在下，文档和图片可同时存在。两行超出宽度时显示左右按钮，滚动条隐藏，左右边缘渐隐。
+11. 输入框图片缩略图统一为 `80x80px`。文档卡片约 `200x54`，右上角可删除，左侧类型小标为淡色底、2px 描边、3px 圆角正方形字母卡。
+12. 发送后的用户消息附件显示已同步。文档在文字下方，图片在文档下方，图片为 `80x80px`。如果用户只上传附件没输入文字，不再显示内部默认句子；默认句只给 Agent 内部使用。
+13. 本轮排查 `@`：确认 `@` 正常传图，`/api/image` 收到参考图且本地文件存在。`src/lib/openrouter.ts` 增加非敏感调试日志，打印 `reference_count`、参考图类型和本地文件是否存在。用户要求 `@` 问题先放下。
+14. 关于文档上传正式部署：原文件以后走对象存储 + CDN；Agent 不应直接读 CDN 原文件，而应读服务端解析后的文本/分块内容。
+15. 本轮验证：`npx prisma migrate deploy` 成功；`npx prisma generate` 成功；多次 `npm run lint` 和 `npm run build` 通过。
+
+主要文件：
+
+- `prisma/schema.prisma`
+- `prisma/migrations/20260522143000_credit_ledger_direction/migration.sql`
+- `src/lib/credits.ts`
+- `src/lib/openrouter.ts`
+- `src/app/page.tsx`
+- `src/components/chat-workbench.tsx`
+- `src/app/globals.css`
+- `src/app/api/auth/verify-code/route.ts`
+- `src/app/api/admin/verify-code/route.ts`
+- `src/app/api/credits/me/route.ts`
+- `src/app/admin/page.tsx`
+- `src/app/admin/admin-credits-panel.tsx`
+
+## 2026-05-22 本轮补充：积分系统第一版和后台细调
+
+本轮完成：
+
+1. Agent 回复清洗：修复结构化 JSON 返回内容中把 `\n\n` 直接显示到页面的问题。`src/lib/openrouter.ts` 新增模型文本清洗，处理字面 `\n / \t / \"` 和 JSON 代码块残留；`parseStructuredAgentReply()` 和 `parseAgentPlan()` 解析出的正文、displayText、clarifyQuestion、prompt、items、constraints、suggestions 都会清洗。
+2. Agent 短回复换行优化：`在，我在。\n\n如果你愿意...` 这类“短开场句 + 普通正文”会自动合并成一段；长回答、列表、剧本、分镜、知识讲解保留换行。Agent finalInstruction 已明确普通短聊天不要分段，只有长回答/列表/剧本/分镜/知识讲解才换行。
+3. 前端和后台显示层兜底：`src/components/chat-workbench.tsx` 的 `sanitizeMessageContentForDisplay()`、`ReferencedTextContent()` 以及后台 `AdminFormattedMessage()` 都会把旧历史中的字面 `\n` 转成正常显示。
+4. 新增积分配置表 `CreditSetting` 和积分流水表 `CreditLedger`，迁移目录为 `prisma/migrations/20260522120000_credit_system`。已执行 `npx prisma migrate deploy`。
+5. `CreditSetting` 字段：`usdToCnyRate`、`creditsPerCny`、`signupCredits`、`chargeText`、`chargeImage`、`chargeVideo`。默认值为汇率 `7.2`、`1人民币=10积分`、注册送 `1500`、三类扣费都开启。
+6. `CreditLedger` 字段记录：用户、对话 ID、对话标题、请求 ID、类型、标签、模型、扣除积分、prompt/completion/total token、美元、人民币、图片数、视频数、元数据和创建时间。`requestId + kind` 做唯一约束，避免同一请求重复扣同类费用。
+7. 积分规则：OpenRouter 返回美元费用后，按后台汇率换算人民币，再按兑换比换算积分；积分只保存整数，扣分使用四舍五入；失败不扣；余额为 `0` 禁止继续使用模型；余额大于 `0` 可以生成最后一次，最多扣到 `0`，不会负分。
+8. 注册送积分改为读取后台 `CreditSetting.signupCredits`。涉及 `/api/auth/verify-code` 和 `/api/admin/verify-code`。
+9. 扣分接入点：`/api/agent-plan` 成功后扣文本规划；`/api/chat` 成功后扣文本回复/提示词整理；`/api/image` 成功后扣图片；`/api/video` 创建任务不立即扣，轮询成功拿到视频地址后扣视频。游客模式无登录用户，当前不写数据库扣分。
+10. 前端 `CurrentUserProfile` 增加 `credits`，`/api/auth/me` 和 `/api/user-profile` 返回余额后，左下角积分卡实时显示真实余额。每次扣分后接口返回 `credit.balance`，前端立即刷新左下角余额。
+11. 前端会话 `usageSummary` 增加 `credits`。右上角当前会话使用量浮窗新增积分图标和扣除数，只显示图标和数字，不显示“积分”二字。
+12. 用户菜单新增 `我的积分`，用户中心左侧也新增 `我的积分` 标签页。右侧显示 `我的积分：xxxx`，下面按历史对话聚合：对话名称、扣除积分红字、图片数量、视频数量、最后活跃时间，支持分页。
+13. 新增 `/api/credits/me`，返回当前登录用户余额、积分设置摘要和按对话聚合的积分记录。
+14. 新增后台积分设置接口 `/api/admin/credits`，但浏览器后台保存实际改用 `/admin/api/credits`。原因是后台登录 Cookie `flashmuse-admin-session` 只作用 `/admin`，请求 `/api/admin/credits` 不会携带后台 Cookie，保存会无权限并刷新回旧值。
+15. 后台 `积分管理` 页面做实，新增 `src/app/admin/admin-credits-panel.tsx`。顶部标题 + 右侧搜索；设置区可改美元汇率、积分兑换比、注册送积分、文本/图片/视频是否扣分；统计卡显示总扣积分、总 Token、总美元、总人民币。
+16. 后台积分列表按对话流聚合显示：用户/对话、积分、Token、美元/人民币、图片数、视频数、最后活跃、展开三角。列表圆角统一为用户管理规格 `10px`，默认不展开，点整行或末尾三角都能展开。展开后明细按文本规划/回复、图片批次、视频任务分开显示。
+17. 后台美元汇率输入改为文本输入，允许小数点和最多两位小数；输入 `7` 后失焦显示 `7.00`，输入 `7.` 不会被浏览器吞掉。当前本地数据库曾查到保存值 `6.8`，说明保存链路可用。
+18. 后台用户详情展开区里 `历史对话 / 生成图片 / 生成视频` 可点击字段名下划线标识，右侧数值不加下划线、不变蓝。
+19. 后台历史对话弹窗和生成图片/生成视频预览弹窗标题栏改为跨整个弹窗宽度，标题栏下方再分左右列表/内容区。
+20. 后台左侧栏改为固定在浏览器视口内，当前管理员块贴在左侧栏底部，滚动页面不会消失。
+21. 后台搜索框统一：用户管理和积分管理顶部搜索框图标都放右侧，输入文字居左，图标居右。
+22. 后台用户管理列表改为点整行也可展开/收起，右侧三角仍可点，三角点击会阻止冒泡避免重复触发。
+23. 本轮验证：`npx prisma migrate deploy` 成功；`npx prisma generate` 成功；多次 `npm run lint` 和 `npm run build` 均通过。
+24. 注意：`npx prisma generate` 第一次仍遇到 Windows `query_engine-windows.dll.node` 被端口 `3000` dev server 占用，已停止端口 `3000` 的 Node 进程后重试成功。当前 dev server 可能已被停掉，需要预览时重新启动。
+
+主要文件：
+
+- `prisma/schema.prisma`
+- `prisma/migrations/20260522120000_credit_system/migration.sql`
+- `src/lib/credits.ts`
+- `src/lib/openrouter.ts`
+- `src/components/chat-workbench.tsx`
+- `src/app/api/agent-plan/route.ts`
+- `src/app/api/chat/route.ts`
+- `src/app/api/image/route.ts`
+- `src/app/api/video/route.ts`
+- `src/app/api/credits/me/route.ts`
+- `src/app/api/admin/credits/route.ts`
+- `src/app/admin/api/credits/route.ts`
+- `src/app/admin/admin-credits-panel.tsx`
+- `src/app/admin/admin-users-panel.tsx`
+- `src/app/admin/page.tsx`
+
+## 2026-05-21 本轮后续补充：后台用户详情、历史对话弹窗和媒体预览
+
+本轮完成：
+
+1. 后台登录页新增历史管理员邮箱下拉。登录成功后保存到 `localStorage` 的 `flashmuse-admin-login-history-v1`，最多 `5` 条；点击或聚焦邮箱输入框时可选择历史账号。该功能只在后台登录页使用，和前台首页登录历史 key 不混用。
+2. 后台用户管理表头和文案细调：`最后登录` 改为 `最后登录时间`；状态筛选里的 `已禁用` 和状态标签里的 `已禁用` 改为 `禁用`。
+3. 后台假用户 `testuser001@flashmuse.test` 到 `testuser100@flashmuse.test` 会按序号生成稳定模拟 IP 和归属地，用于调试列宽；真实用户仍显示 `待接入`。当前没有新增 `Session.ipAddress` 等真实字段。
+4. 用户展开详情区已重做。去掉原白色圆角卡片和三列小标题，改成四列灰底直角信息条，列间距 `5px`，条目之间 `1px`，每条名称居左、值居右。
+5. 展开区第一列为账号资料：登录帐号、昵称、手机号、密码、语言、注册时间、资料更新时间。第二列为登录和设置：最近登录 IP、最近登录归属地、Session 数、Session 活跃、生成完成提醒、自动收入资产库、预览滚轮。第三列为工作区使用：历史对话、生成图片、生成视频、工作区保存。第四列为积分消耗：积分、已消耗积分、已消耗Token、已消耗金额。
+6. 用户询问 `Session 数` 含义，已确认它是数据库当前保留的登录态数量，不是历史对话数，也不是总登录次数。`Session 活跃` 是最近一次使用该登录态的时间，区别于真正登录成功的 `最后登录时间`。
+7. `工作区保存` 只显示最后保存时间，不再加 `已保存，` 前缀；未保存显示 `未保存`。
+8. `生成图片 / 生成视频` 数量现在优先从 `UserWorkspaceState.state` 中实际 assistant 媒体消息统计，避免用户已经生成过但 `User.generatedImageCount / generatedVideoCount` 字段仍为 0 时后台显示不准。`已消耗Token / 已消耗金额` 从各会话 `usageSummary` 汇总，金额显示 `$ / ¥`，汇率使用 `defaultUsdToCnyRate`。`已消耗积分` 暂按 `1500 - credits` 计算。
+9. `历史对话` 详情项可点击打开只读历史对话弹窗。弹窗大小与媒体弹窗一致，圆角 `10px`；左侧显示 `XXX历史对话` 和历史会话列表，右侧显示对话内容，没有输入框。左侧未选中项不显示时间且高度更低，选中项灰底 `#ececec` 并显示时间。
+10. 历史对话弹窗会渲染 AI 文案轻量 Markdown，支持标题、加粗、分隔线、列表，避免露出 `# / ## / ** / ---` 等符号。用户消息为右侧灰色气泡；图片和视频会只读展示。
+11. `生成图片` 和 `生成视频` 详情项可点击打开媒体预览弹窗。弹窗左侧是大图片/视频预览，右侧是缩略图列表，布局与历史对话左右相反。缩略图选中态是蓝色边框。
+12. 媒体预览弹窗底部参数已按工作台媒体结果样式显示：提示词一行，下方 `模型 | 比例 | 尺寸 + 分辨率图标 | 时长`。图片分辨率图标和 `超清4K` 金色标签、视频 `SD / HD / FHD / 4K` 黑底图标都在后台复刻。模型名通过 `src/lib/models.ts` 的 `imageGenerationModels / videoGenerationModels` 转成展示名。
+13. 后台历史对话、媒体预览、生成数量、Token 和金额统计均从 `UserWorkspaceState.state` 读取，没有新增数据库表或迁移。后续如要做真正生成记录和积分扣费，仍应新增独立 `GenerationJob / CreditLedger` 等表。
+14. 本轮验证：`npm run lint` 和 `npm run build` 均通过。
+
+主要文件：
+
+- `src/app/admin/admin-login-form.tsx`
+- `src/app/admin/admin-users-panel.tsx`
+- `src/app/admin/page.tsx`
+
+## 2026-05-21 本轮对话补充：后台用户管理页、用户 ID 规则和用户中心 ID 显示
+
+本轮完成：
+
+1. 后台左侧菜单从锚点跳转改成分类页切换。`/admin` 默认是概览；`/admin?tab=users` 是用户管理；`/admin?tab=credits`、`/admin?tab=records`、`/admin?tab=settings` 分别是积分管理、生成记录、系统设置占位页。
+2. 概览恢复为最初结构：顶部四个统计卡，下面三块占位卡，分别是积分管理、生成记录、系统设置。用户管理表不再显示在概览里。
+3. 后台所有分类页结构统一：标题在上方，标题下不显示小灰字说明，下面是内容区。`积分管理 / 生成记录 / 系统设置` 目前仍是占位卡。
+4. 新增 `src/app/admin/admin-users-panel.tsx`，用户管理从 `page.tsx` 拆出为客户端组件，负责搜索、筛选、分页、展开详情等交互。
+5. 用户管理顶部右侧为短搜索框和状态筛选。搜索框使用 `RiSearchLine` 图标，提示为 `ID / 邮箱 / 昵称 / 手机`；状态筛选为 `全部 / 正常 / 已禁用`。
+6. 用户管理统计卡显示：总用户、今日新增、正常用户、禁用用户、总积分余额。该排卡片高度已压缩，上下内边距 `10px`，数字 `22px` 加粗。外部上下间距也已压缩。
+7. 用户列表固定最小宽度 `1180px`，后台整体最小宽度 `1464px`，浏览器再窄时不继续压缩表格。用户列表外框圆角为 `10px`，内部横向滚动层已去掉。
+8. 用户列表每页显示 `10` 条，底部分页显示总条数、当前范围、上一页/下一页、当前页码/总页数。分页条外层白底、边框、阴影已去掉。
+9. 用户列表主行字段已调整为：用户ID、用户（头像/账号/昵称）、积分 + `调积分` 按钮、最近登录 IP / 归属地、最近登录时间、状态 + `禁用/启用` 按钮、三角展开按钮。`查看` 按钮已删除。
+10. 最近登录 IP 和归属地目前没有数据库字段，后台主行和展开区都先显示 `待接入`。后续如果做真实功能，应在 `Session` 表新增 `ipAddress / ipCountry / ipRegion / ipCity / userAgent` 等字段，并在登录创建 Session 时记录。
+11. 用户行三角展开后会在当前行下方下推显示隐藏详情块，宽度跟表格一致。隐藏区分三列：账号信息、使用数据、登录和工作区。真实显示的内容包括手机号、语言、密码是否设置、注册时间、资料更新时间、生成图片数、生成视频数、生成完成提醒、自动收入资产库、预览滚轮设置、Session 数、最近 Session 活跃时间、工作区保存状态。
+12. 本地 PostgreSQL 已插入 `100` 个测试用户用于后台测试，邮箱为 `testuser001@flashmuse.test` 到 `testuser100@flashmuse.test`。这些测试用户含昵称、部分手机号、积分、图片数、视频数、注册时间、最后登录时间、禁用状态等模拟数据。
+13. 后台假用户头像规则：邮箱以 `@flashmuse.test` 结尾且没有头像时，统一显示 `?`；真实用户仍显示头像或默认首字符。
+14. 用户 ID 规则已改为 `ID_六位随机数字`，例如 `ID_178523`。`prisma/schema.prisma` 中 `User.id` 已从 `@default(cuid())` 改为手动生成；`src/lib/auth.ts` 新增 `generateUserId()`，注册和后台验证码创建用户时都会写入该 ID。
+15. 本地已有 `102` 个用户已从旧 ID 迁移为 `ID_` 格式。迁移时直接更新 `User.id`，关联的 `Session.userId` 和 `UserWorkspaceState.userId` 因外键级联更新保持正常。
+16. 用户中心头像下方已新增用户 ID 显示，只显示数据库原值，例如 `ID_779117`，不额外加 `ID：` 前缀。字号最后调为 `14px`，颜色稍深。下面的信息行整体下移一点。
+17. `/api/auth/me` 和 `/api/user-profile` 返回的用户资料里现在包含 `id`。`src/lib/user-profile.ts` 的 `getUserProfileFromUser()` 会返回 `id`。
+18. 用户昵称上限已统一为 `8` 个字。前端用户中心昵称输入框会截断到 8 个字符，后端 `normalizeUserProfileInput()` 也会按字符截断到 8，避免绕过前端。
+19. 本轮 `npx prisma generate` 第一次因为 Windows `query_engine-windows.dll.node` 被端口 `3000` dev server 占用失败，已停止端口 `3000` 的 Node 进程后重新生成成功。注意当前开发服务器可能已停，需要重新启动。
+20. 本轮多次验证：`npm run lint` 和 `npm run build` 均通过。
+
+主要文件：
+
+- `src/app/admin/page.tsx`
+- `src/app/admin/admin-users-panel.tsx`
+- `src/components/chat-workbench.tsx`
+- `src/lib/auth.ts`
+- `src/lib/user-profile.ts`
+- `src/app/api/auth/verify-code/route.ts`
+- `src/app/api/admin/verify-code/route.ts`
+- `prisma/schema.prisma`
+
+## 2026-05-19 本轮对话补充：登录系统、数据库、SMTP 和用户工作区存储
+
+本轮完成：
+
+1. 已接入 `PostgreSQL + Prisma`。新增 `prisma/schema.prisma`、`docker-compose.yml`、`src/lib/prisma.ts` 和本地 `.env` 数据库配置；本机 Docker Desktop / WSL2 已安装并可运行 `flashmuse-postgres` 容器。
+2. 已执行数据库迁移：`init_auth` 和 `user_workspace_state`。当前数据库表为 `User`、`Session`、`EmailVerificationCode`、`UserWorkspaceState`。
+3. 登录 Session 使用 `HttpOnly Cookie`，Cookie 名为 `flashmuse-session`；服务端只保存 session token hash，不保存明文 token。
+4. 登录流程已从占位改成可用：邮箱回车后调用 `/api/auth/check-email`；未注册或未设置密码时走验证码登录；验证码校验通过即注册 / 登录；已设置密码账号可用密码登录。
+5. 新增认证接口：`/api/auth/check-email`、`/api/auth/send-code`、`/api/auth/verify-code`、`/api/auth/login-password`、`/api/auth/me`、`/api/auth/logout`、`/api/auth/set-password`、`/api/auth/change-password`。
+6. 已接入网易个人邮箱 SMTP 发验证码，发信封装在 `src/lib/mailer.ts`，依赖 `nodemailer`。SMTP 配置写在本地 `.env`，来自 `AI-Video-Assistant_Project Planning\闪念官方邮箱.txt`。该 txt 和 `.env` 都含敏感信息，不要提交。
+7. 验证码接口逻辑：SMTP 配置完整时真实发邮件；SMTP 未配置时回退到终端打印验证码，便于本地开发。SMTP 连通性已用官方网易邮箱自发自收测试通过。
+8. 首页登录抽屉 UI 继续微调：`密码登录 / 验证码登录` 字号因全局 `button { font: inherit; }` 改为内部 `span style={{ fontSize: 13 }}`；邮箱输入 placeholder 改为 `请输入邮箱，如 name@email.com`；输入框文字为 `16px`。
+9. 工作台左下角用户邮箱现在读取 `/api/auth/me` 的真实邮箱；退出登录调用 `/api/auth/logout` 并回到首页。
+10. 用户中心弹窗已新增：左下角菜单中的 `用户信息 / 帐号安全 / 设置` 会打开同一个居中白色弹窗。弹窗参考用户给的设置弹窗图，左侧为选项卡，右侧为具体内容，右上角关闭，点击遮罩关闭。
+11. `用户信息` 页显示头像占位、登录邮箱、积分、生成图片数、生成视频数、已使用积分，统计项目前均为占位。`帐号安全` 页可设置密码或修改密码。`设置` 页放语言、默认进入页面、生成完成提醒、自动保存历史、本地缓存、版本信息等占位。
+12. 工作台存储策略已改成双模式：未登录 / 首页 `进入工作台` 仍用浏览器原 `localStorage`，保留当前测试内容；邮箱登录后使用数据库 `UserWorkspaceState.state`，新账号初始为空，后续会话、资产、工作流、输入设置、反馈和纠错记忆都会写数据库。
+13. 新增 `/api/workspace-state`：`GET` 读取当前登录用户工作区 JSON，`PUT` 保存当前登录用户工作区 JSON。当前是整份 JSON 保存，后续正式运营可拆成独立的对话、资产、生成任务、积分流水表。
+14. 本轮遇到 Prisma Client 生成失败 `EPERM rename query_engine-windows.dll.node`，原因是 `npm run dev` 的 Node 进程占用 DLL；已停止相关 Node 进程后重新 `npx prisma generate` 成功。
+15. 本轮验证：`npx prisma migrate dev --name user_workspace_state` 成功，`npm run lint` 通过，`npm run build` 通过。
+
+本轮继续完成：
+
+16. 用户中心资料已拆成 `User` 表独立字段并完成迁移：`nickname / phone / avatarUrl / language / notifyOnGenerationComplete / autoSaveHistory / generatedImageCount / generatedVideoCount`。新增 Prisma 迁移 `20260519132218_user_profile_fields`，`npx prisma migrate dev --name user_profile_fields` 已应用。
+17. 新增 `/api/user-profile`，用于独立读取和保存用户资料；`/api/auth/me` 返回完整用户资料；`/api/workspace-state` 只保存工作台状态，并会把旧 `UserWorkspaceState.state` 中的 `userNickname / userAvatarUrl / userPhone / userLanguage / notifyOnGenerationComplete / autoSaveHistory` 自动迁移到 `User` 字段后从 JSON 清理。
+18. 用户中心 `用户信息` 页重排：头像居中，信息行统一 490px 灰底圆角；昵称、邮箱、手机、生成图片、生成视频依次显示。昵称和手机可编辑，左下角用户区显示头像、昵称和邮箱，并随昵称更新。
+19. 默认头像按邮箱稳定生成淡色背景和首字符。用户头像上传已独立到 `/api/upload-avatar`，头像文件保存到 `public/generated/user_avatar/`；普通聊天上传仍走 `/api/upload-image` 和 `public/generated/upload_image/`。此前曾短暂把两个接口写反，已修复。
+20. 帐号安全页重做：已设置密码时显示 `*********** / 密码已设置` 灰底行；提供 `修改密码 / 忘记密码` 文字按钮。修改密码走当前密码 + 新密码 + 确认密码；忘记密码会发送当前登录邮箱验证码，6 个方形输入框满 6 位自动验证，验证成功后进入重设密码界面。新增 `/api/auth/check-code` 和 `/api/auth/reset-password`。
+21. 设置页已按用户要求调整：语言选择做实，支持 `简体中文 / 繁體中文`；语言名称在菜单中永远用自身语言显示。`生成完成提醒 / 自动保存历史` 改为通用蓝滑块；`默认进入页面` 移除；版本信息改为 `v0.1.0 内测版`。
+22. 当前简繁切换实现是前端 DOM 转换层，不是完整 i18n。选择繁体后会转换工作台可见中文、placeholder、title、aria-label、alt；切回简体会反向转换。转换层跳过输入框、textarea、contenteditable、script/style 和 `data-no-translate="true"`。曾出现 MutationObserver 重复写 DOM 导致页面不可点，已加防重复写入保护。
+23. 首页登录抽屉默认优先密码登录。邮箱输入框有内容时显示 `corner-down-left-line` 图标按钮，点击等同回车；邮箱提交后先查账号是否有密码，有密码进入密码输入，无密码或新账号自动切验证码登录。密码输入框不显示该图标，仍使用下方蓝色登录按钮。
+24. 本轮再次遇到 Prisma Client 生成 DLL 被 dev server 占用，已停止端口 3000 的 Node 进程后重新 `npx prisma generate` 成功。最终验证：`npm run lint` 和 `npm run build` 均通过。
+
+本轮继续补充：
+
+25. 登录流程继续按用户要求细化：用户主动选择 `验证码登录` 后，邮箱回车直接发送验证码，不再检查是否有密码；只有默认 `密码登录` 模式才先查账号密码状态。
+26. 验证码发送中状态已补齐。选择验证码登录并提交邮箱时，邮箱框下方显示蓝色 `正在发送验证码...`；三个点有逐个出现/消失动画。发送完成后切换到 6 位验证码输入框。
+27. 登录提示清理规则已统一。邮箱、密码、验证码输入框只要继续输入、删除或删空，已有红字错误和灰字提示都会立即清空，避免空输入框下方继续挂着错误文案。
+28. 邮箱输入示例已改为 `请输入邮箱，如 name@email.com`。`/api/auth/send-code` 已新增邮箱域名收信能力校验，先查 MX，失败再查 A/AAAA；明显不存在的域名不发验证码，错误文案为 `邮箱或域名不存在，请检查后重新输入`。
+29. 登录验证码 6 个输入框圆角从 `16px` 改为 `12px`。
+30. 默认头像增加 `1px` 稍深描边，颜色基于同一邮箱 hash 的 HSL 淡色生成；上传头像不加这圈默认描边。用户中心弹窗遮罩保留黑色半透明底，并给底层页面加 `backdrop-blur-[6px]` 模糊。
+31. 工作台新对话空白页已改为参考图式的居中欢迎区。标题为 `hi~把你的闪念跟我聊一聊！`，下面固定三行快捷按钮，每行 `3-5` 个，行上下对齐、列可不齐。
+32. 空白页快捷按钮池包含生图、生视频、故事梗概、分镜、提示词扩写、角色/场景创作等入口。按钮顺序和每行数量按当前会话 ID 打散，新建对话会变化。按钮为淡彩色随机底、无描边，按钮文字为内部 `span style={{ fontSize: 13 }}`。
+33. 空白页快捷按钮点击后不再填入输入框，而是自动切换底部输入框到 `Agent 模式` 并直接发送该快捷请求。
+34. `正在认真思考` 动画已放慢：文字走光从 `1.65s` 改为 `2.4s`，三点动画从 `0.95s` 改为 `1.45s`。
+35. 本轮这些 UI/登录改动后多次运行 `npm run lint` 通过；邮箱域名校验加入后也运行过 `npm run build` 通过。
+
+## 2026-05-20 本轮对话补充：左下角积分占位和后台管理第一版
+
+本轮完成：
+
+1. 用户中心头像上传按钮图标居中修复。`RiCameraLine` 原来带 `translate-x-px -translate-y-px`，导致按钮虽然 `flex items-center justify-center` 但视觉偏移；现已去掉偏移。
+2. 工作台左下角用户区新增积分占位卡：第一行 `RiVipDiamondLine + 积分：1,500`，第二行为米色底 `RiVipCrown2Line + 个人免费版`。第二行图标和文字整体居中，图标 `18px`，文字 `12px` 写在内部 `span style`，避免全局 `button { font: inherit; }` 覆盖。
+3. 左下角用户区整体高度已加高并多轮微调。当前底部模块 `min-h-[148px]`，内部 `flex flex-col justify-center`，积分卡和头像区作为整体上下居中；头像 hover 灰底高 `h-11`；积分卡宽度比侧栏内容少 `2px`，使用 `mx-[7px]`。
+4. 左下角用户区分隔线向上移 `6px`，同时加不透明背景遮罩，避免历史列表文字从分隔线下方透出。底部用户模块为 `relative z-20`，背景遮罩覆盖 `top-[-6px]` 到底部，积分和头像内容为 `z-10`。
+5. 左下角头像菜单改为在头像上方弹出，并允许压住积分块。最终定位：`bottom-[60px]`，水平 `left-[calc(50%-1px)]`。
+6. 设置图标已统一从 `RiSettings3Line` 改为官方 `RiSettingsLine`，覆盖左下角用户菜单和用户中心左侧导航。
+7. 新增独立后台页面 `/admin`，浏览器标题为 `闪念后台 Management`。后台登录页白底居中，标题为 Logo + `闪念后台`，Logo `30px`，标题下显示 `管理员白名单登录`。
+8. 根目录新增后台启动入口 `start-admin.bat`，对应脚本 `scripts/start-admin.ps1`。启动后打开 `http://localhost:3000/admin`，复用端口 `3000` 和同一个 dev server。
+9. 后台白名单使用环境变量 `ADMIN_EMAILS`，`.env.example` 已新增该项。用户指定的管理员邮箱已写入本地 `.env`，但 `.env` 不提交，不要公开展开真实敏感配置。
+10. 后台登录已从共用前台登录 Cookie 改为独立后台 Cookie。前台仍用 `flashmuse-session`；后台使用 `flashmuse-admin-session`，`path: "/admin"`，有效期 8 小时。后台登录/退出不影响前台工作台登录状态。
+11. 新增后台专用接口：`/api/admin/send-code`、`/api/admin/verify-code`、`/api/admin/login-password`、`/api/admin/logout`。后台支持密码登录和验证码登录，验证码登录适合管理员账号未设置密码的情况。后台接口会先检查邮箱是否在 `ADMIN_EMAILS` 白名单中。
+12. 新增 `src/lib/admin.ts`，用于读取管理员白名单和默认美元人民币汇率 `7.2`；新增 `src/lib/admin-auth.ts`，用 HMAC 签名的 Cookie 保存后台登录态，不写入 `Session` 表。
+13. 后台第一版内容已可用：概览真实显示总用户数、今日新增、总生成图片数、总生成视频数、用户积分余额；用户管理表真实读取最近 50 个 `User`；积分管理、生成记录、系统设置目前为占位。
+14. 后台左侧栏底部显示当前管理员邮箱，并新增白底 `退出后台` 按钮。退出调用 `/api/admin/logout`，只清 `flashmuse-admin-session`。
+15. Prisma 新增字段：`User.credits Int @default(1500)`、`User.disabled Boolean @default(false)`。迁移为 `20260520120000_admin_credits_fields`，已执行 `npx prisma migrate dev --name admin_credits_fields`。
+16. 迁移后 Prisma Client 生成曾因 Windows `query_engine-windows.dll.node` 被 3000 端口 dev server 占用而失败；停掉端口 3000 的 Node 进程后 `npx prisma generate` 成功。
+17. 当前后台未完成项：积分手动加减、积分流水表、生成记录表、生成成功扣积分、用户禁用拦截、后台设置可编辑、生成图片/视频计数自动累计。现在是可进入、可看真实用户数据的后台雏形。
+18. 本轮验证：`npm run lint` 和 `npm run build` 均通过。
+
+主要文件：
+
+- `src/components/chat-workbench.tsx`
+- `src/app/admin/page.tsx`
+- `src/app/admin/layout.tsx`
+- `src/app/admin/admin-login-form.tsx`
+- `src/app/admin/admin-logout-button.tsx`
+- `src/app/api/admin/send-code/route.ts`
+- `src/app/api/admin/verify-code/route.ts`
+- `src/app/api/admin/login-password/route.ts`
+- `src/app/api/admin/logout/route.ts`
+- `src/lib/admin.ts`
+- `src/lib/admin-auth.ts`
+- `prisma/schema.prisma`
+- `prisma/migrations/20260520120000_admin_credits_fields/migration.sql`
+- `start-admin.bat`
+- `scripts/start-admin.ps1`
+- `.env.example`
+
+## 2026-05-20 本轮对话补充：游客模式、登录历史、设置做实、预览页和 Agent 媒体体验
+
+本轮完成：
+
+1. 首页测试入口改名为 `游客模式`，链接为 `/workspace?guest=1`。工作台收到 `forceGuestMode` 后跳过登录态检查，强制读取浏览器 `localStorage` 游客数据；邮箱登录成功仍进入 `/workspace` 读取数据库用户工作区。上线只需隐藏/删除 `游客模式` 按钮。
+2. 工作台加载兜底改安全：`/api/auth/me` 或数据库失败时优先读取游客 `localStorage`，不再直接写空会话覆盖旧数据。用户本机旧游客历史已被覆盖为空，当前无法从 `yinzao-sessions-v2` 恢复。
+3. 首页 `游客模式` 和 `登录` 按钮高度、字号统一：按钮高 `h-9`，内部 `span` 字号 `13px`。
+4. 首页登录抽屉新增最近登录邮箱下拉菜单。登录成功后写入 `localStorage` 的 `flashmuse-login-history-v1`，最多 5 条；点击邮箱输入框时弹出，竖排、最高 `250px`、超出滚动；点邮箱填入并收起，自己输入或点其它区域也收起。
+5. 登录发送验证码文案区分来源。手动选择验证码登录时显示 `正在发送验证码...`；默认密码登录下系统判断首次登录或未设置密码时显示 `首次登录或未设置密码，正在发送验证码...`。
+6. 图片生成失败卡兜底修复。多图并发时如果平台返回 500 或无图，所有剩余等待卡会在批次结束/总异常时变成失败卡，避免长期停在 `99%生成中`。红字错误继续保留真实原因。
+7. `正在认真思考` 前置动画改成轻量 `GridLoader` 3x3 点阵，尺寸 `16px`，左侧历史运行中也复用；文字和后三个点改为灰白慢动画。已加 `prefers-reduced-motion` 静态降级。
+8. Agent 正文内联 Markdown 兜底修复。列表小标题中出现 `**阿宁**：` 这类格式时，标签也会走 `renderInlineFormatting()`，不再露出 `**`。
+9. Agent 自动生图/生视频结果会显示引导系统。媒体消息写入 `suggestions`，优先使用 Planner 返回值，没有则使用前端默认建议；专业模式媒体结果仍不显示引导。
+10. 预览页缩略图导航统一按当前对话媒体总数判断。图片和视频总数超过 1 个就显示右侧缩略图导航，Agent 多图、多视频、专业多图和混合媒体都生效。
+11. 用户中心 `图片/视频生成完成提醒` 做实，默认开启。任意会话生成图片/视频完成时，当前页面顶部绿色提醒 `图片生成已完成` / `视频生成已完成`；关闭后不显示；同一批任务只提醒一次。
+12. 用户中心 `生成图片/视频自动收入资产管理库` 做实，默认开启。关闭后生成图片/视频不会自动入资产库，但文件仍保留，对话流仍正常显示。内部沿用 `autoSaveHistory` 字段。
+13. 设置页移除 `本地缓存` 占位。用户生成文件、对话流和资产都属于用户数据，不应自动清理。
+14. 设置页新增 `预览页鼠标放在图片上滚轮有缩放功能` 和 `预览页鼠标放在缩略图区域滚轮有翻页功能`，默认都开启，互不排斥。主预览区滚轮缩放图片；缩略图区域滚轮翻页；视频主预览区不缩放，缩略图区可翻页。
+15. 新增 Prisma 字段 `previewWheelZoom / previewWheelFlip` 并执行迁移 `20260520074200_preview_wheel_settings`、`20260520081205_preview_wheel_zoom_default_on`。`npx prisma generate` 遇到 Windows DLL 占用时，停掉 3000 端口 Node 进程后重试。
+16. 设置页图标改用官方 `react-icons/ri` 导出：`RiNotification2Line`、`RiZoomInLine`、`RiArrowUpDownLine`。不要再用本轮曾临时写的本地 SVG。
+17. 本轮多次验证：`npm run lint` 和 `npm run build` 均通过。
+
+主要文件：
+
+- `src/app/page.tsx`
+- `src/components/chat-workbench.tsx`
+- `src/app/globals.css`
+- `src/lib/user-profile.ts`
+- `prisma/schema.prisma`
+- `prisma/migrations/20260520074200_preview_wheel_settings/migration.sql`
+- `prisma/migrations/20260520081205_preview_wheel_zoom_default_on/migration.sql`
 
 ## 2026-05-18 本轮对话补充：首页登录抽屉和工作台用户区
 

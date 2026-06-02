@@ -37,6 +37,7 @@ yarn-error.log*
 # local generated assets and logs
 /public/generated/
 /start-project.log
+/.runtime/
 
 # vercel
 .vercel

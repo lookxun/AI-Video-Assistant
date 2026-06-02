@@ -77,6 +77,10 @@ select {
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.88) !important;
 }
 
+.yinzao-character-option-active {
+  border-color: #367cee !important;
+}
+
 .yinzao-tool-button-round {
   border-radius: 999px;
 }
@@ -90,16 +94,26 @@ select {
   display: none;
 }
 
+.yinzao-upload-row-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.yinzao-upload-row-scroll::-webkit-scrollbar {
+  display: none;
+}
+
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-thumb {
   border: 1px solid transparent;
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.35);
+  background: transparent;
   background-clip: padding-box;
+  transition: background 0.18s ease;
 }
 
 ::-webkit-scrollbar-track {
@@ -108,108 +122,112 @@ select {
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+  scrollbar-color: transparent transparent;
 }
 
 .yinzao-chat-scroll {
   scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+  scrollbar-color: transparent transparent;
 }
 
 .yinzao-chat-scroll::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
 }
 
 .yinzao-chat-scroll::-webkit-scrollbar-thumb {
   border: 1px solid transparent;
   border-radius: 999px;
+  background: transparent;
+  background-clip: padding-box;
+}
+
+.yinzao-scrollbar-active {
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+
+.yinzao-scrollbar-hover:hover {
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+
+.yinzao-scrollbar-active::-webkit-scrollbar-thumb,
+.yinzao-scrollbar-hover:hover::-webkit-scrollbar-thumb,
+html.yinzao-scrollbar-active::-webkit-scrollbar-thumb,
+body.yinzao-scrollbar-active::-webkit-scrollbar-thumb,
+.yinzao-chat-scroll.yinzao-scrollbar-active::-webkit-scrollbar-thumb {
   background: rgba(148, 163, 184, 0.35);
   background-clip: padding-box;
 }
 
-.yinzao-chat-scroll::-webkit-scrollbar-thumb:hover {
+.yinzao-scrollbar-active::-webkit-scrollbar-thumb:hover,
+html.yinzao-scrollbar-active::-webkit-scrollbar-thumb:hover,
+body.yinzao-scrollbar-active::-webkit-scrollbar-thumb:hover,
+.yinzao-chat-scroll.yinzao-scrollbar-active::-webkit-scrollbar-thumb:hover {
   background: rgba(100, 116, 139, 0.5);
   background-clip: padding-box;
 }
 
-.yinzao-dot-grid {
+.yinzao-hidden-scrollbar,
+.yinzao-upload-row-scroll {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+.yinzao-hidden-scrollbar::-webkit-scrollbar,
+.yinzao-upload-row-scroll::-webkit-scrollbar {
+  display: none !important;
+}
+
+.yinzao-grid-loader {
+  --grid-loader-size: 16px;
+  --grid-loader-color: #367cee;
+  --grid-loader-cell: calc((var(--grid-loader-size) - 4px) / 3);
   display: inline-grid;
-  width: 18px;
-  height: 18px;
+  width: var(--grid-loader-size);
+  height: var(--grid-loader-size);
   flex-shrink: 0;
-  grid-template-columns: repeat(3, 4px);
-  grid-template-rows: repeat(3, 4px);
+  grid-template-columns: repeat(3, var(--grid-loader-cell));
+  grid-template-rows: repeat(3, var(--grid-loader-cell));
   place-content: center;
   gap: 2px;
 }
 
-.yinzao-dot-grid-item {
-  position: relative;
-  width: 4px;
-  height: 4px;
-  overflow: hidden;
+.yinzao-grid-loader-cell {
+  width: var(--grid-loader-cell);
+  height: var(--grid-loader-cell);
   border-radius: 1px;
-  background: #b9ddff;
+  background: color-mix(in srgb, var(--grid-loader-color) 18%, white);
+  box-shadow: 0 0 0 rgba(54, 124, 238, 0);
+  opacity: 0.62;
+  transform: scale(0.76);
 }
 
-.yinzao-dot-grid-highlight {
-  position: absolute;
-  inset: 0;
-  border-radius: 1px;
-  background: #3d8cff;
-  opacity: 0;
-  animation: yinzaoDotGridPulse 3.14s steps(1, end) infinite;
+.yinzao-grid-loader-cell[data-active="false"] {
+  opacity: 0.18;
+  animation: none;
 }
 
-.yinzao-dot-grid-item:nth-child(1) .yinzao-dot-grid-highlight {
-  animation-delay: -0.08s;
+.yinzao-grid-loader-pulse .yinzao-grid-loader-cell[data-active="true"] {
+  animation: yinzaoGridLoaderPulse 1.55s ease-in-out infinite;
 }
 
-.yinzao-dot-grid-item:nth-child(2) .yinzao-dot-grid-highlight {
-  animation-delay: -0.74s;
-}
-
-.yinzao-dot-grid-item:nth-child(3) .yinzao-dot-grid-highlight {
-  animation-delay: -0.31s;
-}
-
-.yinzao-dot-grid-item:nth-child(4) .yinzao-dot-grid-highlight {
-  animation-delay: -1.08s;
-}
-
-.yinzao-dot-grid-item:nth-child(5) .yinzao-dot-grid-highlight {
-  animation-delay: -1.56s;
-}
-
-.yinzao-dot-grid-item:nth-child(6) .yinzao-dot-grid-highlight {
-  animation-delay: -0.52s;
-}
-
-.yinzao-dot-grid-item:nth-child(7) .yinzao-dot-grid-highlight {
-  animation-delay: -0.93s;
-}
-
-.yinzao-dot-grid-item:nth-child(8) .yinzao-dot-grid-highlight {
-  animation-delay: -0.18s;
-}
-
-.yinzao-dot-grid-item:nth-child(9) .yinzao-dot-grid-highlight {
-  animation-delay: -1.26s;
+.yinzao-grid-loader-stagger .yinzao-grid-loader-cell[data-active="true"] {
+  animation: yinzaoGridLoaderStagger 1.45s ease-in-out infinite;
+  animation-delay: calc(var(--grid-loader-index) * 0.085s);
 }
 
 .yinzao-thinking-shimmer {
-  background: linear-gradient(100deg, #5f5f5f 0%, #5f5f5f 28%, #ffffff 42%, #367cee 50%, #b8dcff 58%, #5f5f5f 72%, #5f5f5f 100%);
+  background: linear-gradient(100deg, #5f5f5f 0%, #5f5f5f 30%, #ffffff 46%, #d9d9d9 58%, #5f5f5f 74%, #5f5f5f 100%);
   background-size: 300% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  filter: drop-shadow(0 0 4px rgba(54, 124, 238, 0.16));
-  animation: yinzaoThinkingShimmer 1.65s linear infinite;
+  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.12));
+  animation: yinzaoThinkingShimmer 3.2s linear infinite;
 }
 
 .yinzao-thinking-dot {
   background: #8a8a8a;
-  animation: yinzaoThinkingDotSweep 0.95s ease-in-out infinite;
+  animation: yinzaoThinkingDotSweep 2.1s ease-in-out infinite;
 }
 
 .yinzao-thinking-dot:nth-child(2) {
@@ -269,41 +287,73 @@ select {
   }
 
   35% {
-    background: #367cee;
-    box-shadow: 0 0 10px rgba(54, 124, 238, 0.75);
+    background: #ffffff;
+    box-shadow: 0 0 10px rgba(255, 255, 255, 0.46);
     transform: translateY(-4px) scale(1.22);
   }
 
   55% {
-    background: #9fd1ff;
-    box-shadow: 0 0 8px rgba(159, 209, 255, 0.6);
+    background: #d9d9d9;
+    box-shadow: 0 0 8px rgba(217, 217, 217, 0.38);
     transform: translateY(-1px) scale(1.08);
   }
 }
 
-@keyframes yinzaoDotGridPulse {
-  0%, 18%, 100% {
-    opacity: 0;
+@keyframes yinzaoGridLoaderPulse {
+  0%, 100% {
+    background: color-mix(in srgb, var(--grid-loader-color) 18%, white);
+    box-shadow: 0 0 0 rgba(54, 124, 238, 0);
+    opacity: 0.56;
+    transform: scale(0.74);
   }
 
-  19%, 34% {
+  45% {
+    background: var(--grid-loader-color);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--grid-loader-color) 64%, transparent);
     opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes yinzaoGridLoaderStagger {
+  0%, 78%, 100% {
+    background: color-mix(in srgb, var(--grid-loader-color) 18%, white);
+    box-shadow: 0 0 0 rgba(54, 124, 238, 0);
+    opacity: 0.5;
+    transform: scale(0.72);
   }
 
-  35%, 54% {
-    opacity: 0;
+  28% {
+    background: var(--grid-loader-color);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--grid-loader-color) 68%, transparent);
+    opacity: 1;
+    transform: scale(1.05);
   }
 
-  55%, 66% {
+  48% {
+    background: color-mix(in srgb, var(--grid-loader-color) 58%, white);
+    box-shadow: 0 0 7px color-mix(in srgb, var(--grid-loader-color) 42%, transparent);
     opacity: 0.82;
+    transform: scale(0.88);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .yinzao-grid-loader-cell,
+  .yinzao-thinking-shimmer,
+  .yinzao-thinking-dot {
+    animation: none !important;
   }
 
-  67%, 82% {
-    opacity: 0;
+  .yinzao-grid-loader-cell[data-active="true"] {
+    background: var(--grid-loader-color);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--grid-loader-color) 46%, transparent);
+    opacity: 0.9;
+    transform: scale(0.9);
   }
 
-  83%, 92% {
-    opacity: 1;
+  .yinzao-thinking-shimmer {
+    color: #5f5f5f;
   }
 }
 @keyframes yinzaoVideoWaiting {
@@ -416,6 +466,30 @@ select {
 
   to {
     transform: translateX(0);
+  }
+}
+
+.home-login-sending-dot {
+  display: inline-block;
+  width: 0.42em;
+  animation: homeLoginSendingDot 1.2s steps(1, end) infinite;
+}
+
+.home-login-sending-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.home-login-sending-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes homeLoginSendingDot {
+  0%, 24%, 100% {
+    opacity: 0;
+  }
+
+  25%, 72% {
+    opacity: 1;
   }
 }
 

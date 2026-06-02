@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { GlobalScrollbarController } from "@/components/global-scrollbar-controller";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -34,7 +35,7 @@ export default function RootLayout({
         <link rel="shortcut icon" href="/home-assets/logo.png?v=20260518-2" type="image/png" />
         <link rel="apple-touch-icon" href="/home-assets/logo.png?v=20260518-2" type="image/png" />
       </head>
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col"><GlobalScrollbarController />{children}</body>
     </html>
   );
 }

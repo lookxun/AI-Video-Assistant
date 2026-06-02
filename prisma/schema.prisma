@@ -1,0 +1,106 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                         String    @id
+  email                      String    @unique
+  passwordHash               String?
+  nickname                   String?
+  phone                      String?
+  avatarUrl                  String?
+  language                   String    @default("简体中文")
+  notifyOnGenerationComplete Boolean   @default(true)
+  autoSaveHistory            Boolean   @default(true)
+  previewWheelZoom           Boolean   @default(true)
+  previewWheelFlip           Boolean   @default(true)
+  credits                    Int       @default(1500)
+  disabled                   Boolean   @default(false)
+  generatedImageCount        Int       @default(0)
+  generatedVideoCount        Int       @default(0)
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
+  lastLoginAt                DateTime?
+  sessions                   Session[]
+  workspace                  UserWorkspaceState?
+  creditLedgers              CreditLedger[]
+}
+
+model CreditSetting {
+  id                    String   @id @default("default")
+  usdToCnyRate          Float    @default(7.2)
+  creditsPerCny         Int      @default(10)
+  signupCredits         Int      @default(1500)
+  chargeText            Boolean  @default(true)
+  chargeImage           Boolean  @default(true)
+  chargeVideo           Boolean  @default(true)
+  chargePromptTool      Boolean  @default(true)
+  updatedAt             DateTime @updatedAt
+}
+
+model CreditLedger {
+  id               String   @id @default(cuid())
+  userId           String
+  conversationId   String?
+  conversationTitle String?
+  requestId        String?
+  direction        String   @default("consume")
+  kind             String
+  label            String?
+  model            String?
+  credits          Int
+  promptTokens     Int      @default(0)
+  completionTokens Int      @default(0)
+  totalTokens      Int      @default(0)
+  usd              Float    @default(0)
+  cny              Float    @default(0)
+  imageCount       Int      @default(0)
+  videoCount       Int      @default(0)
+  metadata         Json?
+  createdAt        DateTime @default(now())
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([direction, createdAt])
+  @@index([conversationId])
+  @@unique([requestId, kind])
+}
+
+model UserWorkspaceState {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  state     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model EmailVerificationCode {
+  id         String    @id @default(cuid())
+  email      String
+  codeHash   String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  @@index([email, createdAt])
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
