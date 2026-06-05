@@ -5,6 +5,16 @@ import { RiArrowDownSLine, RiArrowRightSLine, RiCloseLine, RiInformation2Line, R
 import { useBodyScrollLock } from "@/components/use-body-scroll-lock";
 import { AdminHoverImagePreview } from "./admin-hover-image-preview";
 
+function getMediaThumbnailUrl(url: string) {
+  if (!url.startsWith("/generated/")) return url;
+  return `/api/media-thumbnail?url=${encodeURIComponent(url)}`;
+}
+
+function getLocalVideoPosterUrl(url: string) {
+  if (!url.startsWith("/generated/videos/")) return undefined;
+  return url.replace("/generated/videos/", "/generated/video-posters/").replace(/\.[^.]+$/, ".jpg");
+}
+
 const PAGE_SIZE = 15;
 const MIN_USD_TO_CNY_RATE = 1;
 const MAX_USD_TO_CNY_RATE = 20;
@@ -80,8 +90,11 @@ export type AdminCreditFlowItem = {
 export type AdminCreditConversationDetail = {
   id: string;
   title: string;
+  isDeleted?: boolean;
+  deletedAtLabel?: string;
   conversationCode?: string;
   updatedAtLabel: string;
+  updatedAtTs?: number;
   chatCredits: number;
   chatUsd?: number;
   chatCny?: number;
@@ -300,7 +313,7 @@ function CreditDetailChildItem({ label, value, marker, onClick }: { label: strin
 export function CreditFlowDialog({ user, onClose }: { user: AdminCreditUser; onClose: () => void }) {
   useBodyScrollLock(true);
 
-  const conversations = user.conversationCreditDetails;
+  const conversations = useMemo(() => [...user.conversationCreditDetails].sort((left, right) => (right.updatedAtTs ?? 0) - (left.updatedAtTs ?? 0)), [user.conversationCreditDetails]);
   const [activeConversationId, setActiveConversationId] = useState(() => conversations[0]?.id ?? "");
   const activeConversation = conversations.find((item) => item.id === activeConversationId) ?? conversations[0];
   const displayName = user.nickname || user.userEmail;
@@ -325,7 +338,10 @@ export function CreditFlowDialog({ user, onClose }: { user: AdminCreditUser; onC
                   onClick={() => setActiveConversationId(conversation.id)}
                   className={`w-full rounded-[10px] px-3 text-left transition ${activeConversation?.id === conversation.id ? "bg-[#ececec] py-2 text-[#111111]" : "py-1.5 text-[#666666] hover:bg-[#eeeeee] hover:text-[#111111]"}`}
                 >
-                  <div className="truncate text-[13px] font-medium">【{conversation.conversationCode || "--"}】{conversation.title || "新对话"}</div>
+                  <div className="truncate text-[13px] font-medium">
+                    <span>【{conversation.conversationCode || "--"}】{conversation.title || "新对话"}</span>
+                    {conversation.isDeleted ? <span className="ml-1 text-red-500">用户已删除</span> : null}
+                  </div>
                   {activeConversation?.id === conversation.id ? <div className="mt-1 truncate text-[11px] text-[#999999]">{conversation.updatedAtLabel}</div> : null}
                 </button>
               )) : <div className="pt-8 text-center text-[13px] text-[#999999]">暂无对话流积分</div>}
@@ -336,6 +352,7 @@ export function CreditFlowDialog({ user, onClose }: { user: AdminCreditUser; onC
             <div className="min-h-0 flex-1 overflow-y-auto bg-white px-8 py-6">
               {activeConversation ? (
                 <div className="mx-auto max-w-[920px]">
+                  {activeConversation.isDeleted ? <div className="mb-2 text-center text-[12px] leading-5 text-red-500">用户已删除{activeConversation.deletedAtLabel ? ` ${activeConversation.deletedAtLabel}` : ""}</div> : null}
                   <div className="mb-3 flex items-center justify-between gap-4 text-[13px] text-[#777777]">
                     <div>{getConversationSummaryText(activeConversation)}</div>
                     <div className="shrink-0 text-right">积分扣除：-{(activeConversation.chatCredits + activeConversation.planCredits + activeConversation.mediaItems.reduce((sum, item) => sum + item.credits, 0)).toLocaleString("en-US")}</div>
@@ -368,7 +385,7 @@ export function CreditFlowDialog({ user, onClose }: { user: AdminCreditUser; onC
 
 function CreditFlowRow({ label, mediaName, credits, usd, cny, meta, errorText, deletedAtLabel, mediaUrl, mediaKind, status = "success", isUploadRecord, isChargeDisabled, isReversePrompt, promptText, showPromptCopyColumn }: { label: string; mediaName?: string; credits: number; usd: number; cny: number; meta?: string; errorText?: string; deletedAtLabel?: string; mediaUrl?: string; mediaKind?: "image" | "video" | "file"; status?: "success" | "failed"; isUploadRecord?: boolean; isChargeDisabled?: boolean; isReversePrompt?: boolean; promptText?: string; showPromptCopyColumn?: boolean }) {
   const isDeleted = errorText === "用户已删除";
-  const creditsLabel = isUploadRecord ? "--" : isChargeDisabled && credits === 0 ? "0（扣分关闭）" : `-${credits.toLocaleString("en-US")}`;
+  const creditsLabel = isUploadRecord ? "--" : isChargeDisabled && credits === 0 ? "0（扣分关闭）" : credits === 0 ? "0（扣分异常）" : `-${credits.toLocaleString("en-US")}`;
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const gridClassName = showPromptCopyColumn ? "grid-cols-[minmax(0,1.6fr)_110px_150px]" : "grid-cols-[minmax(0,1.6fr)_110px_110px_110px]";
 
@@ -389,12 +406,15 @@ function CreditFlowRow({ label, mediaName, credits, usd, cny, meta, errorText, d
         ) : mediaUrl ? (
           mediaKind === "video" ? (
             <div className="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded-[6px] bg-[#e8e8e8]">
-              <video src={mediaUrl} className="h-full w-full object-cover" muted />
+              {getLocalVideoPosterUrl(mediaUrl) ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={getMediaThumbnailUrl(getLocalVideoPosterUrl(mediaUrl) ?? mediaUrl)} alt={label} className="h-full w-full object-cover" />
+              ) : <video src={mediaUrl} className="h-full w-full object-cover" muted />}
             </div>
           ) : (
             <AdminHoverImagePreview src={mediaUrl} alt={label} wrapperClassName="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded-[6px] bg-[#e8e8e8]">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={mediaUrl} alt={label} className="h-full w-full object-cover" />
+              <img src={getMediaThumbnailUrl(mediaUrl)} alt={label} className="h-full w-full object-cover" />
             </AdminHoverImagePreview>
           )
         ) : status === "failed" ? (

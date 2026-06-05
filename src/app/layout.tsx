@@ -34,6 +34,35 @@ export default function RootLayout({
         <link rel="icon" href="/home-assets/logo.png?v=20260518-2" type="image/png" />
         <link rel="shortcut icon" href="/home-assets/logo.png?v=20260518-2" type="image/png" />
         <link rel="apple-touch-icon" href="/home-assets/logo.png?v=20260518-2" type="image/png" />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+window.addEventListener('error', function (event) {
+  try {
+    navigator.sendBeacon('/api/client-error', new Blob([JSON.stringify({
+      message: event.message,
+      source: event.filename,
+      lineno: event.lineno,
+      colno: event.colno,
+      stack: event.error && event.error.stack,
+      href: location.href,
+      userAgent: navigator.userAgent
+    })], { type: 'application/json' }));
+  } catch (_) {}
+});
+window.addEventListener('unhandledrejection', function (event) {
+  try {
+    var reason = event.reason || {};
+    navigator.sendBeacon('/api/client-error', new Blob([JSON.stringify({
+      message: reason.message || String(reason),
+      stack: reason.stack,
+      href: location.href,
+      userAgent: navigator.userAgent
+    })], { type: 'application/json' }));
+  } catch (_) {}
+});`,
+          }}
+        />
       </head>
       <body className="min-h-full flex flex-col"><GlobalScrollbarController />{children}</body>
     </html>

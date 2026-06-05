@@ -6,6 +6,7 @@ import { normalizeEmail } from "@/lib/auth";
 export const adminCookieName = "flashmuse-admin-session";
 const adminSessionMaxAgeSeconds = 60 * 60 * 8;
 const authSecret = process.env.AUTH_SECRET || "flashmuse-local-dev-secret-change-me";
+const forceInsecureAuthCookie = process.env.FORCE_INSECURE_AUTH_COOKIE === "true";
 
 function signAdminPayload(payload: string) {
   return createHmac("sha256", `${authSecret}:admin-session`).update(payload).digest("base64url");
@@ -27,7 +28,7 @@ export async function createAdminSession(email: string) {
   cookieStore.set(adminCookieName, token, {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
     path: "/admin",
     maxAge: adminSessionMaxAgeSeconds,
   });
@@ -67,7 +68,7 @@ export async function clearAdminSession() {
   cookieStore.set(adminCookieName, "", {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
     path: "/admin",
     maxAge: 0,
   });

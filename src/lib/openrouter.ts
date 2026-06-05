@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type { ConversationModel, ModelName } from "@/lib/models";
 import { ADVANCED_CHAT_MODEL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, getExpectedImageDimensions, getImageModelRule, models, resolveImageSettingsForModel } from "@/lib/models";
 import { getLocalImageDimensions, saveGeneratedAsset, type ImageDimensions } from "@/lib/local-assets";
+import { enqueueRemoteAssetSave } from "@/lib/media-save-queue";
 import { toUserErrorMessage } from "@/lib/error-message";
 import { getBytePlusBaseUrl, getBytePlusModelForRequest, getConfiguredBytePlusApiKey, getConfiguredOpenRouterApiKey, getModelProviderPreference, isTextModelEnabled } from "@/lib/system-settings";
 
@@ -75,12 +76,34 @@ export type AgentPlan = {
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
 const execFileAsync = promisify(execFile);
+const IMAGE_PROVIDER_TIMEOUT_MS = 5 * 60 * 1000;
 const CHINA_MODEL_PREFIXES = [
   "qwen/",
   "deepseek/",
   "bytedance-seed/",
 ];
 const MODELS_PER_PROVIDER = 3;
+
+async function saveImageForDisplay(source: string, meta: { requestId?: string; model?: string } = {}) {
+  if (/^https?:\/\//i.test(source)) {
+    void enqueueRemoteAssetSave({ remoteUrl: source, type: "image", requestId: meta.requestId, model: meta.model });
+    return source;
+  }
+
+  const startedAt = Date.now();
+  const localUrl = await saveGeneratedAsset(source, "image");
+  if (source.startsWith("data:")) {
+    console.log("[media-save] saved inline asset", {
+      type: "image",
+      requestId: meta.requestId,
+      model: meta.model,
+      saveMs: Date.now() - startedAt,
+      localUrl,
+      dimensions: getLocalImageDimensions(localUrl),
+    });
+  }
+  return localUrl;
+}
 
 function getProviderId(modelId: string) {
   return modelId.split("/")[0] ?? modelId;
@@ -209,6 +232,21 @@ function toCurlHeaderArgs(headers: Record<string, string>) {
   return Object.entries(headers).flatMap(([key, value]) => ["-H", `${key}: ${value}`]);
 }
 
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, label: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw new Error(`${label}超时，请稍后再试。`);
+    if (error instanceof Error && error.name === "AbortError") throw new Error(`${label}超时，请稍后再试。`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function curlPostJson<T>(url: string, headers: Record<string, string>, body: unknown, fallback: string) {
   const bodyPath = join(tmpdir(), `yinzao-openrouter-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
 
@@ -218,7 +256,7 @@ async function curlPostJson<T>(url: string, headers: Record<string, string>, bod
     const { stdout } = await execFileAsync(
       getCurlCommand(),
       ["-sS", "-L", "-X", "POST", ...toCurlHeaderArgs(headers), "--data-binary", `@${bodyPath}`, "-w", "\n%{http_code}", url],
-      { encoding: "utf8", maxBuffer: 120 * 1024 * 1024 },
+      { encoding: "utf8", maxBuffer: 120 * 1024 * 1024, timeout: IMAGE_PROVIDER_TIMEOUT_MS },
     );
     const separatorIndex = stdout.lastIndexOf("\n");
     const text = separatorIndex >= 0 ? stdout.slice(0, separatorIndex) : stdout;
@@ -234,7 +272,11 @@ async function curlPostJson<T>(url: string, headers: Record<string, string>, bod
         }
     }
 
-    return JSON.parse(text) as T;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new Error(`${fallback}：平台响应不完整，请稍后重试。`);
+    }
   } finally {
     await unlink(bodyPath).catch(() => undefined);
   }
@@ -731,6 +773,7 @@ type ImageGenerationOptions = {
   };
   count?: number;
   candidateMode?: "all" | "best";
+  requestId?: string;
 };
 
 function getImageRequestConfig(model: string, settings?: ImageGenerationOptions["settings"]) {
@@ -749,7 +792,7 @@ function getImageRequestConfig(model: string, settings?: ImageGenerationOptions[
 }
 
 function isTransientImageError(message: string) {
-  return /Internal Server Error|没有返回图片|\b500\b|\b502\b|\b503\b|\b504\b/i.test(message);
+  return /Internal Server Error|Unexpected end of JSON input|响应解析失败|响应不完整|平台响应不完整|\b500\b|\b502\b|\b503\b|\b504\b/i.test(message);
 }
 
 function isImageConfigError(message: string) {
@@ -792,7 +835,18 @@ function getBytePlusImageUsage(data: BytePlusImageGenerationResponse, model: str
 }
 
 function cleanNoImageReason(value: string | undefined) {
-  return value?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const text = value
+    ?.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, " ")
+    .replace(/\b(?:OpenRouter|BytePlus|ModelArk|OpenAI|Gemini|Google)\b\s*/gi, "")
+    .replace(/^(?:图片|视频)?(?:平台|模型|供应商)?(?:图片|视频)?(?:生成|任务|请求)?失败[：:]\s*/i, "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[：:；;，,\s]+|[：:；;，,\s]+$/g, "")
+    .trim();
+  if (!text) return undefined;
+  if (/^finish_reason\s*:/i.test(text) || /^native_finish_reason\s*:/i.test(text)) return undefined;
+  if (/system-reminder|operational mode|plan to build|read-only mode|file changes|shell commands/i.test(text)) return undefined;
+  return text;
 }
 
 function getOpenRouterNoImageReason(data: OpenRouterChatCompletionResponse) {
@@ -802,8 +856,6 @@ function getOpenRouterNoImageReason(data: OpenRouterChatCompletionResponse) {
     cleanNoImageReason(data.error?.message),
     cleanNoImageReason(message?.refusal),
     cleanNoImageReason(message?.content),
-    cleanNoImageReason(choice?.finish_reason ? `finish_reason: ${choice.finish_reason}` : undefined),
-    cleanNoImageReason(choice?.native_finish_reason ? `native_finish_reason: ${choice.native_finish_reason}` : undefined),
   ].filter((item): item is string => Boolean(item));
 
   return Array.from(new Set(parts)).join("；");
@@ -874,11 +926,11 @@ async function generateBytePlusImage(prompt: string, referenceImages: string[] =
     if (supportsBytePlusImageOutputFormat(bytePlusModel)) body.output_format = "jpeg";
 
     let providerDoneAt = startedAt;
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-    });
+    }, IMAGE_PROVIDER_TIMEOUT_MS, "BytePlus 图片生成");
     providerDoneAt = Date.now();
 
     let data: BytePlusImageGenerationResponse;
@@ -903,9 +955,9 @@ async function generateBytePlusImage(prompt: string, referenceImages: string[] =
 
     const images = getBytePlusImageUrls(data);
     const failureReasons = getBytePlusImageFailureReasons(data);
-    const localImages = await Promise.all(images.map((image) => saveGeneratedAsset(image, "image")));
+    const displayImages = await Promise.all(images.map((image) => saveImageForDisplay(image, { requestId: options.requestId, model } )));
     const saveDoneAt = Date.now();
-    if (localImages.length === 0) {
+    if (displayImages.length === 0) {
       const reason = cleanNoImageReason(data.error?.message) || "empty image result";
       console.error("[image-generation] BytePlus no image returned", { model: bytePlusModel, responseId: data.id, reason });
       throw new Error(reason ? `BytePlus 图片平台没有返回图片：${reason}` : "BytePlus 图片平台没有返回图片，且没有返回可用原因。");
@@ -916,12 +968,12 @@ async function generateBytePlusImage(prompt: string, referenceImages: string[] =
     }
 
     const allImageDimensions = Object.fromEntries(
-      localImages
+      displayImages
         .map((image) => [image, getLocalImageDimensions(image)] as const)
         .filter((item): item is readonly [string, ImageDimensions] => Boolean(item[1])),
     );
     const dimensionsDoneAt = Date.now();
-    const selectedImages = options.candidateMode === "best" ? pickBestImageForTarget(localImages, allImageDimensions, targetDimensions) : localImages;
+    const selectedImages = options.candidateMode === "best" ? pickBestImageForTarget(displayImages, allImageDimensions, targetDimensions) : displayImages;
     const imageDimensions = Object.fromEntries(
       selectedImages
         .map((image) => [image, allImageDimensions[image]] as const)
@@ -929,12 +981,14 @@ async function generateBytePlusImage(prompt: string, referenceImages: string[] =
     );
 
     console.log("[image-generation] BytePlus timing", {
+      requestId: options.requestId,
       model: bytePlusModel,
       size: bytePlusSize,
       returnedImages: images.length,
-      localImages: localImages.length,
+      displayImages: displayImages.length,
+      asyncSave: true,
       providerMs: providerDoneAt - startedAt,
-      saveMs: saveDoneAt - providerDoneAt,
+      saveQueueMs: saveDoneAt - providerDoneAt,
       dimensionsMs: dimensionsDoneAt - saveDoneAt,
       totalMs: dimensionsDoneAt - startedAt,
     });
@@ -944,7 +998,7 @@ async function generateBytePlusImage(prompt: string, referenceImages: string[] =
       images: selectedImages,
       imageDimensions,
       failureReasons,
-      usage: getBytePlusImageUsage(data, bytePlusModel, localImages.length),
+      usage: getBytePlusImageUsage(data, bytePlusModel, displayImages.length),
     };
   };
 
@@ -997,6 +1051,7 @@ export async function generateOpenRouterImage(prompt: string, referenceImages: s
   });
 
   const createOne = async (useImageConfig = true) => {
+    const startedAt = Date.now();
     const body = {
       model,
       messages: [
@@ -1009,17 +1064,19 @@ export async function generateOpenRouterImage(prompt: string, referenceImages: s
       ...(useImageConfig ? { image_config: imageConfig } : {}),
     };
     const headers = getOpenRouterHeaders(apiKey);
-    const response = await fetch(OPENROUTER_URL, {
+    const response = await fetchWithTimeout(OPENROUTER_URL, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
-    });
+    }, IMAGE_PROVIDER_TIMEOUT_MS, "图片生成");
 
     let data: OpenRouterChatCompletionResponse;
+    let providerDoneAt = startedAt;
 
     if (!response.ok) {
       try {
         data = await curlPostJson<OpenRouterChatCompletionResponse>(OPENROUTER_URL, headers, body, "图片生成失败");
+        providerDoneAt = Date.now();
       } catch (curlError) {
         const curlMessage = curlError instanceof Error ? curlError.message : "";
         if (/curl|schannel|closed abruptly|close_notify|command failed/i.test(curlMessage)) throw new Error("网络连接异常，请稍后重试。");
@@ -1029,6 +1086,7 @@ export async function generateOpenRouterImage(prompt: string, referenceImages: s
     } else {
       try {
         data = (await response.json()) as OpenRouterChatCompletionResponse;
+        providerDoneAt = Date.now();
       } catch (parseError) {
         const parseMessage = parseError instanceof Error ? parseError.message : "图片平台返回解析失败";
         throw new Error(`图片平台响应解析失败：${parseMessage}`);
@@ -1036,18 +1094,18 @@ export async function generateOpenRouterImage(prompt: string, referenceImages: s
     }
 
     const images = getOpenRouterImageUrls(data);
-    let localImages: string[] = [];
+    let displayImages: string[] = [];
 
     try {
-      localImages = await Promise.all(images.map(async (image) => {
-        return saveGeneratedAsset(image, "image");
+      displayImages = await Promise.all(images.map(async (image) => {
+        return saveImageForDisplay(image, { requestId: options.requestId, model });
       }));
     } catch (saveError) {
       if (saveError instanceof Error) throw saveError;
       throw new Error("Image asset save failed");
     }
 
-    if (localImages.length === 0) {
+    if (displayImages.length === 0) {
       const noImageReason = getOpenRouterNoImageReason(data);
       console.error("[image-generation] no image returned", {
         model,
@@ -1061,16 +1119,28 @@ export async function generateOpenRouterImage(prompt: string, referenceImages: s
     }
 
     const allImageDimensions = Object.fromEntries(
-      localImages
+      displayImages
         .map((image) => [image, getLocalImageDimensions(image)] as const)
         .filter((item): item is readonly [string, ImageDimensions] => Boolean(item[1])),
     );
-    const selectedImages = options.candidateMode === "best" ? pickBestImageForTarget(localImages, allImageDimensions, targetDimensions) : localImages;
+    const selectedImages = options.candidateMode === "best" ? pickBestImageForTarget(displayImages, allImageDimensions, targetDimensions) : displayImages;
     const imageDimensions = Object.fromEntries(
       selectedImages
         .map((image) => [image, allImageDimensions[image]] as const)
         .filter((item): item is readonly [string, ImageDimensions] => Boolean(item[1])),
     );
+
+    console.log("[image-generation] OpenRouter timing", {
+      requestId: options.requestId,
+      model,
+      responseModel: data.model,
+      returnedImages: images.length,
+      displayImages: displayImages.length,
+      asyncSave: images.some((image) => /^https?:\/\//i.test(image)),
+      providerMs: providerDoneAt - startedAt,
+      saveQueueMs: Date.now() - providerDoneAt,
+      totalMs: Date.now() - startedAt,
+    });
 
     return {
       content: data.choices?.[0]?.message?.content ?? "",

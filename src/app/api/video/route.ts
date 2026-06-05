@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { assertUserCanUseCredits, chargeCredits } from "@/lib/credits";
-import { createOpenRouterVideoTask, getOpenRouterHeaders, getOpenRouterVideoTask, getRequiredOpenRouterApiKey } from "@/lib/openrouter-video";
-import { saveGeneratedAsset } from "@/lib/local-assets";
+import { createOpenRouterVideoTask, getOpenRouterVideoTask } from "@/lib/openrouter-video";
 import { createCodedApiError } from "@/lib/error-code";
+import { GENERIC_MEDIA_ERROR_MESSAGE } from "@/lib/error-message";
+import { validateReferenceImageCount } from "@/lib/upload-rules";
+import { enqueueRemoteAssetSave } from "@/lib/media-save-queue";
 import { upsertVideoManifestEntry } from "@/lib/video-manifest";
-import { isConversationVideoModelEnabled } from "@/lib/system-settings";
+import { isAgentVideoModelEnabled, isConversationVideoModelEnabled } from "@/lib/system-settings";
 
 type UsageMeta = {
   promptTokens?: number;
@@ -48,6 +50,14 @@ function withBytePlusVideoUsd(usage: UsageMeta | undefined, model: string | unde
 
 function isBytePlusVideoModel(model?: string) {
   return Boolean(model?.startsWith("byteplus:video."));
+}
+
+function getBytePlusProviderKey(modelId: string | undefined, source: string | undefined) {
+  if (!modelId?.startsWith("byteplus:video.")) return undefined;
+  const prefix = source === "agent_video_generation" ? "agent-video" : "video";
+  if (modelId.endsWith("seedance-2-0-fast")) return `${prefix}.seedance-2-0-fast`;
+  if (modelId.endsWith("seedance-2-0")) return `${prefix}.seedance-2-0`;
+  return undefined;
 }
 
 function logVideoTiming(label: string, data: Record<string, unknown>) {
@@ -182,6 +192,7 @@ export async function POST(request: Request) {
       conversationTitle?: string;
       requestId?: string;
       usage?: UsageMeta;
+      metadata?: { creditSource?: string };
     };
 
     const taskId = body.taskId?.trim();
@@ -194,42 +205,45 @@ export async function POST(request: Request) {
       const videoError = getVideoErrorMessage(task);
 
       if (videoError) {
-        return NextResponse.json({ ...task, status: "failed", error: { message: videoError } });
+        const codedError = await createCodedApiError(new Error(videoError), GENERIC_MEDIA_ERROR_MESSAGE, "video task polling failed");
+        return NextResponse.json({ ...task, status: "failed", error: { message: codedError.error }, errorCode: codedError.errorCode });
       }
 
       const status = getTaskStatus(task) ?? normalizeVideoStatus(task.status) ?? "running";
       const videoUrl = getVideoUrl(task);
 
       if ((status === "succeeded" || status === "success" || status === "completed" || status === "complete") && videoUrl) {
-        let localVideoUrl = videoUrl;
-        let saveError: string | undefined;
-
-        try {
-          const needsOpenRouterAuth = videoUrl.startsWith("https://openrouter.ai/api/v1/videos/");
-          localVideoUrl = await saveGeneratedAsset(videoUrl, "video", needsOpenRouterAuth ? { headers: getOpenRouterHeaders(getRequiredOpenRouterApiKey()) } : undefined);
-        } catch (error) {
-          saveError = error instanceof Error ? error.message : String(error);
-          localVideoUrl = videoUrl;
-        }
-        const saveDoneAt = Date.now();
+        const needsOpenRouterAuth = videoUrl.startsWith("https://openrouter.ai/api/v1/videos/");
+        const saveJob = await enqueueRemoteAssetSave({
+          remoteUrl: videoUrl,
+          type: "video",
+          authProvider: needsOpenRouterAuth ? "openrouter" : undefined,
+          videoTaskId: taskId,
+          requestId: body.requestId ?? taskId,
+          model: body.model,
+          prompt: body.prompt ?? "",
+        });
+        const saveQueuedAt = Date.now();
 
         logVideoTiming(isBytePlusVideoModel(body.model) ? "BytePlus completed" : "OpenRouter completed", {
+          requestId: body.requestId ?? taskId,
           model: body.model,
           taskId,
           status,
           queryMs: queryDoneAt - startedAt,
-          saveMs: saveDoneAt - queryDoneAt,
-          totalMs: saveDoneAt - startedAt,
-          savedLocal: localVideoUrl.startsWith("/generated/"),
-          saveFailed: Boolean(saveError),
-          saveError: saveError ? saveError.slice(0, 160) : undefined,
+          saveQueueMs: saveQueuedAt - queryDoneAt,
+          totalMs: saveQueuedAt - startedAt,
+          mediaSaveJobId: saveJob?.id,
+          savedLocal: saveJob?.status === "saved",
+          saveStatus: saveJob?.status,
+          saveAttempts: saveJob?.attempts,
         });
 
-        await upsertVideoManifestEntry({ taskId, prompt: "", localVideoUrl, remoteVideoUrl: videoUrl });
+        await upsertVideoManifestEntry({ taskId, prompt: body.prompt ?? "", localVideoUrl: saveJob?.localUrl ?? videoUrl, remoteVideoUrl: videoUrl, posterUrl: saveJob?.posterUrl });
 
         const user = await getCurrentUser();
         const usage = withBytePlusVideoUsd(getUsageMeta(task) ?? body.usage, body.model, body.settings);
-        const credit = user ? await chargeCredits(user.id, "video", usage, { conversationId: body.conversationId, conversationTitle: body.conversationTitle, requestId: body.requestId ?? taskId, label: "视频生成", model: body.model, videoCount: 1, metadata: { mediaUrls: [localVideoUrl], remoteMediaUrls: [videoUrl], delivered: true } }) : undefined;
+        const credit = user ? await chargeCredits(user.id, "video", usage, { conversationId: body.conversationId, conversationTitle: body.conversationTitle, requestId: body.requestId ?? taskId, label: "视频生成", model: body.model, videoCount: 1, metadata: { ...body.metadata, mediaUrls: [saveJob?.localUrl ?? videoUrl], remoteMediaUrls: [videoUrl], posterUrl: saveJob?.posterUrl, delivered: true, savedLocal: saveJob?.status === "saved", localSaveStatus: saveJob?.status ?? "pending", mediaSaveJobId: saveJob?.id } }) : undefined;
 
         return NextResponse.json({
           ...task,
@@ -238,10 +252,18 @@ export async function POST(request: Request) {
           credit,
           content: {
             ...task.content,
-            video_url: localVideoUrl,
+            video_url: saveJob?.localUrl ?? videoUrl,
             remote_video_url: videoUrl,
+            poster_url: saveJob?.posterUrl,
+            local_save_status: saveJob?.status ?? "pending",
+            media_save_job_id: saveJob?.id,
           },
         });
+      }
+
+      if (status === "succeeded" || status === "success" || status === "completed" || status === "complete") {
+        const codedError = await createCodedApiError(new Error("视频平台返回已完成，但没有返回视频地址。"), GENERIC_MEDIA_ERROR_MESSAGE, "video task completed without url");
+        return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
       }
 
       if (isBytePlusVideoModel(body.model)) {
@@ -260,25 +282,29 @@ export async function POST(request: Request) {
     if (!prompt) {
       return NextResponse.json({ error: "缺少提示词" }, { status: 400 });
     }
-    if (body.model && !isConversationVideoModelEnabled(body.model)) return NextResponse.json({ error: "连接不到模型，请联系管理员！" }, { status: 400 });
+    const creditSource = body.metadata?.creditSource;
+    if (body.model && !(creditSource === "agent_video_generation" ? isAgentVideoModelEnabled(body.model) : isConversationVideoModelEnabled(body.model))) return NextResponse.json({ error: "连接不到模型，请联系管理员！" }, { status: 400 });
+    const referenceImages = Array.isArray(body.referenceImages) ? body.referenceImages : [];
+    const referenceLimitError = validateReferenceImageCount({ mode: "video", modelId: body.model, transportMode: "local-base64" }, referenceImages.length);
+    if (referenceLimitError) return NextResponse.json({ error: referenceLimitError }, { status: 400 });
 
     const user = await getCurrentUser();
     await assertUserCanUseCredits(user, "video");
 
     const createStartedAt = Date.now();
-    const task = await createOpenRouterVideoTask(prompt, Array.isArray(body.referenceImages) ? body.referenceImages : [], body.settings, body.model);
+    const task = await createOpenRouterVideoTask(prompt, referenceImages, body.settings, body.model, { bytePlusProviderKey: getBytePlusProviderKey(body.model, creditSource) });
     const createDoneAt = Date.now();
     const videoError = getVideoErrorMessage(task);
 
     if (videoError) {
-      const codedError = await createCodedApiError(new Error(videoError), "视频任务创建失败，请稍后再试。", "video task create failed");
+      const codedError = await createCodedApiError(new Error(videoError), GENERIC_MEDIA_ERROR_MESSAGE, "video task create failed");
       return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
     }
 
     const id = task.polling_url ?? task.pollingUrl ?? getCreateTaskId(task);
 
     if (!id) {
-      const codedError = await createCodedApiError(new Error("Missing video task id"), "任务失败，请联系管理员！", "video task id missing");
+      const codedError = await createCodedApiError(new Error("Missing video task id"), GENERIC_MEDIA_ERROR_MESSAGE, "video task id missing");
       return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
     }
 
@@ -292,13 +318,13 @@ export async function POST(request: Request) {
         ratio: body.settings?.ratio,
         resolution: body.settings?.resolution,
         duration: body.settings?.duration,
-        referenceCount: Array.isArray(body.referenceImages) ? body.referenceImages.length : 0,
+        referenceCount: referenceImages.length,
       });
     }
 
     return NextResponse.json({ ...task, id, job_id: getCreateTaskId(task), usage: getUsageMeta(task) });
   } catch (error) {
-    const codedError = await createCodedApiError(error, "视频请求失败，请稍后再试。", "video request failed");
+    const codedError = await createCodedApiError(error, GENERIC_MEDIA_ERROR_MESSAGE, "video request failed");
     return NextResponse.json(codedError, { status: 500 });
   }
 }

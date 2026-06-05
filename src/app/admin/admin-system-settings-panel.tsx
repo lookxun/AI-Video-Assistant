@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { ADVANCED_CHAT_MODEL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_VIDEO_MODEL, imageGenerationModels, videoGenerationModels } from "@/lib/models";
 import type { AdminSystemSettings } from "@/lib/system-settings";
+import { getUploadRule, type UploadKindRule, type UploadRule } from "@/lib/upload-rules";
 import { BytePlusIcon } from "@/components/byteplus-icon";
 import { RiGoogleFill, RiOpenaiFill, RiTiktokFill } from "react-icons/ri";
 
@@ -10,6 +11,10 @@ const DEFAULT_ASSET_IMAGE_MODEL = "openai/gpt-5.4-image-2";
 
 const extraModelLabels: Record<string, string> = {
   "openai/gpt-5.5": "GPT-5.5",
+  "byteplus:conversation-image.seedream-4-5": "BytePlus Seedream 4.5",
+  "byteplus:conversation-image.seedream-5-0": "BytePlus Seedream 5.0 Lite",
+  "byteplus:video.seedance-2-0-fast": "BytePlus Seedance 2.0 Fast",
+  "byteplus:video.seedance-2-0": "BytePlus Seedance 2.0",
 };
 
 function getModelLabel(id: string) {
@@ -107,6 +112,83 @@ const modelUsageGroups = [
     ]),
   },
 ];
+
+type UploadRuleRow = {
+  scene: string;
+  model: string;
+  rule: UploadRule;
+  note: string;
+  incomplete?: Partial<Record<"image" | "document" | "video" | "audio", string>>;
+};
+
+const uploadRuleRows: UploadRuleRow[] = [
+  {
+    scene: "Agent 模式",
+    model: "通用安全规则",
+    rule: getUploadRule({ mode: "agent", transportMode: "local-base64" }),
+    note: "用于普通对话、规划、理解上传内容。",
+  },
+  {
+    scene: "对话流图片 / 资产库图片",
+    model: "OpenRouter 图片模型",
+    rule: getUploadRule({ mode: "image", modelId: DEFAULT_IMAGE_MODEL, transportMode: "local-base64" }),
+    note: "Seedream / Gemini / GPT 图片模型统一保守限制；GPT-5.4 Image 2 额外允许 1 个文件。",
+    incomplete: { document: "GPT 文件输入未做实；当前文档仅读取文本拼入提示词。" },
+  },
+  {
+    scene: "对话流图片 / 资产库图片",
+    model: "BytePlus 图片模型（本地测试）",
+    rule: getUploadRule({ mode: "image", modelId: "byteplus:conversation-image.seedream-4-5", transportMode: "local-base64" }),
+    note: "当前本地继续 Base64 打包测试，先限制 6 张。",
+    incomplete: { image: "特殊格式 heic/heif/tiff/bmp/gif 仅规则记录，浏览器预览未完整做实。" },
+  },
+  {
+    scene: "对话流图片 / 资产库图片",
+    model: "BytePlus 图片模型（服务器 URL）",
+    rule: getUploadRule({ mode: "image", modelId: "byteplus:conversation-image.seedream-4-5", transportMode: "server-url" }),
+    note: "部署到公网服务器后，上传文件生成服务器 URL，可按官方 14 张上限。",
+    incomplete: { image: "服务器 URL 传模型链路未做实。" },
+  },
+  {
+    scene: "对话流视频",
+    model: "OpenRouter Seedance 视频",
+    rule: getUploadRule({ mode: "video", modelId: "bytedance/seedance-2.0-fast", transportMode: "local-base64" }),
+    note: "当前仅开放图片参考。",
+  },
+  {
+    scene: "对话流视频",
+    model: "OpenRouter Kling / Veo",
+    rule: getUploadRule({ mode: "video", modelId: "kwaivgi/kling-v3.0-std", transportMode: "local-base64" }),
+    note: "Kling 和 Veo 统一保守限制，当前仅开放图片参考。",
+  },
+  {
+    scene: "对话流视频",
+    model: "BytePlus Seedance 2.0 系列",
+    rule: getUploadRule({ mode: "video", modelId: "byteplus:video.seedance-2-0", transportMode: "server-url" }),
+    note: "视频/音频参考需要服务器公网 URL；本地环境会提示暂不支持。",
+    incomplete: { video: "参考视频上传未做实。", audio: "参考音频上传未做实。" },
+  },
+];
+
+function formatKindRule(rule: UploadKindRule, label: string) {
+  if (!rule.enabled) return "不支持";
+  const parts = [`最多${rule.maxCount}${label}`];
+  if (rule.maxSizeMb > 0) parts.push(`单个≤${rule.maxSizeMb}MB`);
+  if (rule.minSeconds !== undefined && rule.maxSeconds !== undefined) parts.push(`${rule.minSeconds}-${rule.maxSeconds}秒`);
+  if (rule.maxTotalSeconds !== undefined) parts.push(`总≤${rule.maxTotalSeconds}秒`);
+  if (rule.requiresServerUrl) parts.push("需服务器URL");
+  parts.push(rule.formats.join("/"));
+  return parts.join("，");
+}
+
+function UploadRuleCell({ rule, label, incomplete }: { rule: UploadKindRule; label: string; incomplete?: string }) {
+  return (
+    <div className="break-words px-4 py-3">
+      <div>{formatKindRule(rule, label)}</div>
+      {incomplete ? <div className="mt-1 text-[12px] leading-5 text-red-500">{incomplete}</div> : null}
+    </div>
+  );
+}
 
 function AiGenerate3dIcon({ className = "h-4 w-4 shrink-0 text-[#555555]" }: { className?: string }) {
   return (
@@ -337,6 +419,34 @@ export function AdminSystemSettingsPanel({ settings, adminEmailCount }: { settin
             <div className="flex flex-col gap-2 px-5 py-4">
               {group.models.map((model) => <BytePlusModelTag key={`${group.title}-${model.badge}-${model.modelId}`} item={model} selectedEndpointId={model.providerKey ? bytePlusModelSelections[model.providerKey] : ""} selectedProvider={model.providerKey ? modelProviderPreferences[model.providerKey] ?? "openrouter" : "openrouter"} onToggle={(value) => model.providerKey && updateProvider(model.providerKey, value ? "byteplus" : "openrouter")} onChange={(endpointId) => model.providerKey && updateBytePlusModel(model.providerKey, endpointId)} />)}
             </div>
+          </div>
+        ))}
+      </section>
+
+      <section className="mt-6 min-w-[1180px] overflow-hidden rounded-[10px] border border-[#eeeeee] bg-white text-[13px] shadow-[0_10px_28px_rgba(0,0,0,0.04)]">
+        <div className="border-b border-[#eeeeee] bg-[#fafafa] px-5 py-4">
+          <div className="text-[15px] font-medium text-[#222222]">上传规则</div>
+          <div className="mt-1 text-[12px] leading-5 text-[#888888]">对话流生成和资产库生成共用同一套规则；上传图片和 @资产引用都会计入参考图数量。</div>
+        </div>
+        <div className="grid grid-cols-[210px_170px_240px_150px_220px_180px] border-b border-[#eeeeee] bg-[#fafafa] text-[12px] font-medium text-[#777777]">
+          <div className="px-4 py-3">使用场景</div>
+          <div className="px-4 py-3">模型范围</div>
+          <div className="px-4 py-3">图片</div>
+          <div className="px-4 py-3">文件</div>
+          <div className="px-4 py-3">视频</div>
+          <div className="px-4 py-3">音频</div>
+        </div>
+        {uploadRuleRows.map((row) => (
+          <div key={`${row.scene}-${row.model}`} className="grid grid-cols-[210px_170px_240px_150px_220px_180px] border-b border-[#f2f2f2] text-[12px] leading-5 text-[#444444] last:border-b-0">
+            <div className="px-4 py-3">
+              <div className="font-medium text-[#222222]">{row.scene}</div>
+              <div className="mt-1 text-[12px] leading-5 text-[#888888]">{row.note}</div>
+            </div>
+            <div className="break-words px-4 py-3 text-[#333333]">{row.model}</div>
+            <UploadRuleCell rule={row.rule.image} label="张" incomplete={row.incomplete?.image} />
+            <UploadRuleCell rule={row.rule.document} label="个" incomplete={row.incomplete?.document} />
+            <UploadRuleCell rule={row.rule.video} label="个" incomplete={row.incomplete?.video} />
+            <UploadRuleCell rule={row.rule.audio} label="个" incomplete={row.incomplete?.audio} />
           </div>
         ))}
       </section>

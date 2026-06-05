@@ -35,26 +35,51 @@ function makeUploadCategory(id: string, title: string, items: AdminCreditFlowIte
   return [{ id, title, totalCredits: 0, totalUsd: 0, totalCny: 0, items: [...items].sort((left, right) => right.createdAtTs - left.createdAtTs) }];
 }
 
-function mediaItemToFlowItem(item: AdminMediaItem, index: number): AdminCreditFlowItem {
+function normalizeRecordMediaUrl(url: string) {
+  return url.split("?")[0].split("#")[0];
+}
+
+function makeCreditLookup(items: AdminCreditFlowItem[]) {
+  const map = new Map<string, AdminCreditFlowItem>();
+  const setPreferred = (key: string, item: AdminCreditFlowItem) => {
+    const existing = map.get(key);
+    if (!existing || (existing.credits === 0 && item.credits > 0)) map.set(key, item);
+  };
+
+  for (const item of items) {
+    if (item.isUploadRecord) continue;
+    if (item.requestId) setPreferred(item.requestId, item);
+    if (!item.url) continue;
+    setPreferred(item.url, item);
+    setPreferred(normalizeRecordMediaUrl(item.url), item);
+  }
+
+  return map;
+}
+
+function mediaItemToFlowItem(item: AdminMediaItem, index: number, creditLookup?: Map<string, AdminCreditFlowItem>): AdminCreditFlowItem {
   const isUpload = Boolean(item.isUploadedAsset);
+  const creditItem = (item.requestId ? creditLookup?.get(item.requestId) : undefined) ?? creditLookup?.get(item.url) ?? creditLookup?.get(normalizeRecordMediaUrl(item.url));
+
   return {
     id: item.id || `${item.url}-${index}`,
     requestId: item.id || `${item.url}-${index}`,
     kind: item.type,
-    systemName: item.name || "",
-    displayName: item.name || (item.type === "video" ? `视频${index + 1}` : `图片${index + 1}`),
+    systemName: item.systemName || item.name || "",
+    displayName: item.name || item.systemName || (item.type === "video" ? `视频${index + 1}` : `图片${index + 1}`),
     url: item.url,
-    status: item.isDeleted ? "failed" : "success",
+    status: "success",
     errorText: item.isDeleted ? "用户已删除" : undefined,
     deletedAtLabel: item.deletedAtLabel,
-    credits: 0,
-    totalTokens: 0,
-    usd: 0,
-    cny: 0,
+    credits: creditItem?.credits ?? 0,
+    totalTokens: creditItem?.totalTokens ?? 0,
+    usd: creditItem?.usd ?? 0,
+    cny: creditItem?.cny ?? 0,
     count: 1,
-    model: item.model,
+    model: creditItem?.model ?? item.model,
     parameters: isUpload ? item.type === "image" ? "对话流上传" : "对话流上传文件" : [item.model, item.ratio, [item.size, item.resolution].filter((value) => value && value !== "-").join(" "), item.type === "video" ? item.duration : ""].filter((value) => value && value !== "-").join(" | "),
     isUploadRecord: isUpload,
+    isChargeDisabled: creditItem?.isChargeDisabled,
     isReversePrompt: item.isReversePrompt,
     promptText: item.prompt,
     createdAtLabel: item.createdAtTs ? new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(item.createdAtTs)) : "-",
@@ -62,12 +87,14 @@ function mediaItemToFlowItem(item: AdminMediaItem, index: number): AdminCreditFl
   };
 }
 
-function workspaceConversationGeneratedItems(user: AdminUserRow, kind: "image" | "video") {
-  return user.mediaItems.filter((item) => item.type === kind && !item.isUploadedAsset).map(mediaItemToFlowItem);
+function workspaceConversationGeneratedItems(user: AdminUserRow, creditUser: AdminCreditUser | undefined, kind: "image" | "video") {
+  const creditLookup = makeCreditLookup((creditUser?.conversationCreditDetails ?? []).flatMap((conversation) => conversation.mediaItems).filter((item) => item.kind === kind));
+  return user.mediaItems.filter((item) => item.type === kind && !item.isUploadedAsset).map((item, index) => mediaItemToFlowItem(item, index, creditLookup));
 }
 
-function workspaceAssetGeneratedImageItems(user: AdminUserRow) {
-  return user.assetMediaItems.filter((item) => item.type === "image" && !item.isUploadedAsset).map(mediaItemToFlowItem);
+function workspaceAssetGeneratedImageItems(user: AdminUserRow, creditUser: AdminCreditUser | undefined) {
+  const creditLookup = makeCreditLookup((creditUser?.assetGenerationCreditDetails ?? []).flatMap((category) => category.items).filter((item) => item.kind === "image"));
+  return user.assetMediaItems.filter((item) => item.type === "image" && !item.isUploadedAsset).map((item, index) => mediaItemToFlowItem(item, index, creditLookup));
 }
 
 function latestRecordTime(user: AdminUserRow, creditUser: AdminCreditUser | undefined) {
@@ -87,11 +114,11 @@ function makeUploadCategories(creditUser: AdminCreditUser | undefined) {
   ];
 }
 
-function makeGeneratedCategories(user: AdminUserRow) {
+function makeGeneratedCategories(user: AdminUserRow, creditUser: AdminCreditUser | undefined) {
   return [
-    makeUploadCategory("conversation-generated-images", "对话流生成图片列表", workspaceConversationGeneratedItems(user, "image"))[0],
-    makeUploadCategory("conversation-generated-videos", "对话流生成视频列表", workspaceConversationGeneratedItems(user, "video"))[0],
-    makeUploadCategory("asset-generated-images", "资产库生成图片列表", workspaceAssetGeneratedImageItems(user))[0],
+    makeUploadCategory("conversation-generated-images", "对话流生成图片列表", workspaceConversationGeneratedItems(user, creditUser, "image"))[0],
+    makeUploadCategory("conversation-generated-videos", "对话流生成视频列表", workspaceConversationGeneratedItems(user, creditUser, "video"))[0],
+    makeUploadCategory("asset-generated-images", "资产库生成图片列表", workspaceAssetGeneratedImageItems(user, creditUser))[0],
   ];
 }
 
@@ -100,7 +127,7 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
   const [page, setPage] = useState(1);
   const [expandedUserIds, setExpandedUserIds] = useState<Set<string>>(() => new Set());
   const [historyUser, setHistoryUser] = useState<AdminUserRow | null>(null);
-  const [mediaDialog, setMediaDialog] = useState<{ user: AdminUserRow; mediaType: "image" | "video" | "asset_image" } | null>(null);
+  const [mediaDialog, setMediaDialog] = useState<{ user: AdminUserRow; mediaType: "image" | "upload_image" | "video" | "asset_image" } | null>(null);
   const [creditFlowUser, setCreditFlowUser] = useState<AdminCreditUser | null>(null);
   const [assetCreditUser, setAssetCreditUser] = useState<AdminCreditUser | null>(null);
   const [promptToolUser, setPromptToolUser] = useState<AdminCreditUser | null>(null);
@@ -159,7 +186,7 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
 
   const openGeneratedListDialog = (user: AdminUserRow, creditUser: AdminCreditUser | undefined, initialCategoryId: string) => {
     if (!creditUser) return;
-    setGeneratedListDialog({ user: creditUser, categories: makeGeneratedCategories(user), initialCategoryId });
+    setGeneratedListDialog({ user: creditUser, categories: makeGeneratedCategories(user, creditUser), initialCategoryId });
   };
 
   return (
@@ -200,9 +227,9 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
               const conversationImages = conversationUploadItems(creditUser, "image");
               const conversationFiles = conversationUploadItems(creditUser, "file");
               const assetImages = assetUploadItems(creditUser);
-              const generatedConversationImages = workspaceConversationGeneratedItems(user, "image");
-              const generatedConversationVideos = workspaceConversationGeneratedItems(user, "video");
-              const generatedAssetImages = workspaceAssetGeneratedImageItems(user);
+              const generatedConversationImages = workspaceConversationGeneratedItems(user, creditUser, "image");
+              const generatedConversationVideos = workspaceConversationGeneratedItems(user, creditUser, "video");
+              const generatedAssetImages = workspaceAssetGeneratedImageItems(user, creditUser);
               return (
                 <Fragment key={user.id}>
                   <tr onClick={() => toggleExpandedUser(user.id)} className="cursor-pointer text-[#333333] transition hover:bg-[#fcfcfc]">

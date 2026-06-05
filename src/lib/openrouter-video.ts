@@ -34,9 +34,9 @@ type CreateVideoOptions = {
 const OPENROUTER_VIDEOS_URL = "https://openrouter.ai/api/v1/videos";
 const execFileAsync = promisify(execFile);
 
-function getBytePlusVideoModelName(modelId?: string) {
-  if (modelId === "byteplus:video.seedance-2-0-fast") return getBytePlusModelForRequest("video.seedance-2-0-fast");
-  if (modelId === "byteplus:video.seedance-2-0") return getBytePlusModelForRequest("video.seedance-2-0");
+function getBytePlusVideoModelName(modelId?: string, providerKey?: string) {
+  if (modelId === "byteplus:video.seedance-2-0-fast") return getBytePlusModelForRequest(providerKey ?? "video.seedance-2-0-fast");
+  if (modelId === "byteplus:video.seedance-2-0") return getBytePlusModelForRequest(providerKey ?? "video.seedance-2-0");
   return undefined;
 }
 
@@ -158,8 +158,8 @@ async function postOpenRouterVideoTask(prompt: string, referenceImages: string[]
   return (await response.json()) as OpenRouterVideoTask;
 }
 
-export async function createOpenRouterVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL) {
-  if (getBytePlusVideoModelName(model)) return createBytePlusVideoTask(prompt, referenceImages, settings, model);
+export async function createOpenRouterVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, options?: { bytePlusProviderKey?: string }) {
+  if (getBytePlusVideoModelName(model, options?.bytePlusProviderKey)) return createBytePlusVideoTask(prompt, referenceImages, settings, model, options?.bytePlusProviderKey);
 
   try {
     return await postOpenRouterVideoTask(prompt, referenceImages, settings, model, { generateAudio: true });
@@ -173,11 +173,11 @@ export async function createOpenRouterVideoTask(prompt: string, referenceImages:
   }
 }
 
-async function createBytePlusVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL) {
+async function createBytePlusVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, bytePlusProviderKey?: string) {
   const apiKey = getConfiguredBytePlusApiKey();
   if (!apiKey) throw new Error("缺少 BytePlus API Key");
 
-  const bytePlusModel = getBytePlusVideoModelName(model);
+  const bytePlusModel = getBytePlusVideoModelName(model, bytePlusProviderKey);
   if (!bytePlusModel) throw new Error("连接不到模型，请联系管理员！");
 
   const videoSettings = resolveVideoSettingsForModel(model, settings);

@@ -5,6 +5,16 @@ import { RiArrowDownSLine, RiArrowRightSLine, RiCloseLine, RiQuillPenAiLine, RiS
 import { useBodyScrollLock } from "@/components/use-body-scroll-lock";
 import { AdminHoverImagePreview } from "./admin-hover-image-preview";
 
+function getMediaThumbnailUrl(url: string) {
+  if (!url.startsWith("/generated/")) return url;
+  return `/api/media-thumbnail?url=${encodeURIComponent(url)}`;
+}
+
+function getLocalVideoPosterUrl(url: string) {
+  if (!url.startsWith("/generated/videos/")) return undefined;
+  return url.replace("/generated/videos/", "/generated/video-posters/").replace(/\.[^.]+$/, ".jpg");
+}
+
 export type AdminConversationMessage = {
   id: string;
   role: "user" | "assistant" | "system";
@@ -12,12 +22,15 @@ export type AdminConversationMessage = {
   createdAtLabel: string;
   images: string[];
   videos: string[];
+  mediaNames?: Record<string, string>;
   error?: string;
 };
 
 export type AdminConversation = {
   id: string;
   title: string;
+  isDeleted?: boolean;
+  deletedAtLabel?: string;
   conversationCode?: string;
   updatedAtLabel: string;
   updatedAtTs?: number;
@@ -26,13 +39,16 @@ export type AdminConversation = {
 
 export type AdminMediaItem = {
   id: string;
+  requestId?: string;
   type: "image" | "video";
+  systemName?: string;
   assetType?: "character_image" | "scene_image" | "shot_image";
   isUploadedAsset?: boolean;
   isReversePrompt?: boolean;
   isDeleted?: boolean;
   deletedAtLabel?: string;
   name?: string;
+  userName?: string;
   url: string;
   prompt: string;
   model: string;
@@ -40,6 +56,7 @@ export type AdminMediaItem = {
   resolution: string;
   duration: string;
   size: string;
+  style?: string;
   createdAtTs?: number;
 };
 
@@ -147,7 +164,7 @@ export function DetailItem({ label, value, onClick }: { label: string; value: st
 export function AdminHistoryDialog({ user, onClose }: { user: AdminUserRow; onClose: () => void }) {
   useBodyScrollLock(true);
 
-  const conversations = user.conversations;
+  const conversations = useMemo(() => [...user.conversations].sort((left, right) => (right.updatedAtTs ?? 0) - (left.updatedAtTs ?? 0)), [user.conversations]);
   const [activeConversationId, setActiveConversationId] = useState(() => conversations[0]?.id ?? "");
   const activeConversation = conversations.find((item) => item.id === activeConversationId) ?? conversations[0];
   const displayName = user.nickname || user.email;
@@ -172,7 +189,10 @@ export function AdminHistoryDialog({ user, onClose }: { user: AdminUserRow; onCl
                   onClick={() => setActiveConversationId(conversation.id)}
                   className={`w-full rounded-[10px] px-3 text-left transition ${activeConversation?.id === conversation.id ? "bg-[#ececec] py-2 text-[#111111]" : "py-1.5 text-[#666666] hover:bg-[#eeeeee] hover:text-[#111111]"}`}
                 >
-                  <div className="truncate text-[13px] font-medium">{conversation.title || "新对话"}</div>
+                  <div className="truncate text-[13px] font-medium">
+                    <span>{conversation.title || "新对话"}</span>
+                    {conversation.isDeleted ? <span className="ml-1 text-red-500">用户已删除</span> : null}
+                  </div>
                   {activeConversation?.id === conversation.id ? <div className="mt-1 truncate text-[11px] text-[#999999]">{conversation.updatedAtLabel}</div> : null}
                 </button>
               )) : <div className="pt-8 text-center text-[13px] text-[#999999]">暂无历史对话</div>}
@@ -183,6 +203,7 @@ export function AdminHistoryDialog({ user, onClose }: { user: AdminUserRow; onCl
             <div className="min-h-0 flex-1 overflow-y-auto bg-white px-8 py-6">
               {activeConversation ? (
                 <div className="mx-auto max-w-[860px] space-y-5">
+                  {activeConversation.isDeleted ? <div className="text-center text-[12px] leading-5 text-red-500">用户已删除{activeConversation.deletedAtLabel ? ` ${activeConversation.deletedAtLabel}` : ""}</div> : null}
                   {activeConversation.messages.length > 0 ? activeConversation.messages.map((message) => <AdminHistoryMessage key={message.id} message={message} />) : <div className="pt-20 text-center text-[13px] text-[#999999]">该对话暂无消息</div>}
                 </div>
               ) : <div className="pt-20 text-center text-[13px] text-[#999999]">暂无历史对话</div>}
@@ -194,15 +215,20 @@ export function AdminHistoryDialog({ user, onClose }: { user: AdminUserRow; onCl
   );
 }
 
-export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUserRow; mediaType: "image" | "video" | "asset_image"; onClose: () => void }) {
+export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUserRow; mediaType: "image" | "upload_image" | "video" | "asset_image"; onClose: () => void }) {
   useBodyScrollLock(true);
 
   const [assetFilter, setAssetFilter] = useState<"character_image" | "scene_image" | "shot_image">("character_image");
   const isAssetImage = mediaType === "asset_image";
-  const mediaItems = isAssetImage ? user.assetMediaItems.filter((item) => item.assetType === assetFilter) : user.mediaItems.filter((item) => item.type === mediaType);
+  const mediaItems = isAssetImage
+    ? user.assetMediaItems.filter((item) => item.assetType === assetFilter)
+    : mediaType === "upload_image"
+      ? user.mediaItems.filter((item) => item.type === "image" && item.isUploadedAsset)
+      : user.mediaItems.filter((item) => item.type === mediaType && !item.isUploadedAsset);
   const [activeMediaId, setActiveMediaId] = useState(() => mediaItems[0]?.id ?? "");
   const activeMedia = mediaItems.find((item) => item.id === activeMediaId) ?? mediaItems[0];
-  const title = `${user.nickname || user.email}${isAssetImage ? "资产库图片" : mediaType === "image" ? "对话流图片" : "对话流视频"}`;
+  const title = `${user.nickname || user.email}${isAssetImage ? "资产库图片" : mediaType === "upload_image" ? "对话流上传图片" : mediaType === "image" ? "对话流图片" : "对话流视频"}`;
+  const activeMediaName = activeMedia?.name || activeMedia?.systemName || (activeMedia?.type === "video" ? "视频" : "图片");
   const assetFilterItems: Array<{ key: "character_image" | "scene_image" | "shot_image"; label: string }> = [
     { key: "character_image", label: "角色" },
     { key: "scene_image", label: "场景" },
@@ -224,7 +250,7 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
             <div className="min-h-0 flex-1 overflow-y-auto bg-white p-6">
               {activeMedia ? (
                 <div className="flex min-h-full flex-col">
-                  <div className="flex min-h-[480px] flex-1 items-center justify-center bg-[#f5f5f5]">
+                  <div className="relative flex min-h-[480px] flex-1 items-center justify-center bg-[#f5f5f5]">
                     {activeMedia.type === "image" ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={activeMedia.url} alt="生成图片" className="max-h-[560px] max-w-full object-contain" />
@@ -234,12 +260,14 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
                   </div>
 
                   <div className="mt-4 max-w-[1006px] pb-2">
-                    {activeMedia.isDeleted ? (
-                      <div className="text-[12px] leading-5 text-red-500">用户已删除</div>
-                    ) : activeMedia.isUploadedAsset ? (
-                      <div className="text-[12px] leading-5 text-[#9a9a9a]">资产库上传</div>
+                    {activeMedia.isUploadedAsset ? (
+                      <div className="flex flex-wrap items-center gap-2 text-[12px] leading-5 text-[#9a9a9a]">
+                        <span className="mr-2 truncate font-medium text-[#111111]">{activeMediaName}</span>
+                        <span>{isAssetImage ? "资产库上传" : "对话流上传"}</span>
+                      </div>
                     ) : (
                       <div className="flex flex-wrap items-center gap-2 text-[12px] leading-5 text-[#9a9a9a]">
+                        <span className="mr-2 truncate font-medium text-[#111111]">{activeMediaName}</span>
                         <span className="truncate">{activeMedia.model}</span>
                         <span className="text-[#d0d0d0]">|</span>
                         <span>{activeMedia.ratio}</span>
@@ -254,16 +282,25 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
                             <span>{activeMedia.duration}</span>
                           </>
                         ) : null}
+                        {isAssetImage && activeMedia.style && activeMedia.style !== "-" ? (
+                          <>
+                            <span className="text-[#d0d0d0]">|</span>
+                            <span>{activeMedia.style}</span>
+                          </>
+                        ) : null}
                       </div>
                     )}
-                    <div className={`mt-2 whitespace-pre-wrap break-words text-[14px] leading-7 ${activeMedia.isDeleted ? "text-red-500" : "text-[#111111]"}`}>
+                    {activeMedia.isDeleted ? (
+                      <div className="mt-2 text-[12px] leading-5 text-red-500">用户已删除{activeMedia.deletedAtLabel ? ` ${activeMedia.deletedAtLabel}` : ""}</div>
+                    ) : null}
+                    <div className="mt-2 whitespace-pre-wrap break-words text-[14px] leading-7 text-[#111111]">
                       {activeMedia.isReversePrompt ? (
                         <span className="mr-2 inline-flex h-6 align-[1px] items-center gap-1.5 rounded-[6px] border border-[#367cee] px-2 text-[12px] font-medium leading-none text-[#367cee]">
                           <RiQuillPenAiLine className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>反推提示词</span>
                         </span>
                       ) : null}
-                      {activeMedia.isDeleted ? "用户已删除" : activeMedia.prompt || "暂无提示词"}
+                      {activeMedia.prompt || "暂无提示词"}
                     </div>
                   </div>
                 </div>
@@ -290,7 +327,7 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
                   ))}
                 </div>
               </div>
-            ) : <div className="mb-4 shrink-0 truncate pr-4 text-[13px] font-semibold text-[#111111]">{mediaType === "video" ? "视频" : "图片"}列表</div>}
+            ) : <div className="mb-4 shrink-0 truncate pr-4 text-[13px] font-semibold text-[#111111]">{mediaType === "upload_image" ? "上传图片" : mediaType === "video" ? "生成视频" : "生成图片"}列表</div>}
             <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pb-4 pr-2">
               {mediaItems.map((item, index) => (
                 <button
@@ -302,12 +339,17 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
                   <div className="relative flex h-[118px] items-center justify-center bg-[#eeeeee]">
                     {item.type === "image" ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={item.url} alt="图片缩略图" className="h-full w-full object-contain" />
+                      <img src={getMediaThumbnailUrl(item.url)} alt="图片缩略图" className="h-full w-full object-contain" />
                     ) : (
-                      <video src={item.url} className="h-full w-full object-cover" muted />
+                      getLocalVideoPosterUrl(item.url) ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={getMediaThumbnailUrl(getLocalVideoPosterUrl(item.url) ?? item.url)} alt="视频封面" className="h-full w-full object-cover" />
+                      ) : <video src={item.url} className="h-full w-full object-cover" muted />
                     )}
                     {item.isDeleted ? <div className="absolute inset-x-0 bottom-0 bg-red-500/88 py-1 text-center text-[12px] font-medium text-white">用户已删除</div> : null}
-                    <div className="absolute bottom-1 right-1 rounded bg-black/60 px-1.5 py-0.5 text-[11px] text-white">{index + 1}</div>
+                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-8 text-left text-[11px] font-medium text-white">
+                      <span className="block truncate">{item.name || `${mediaType === "video" ? "视频" : "图片"}${index + 1}`}</span>
+                    </div>
                   </div>
                 </button>
               ))}
@@ -356,9 +398,12 @@ function AdminHistoryMessage({ message }: { message: AdminConversationMessage })
         {message.images.length > 0 ? (
           <div className="mt-3 grid max-w-[520px] grid-cols-2 gap-1">
             {message.images.map((url, index) => (
-              <AdminHoverImagePreview key={`${url}-${index}`} src={url} alt="历史图片" wrapperClassName="block overflow-hidden rounded-[10px] bg-[#f2f2f2]">
+              <AdminHoverImagePreview key={`${url}-${index}`} src={url} alt="历史图片" wrapperClassName="relative block overflow-hidden rounded-[10px] bg-[#f2f2f2]">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={url} alt="历史图片" className="h-full max-h-[260px] w-full object-contain" />
+                <img src={getMediaThumbnailUrl(url)} alt="历史图片" className="h-full max-h-[260px] w-full object-contain" />
+                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-8 text-left text-[11px] font-medium text-white">
+                  <span className="block truncate">{message.mediaNames?.[url] || `图片${index + 1}`}</span>
+                </div>
               </AdminHoverImagePreview>
             ))}
           </div>
@@ -367,7 +412,10 @@ function AdminHistoryMessage({ message }: { message: AdminConversationMessage })
         {videos.length > 0 ? (
           <div className="mt-3 space-y-2">
             {videos.map((url, index) => (
-              <video key={`${url}-${index}`} src={url} controls className="w-[520px] max-w-full rounded-[10px] bg-[#f2f2f2]" />
+              <div key={`${url}-${index}`} className="relative w-[520px] max-w-full overflow-hidden rounded-[10px] bg-[#f2f2f2]">
+                <video src={url} controls className="w-full bg-[#f2f2f2]" />
+                <div className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-16px)] rounded bg-black/62 px-2 py-1 text-[11px] font-medium text-white">{message.mediaNames?.[url] || `视频${index + 1}`}</div>
+              </div>
             ))}
           </div>
         ) : null}
@@ -447,7 +495,7 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
   const [isPending, startTransition] = useTransition();
   const [expandedUserIds, setExpandedUserIds] = useState<Set<string>>(() => new Set());
   const [historyUser, setHistoryUser] = useState<AdminUserRow | null>(null);
-  const [mediaDialog, setMediaDialog] = useState<{ user: AdminUserRow; mediaType: "image" | "video" | "asset_image" } | null>(null);
+  const [mediaDialog, setMediaDialog] = useState<{ user: AdminUserRow; mediaType: "image" | "upload_image" | "video" | "asset_image" } | null>(null);
 
   const filteredUsers = useMemo(() => {
     const keyword = query.trim().toLowerCase();

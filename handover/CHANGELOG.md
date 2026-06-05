@@ -2,6 +2,181 @@
 
 ## Current Snapshot
 
+### 2026-06-05 本轮追加：马来西亚服务器部署、HTTP 登录修复、工作台兼容和前台细节
+
+- 用户要求先阅读交接文档和更新日志，并要求后续回答简单直接。本轮随后开始做公网部署。服务器资料目录为 `E:\project\【2】server\马来西亚服务器`，IP 为 `101.47.19.109`，SSH 私钥 `ByteplusVPS.pem`。最初本机私钥权限过宽，SSH 拒绝使用，已用 `icacls` 收紧权限后成功以 `root` 登录。
+- 服务器为 `CentOS Stream 8`。初始缺 Node/npm/Git/Nginx/PM2。已安装 Node.js `22.22.3`、Git、Nginx、PostgreSQL、PM2；初始化 PostgreSQL；创建 `flashmuse` 数据库；部署目录 `/var/www/flashmuse`；PM2 进程名 `flashmuse` 并已开机自启；Nginx 反代 `127.0.0.1:3000`。
+- 因本地 `public/generated` 约 `1.7GB`、首页视频约 `123MB`，正式部署包排除了这些大文件。线上只上传代码、Logo 和必要 manifest；首页 5 个视频路径用服务器 `ffmpeg-static` 生成极小黑色视频占位，避免资源 404。后续如要完整首页视觉，需要补传 `public/home-assets` 完整视频或改用 CDN。
+- Nginx 已直接映射 `/generated/` 到 `/var/www/flashmuse/public/generated/`，并验证 `http://101.47.19.109/generated/deploy-check.txt` 可公网访问。`/home-assets/` 也由 Nginx 直接映射。当前仍是 HTTP，不能作为 BytePlus 素材审核最终 URL。
+- 线上 SMTP 最初没生效，验证码只打印到 PM2 日志。根因是部署时只上传了 `.env.local`，而 SMTP/管理员白名单在本地 `.env`。已把 `.env` 中 OpenRouter/BytePlus/SMTP/Admin 配置合并到线上 `.env.local`，并覆盖线上 PostgreSQL `DATABASE_URL`。前台和后台验证码发送已恢复。
+- 线上前台验证码登录后进不了工作台，先误判为 Cookie/RSC/缓存问题，后通过临时 `/api/client-error` 捕获真实浏览器错误：`crypto.randomUUID is not a function`。原因是当前访问 `http://IP`，不是安全上下文。已新增 `createClientId()` fallback，并替换 `chat-workbench.tsx` 所有前端 `crypto.randomUUID()` 调用。
+- 前台和后台登录 Cookie 默认生产环境 `secure: true`，HTTP 下浏览器不会保存。已新增/使用 `FORCE_INSECURE_AUTH_COOKIE=true` 测试开关，`src/lib/auth.ts` 和 `src/lib/admin-auth.ts` 在该开关开启时不写 `Secure`。后续绑定域名并配好 HTTPS 后必须关闭该开关。
+- 为降低 Next 客户端软跳转/RSC 状态问题，首页进入工作台、前台密码登录和验证码登录成功后都改为 `window.location.assign('/workspace?fresh=...')`。Nginx 临时让 `/_next/static/` 返回 `Cache-Control: no-store`，方便 HTTP/IP 测试期不吃旧 chunk。
+- 后台账号机制确认：后台没有独立账号表，由 `.env.local` 的 `ADMIN_EMAILS` 控制。当前管理员为 `lookxun@163.com`。线上用户表已有 `lookxun@163.com` 和 `12424740@qq.com`。
+- `B_8` 生图失败已排查：请求模型是 `google/gemini-3-pro-image-preview`，OpenRouter 返回的是一大段中文场景描述文本，没有返回图片 URL/base64，因此 `/api/image` 报 `图片平台没有返回图片`。这不是部署或保存问题；同类错误有 `B_5/B_6/B_7`。建议临时使用 BytePlus `Seedream 4.5 / Seedream 5.0 Lite`，或后台关闭不稳定 Gemini 图片模型。
+- Agent 引导按钮不消失问题已修。旧逻辑找最后一条 assistant 消息，用户点击引导发送后旧 assistant 仍被命中。现在只有最后一条消息本身是 assistant 才显示引导，且发送任意消息时会清掉旧消息 `suggestions`。
+- 视频时长弹窗分列规则已修。只有 BytePlus `Seedance 2.0 Fast / Seedance 2.0` 因 `4-15秒` 选项多保持两列；其它视频模型恢复一列。
+- 资产库空状态文案已按分类修正：`上传图片` 显示 `在对话流上传的图片会出现在这里。`，`生成图片` 显示 `对话流生成的图片会出现在这里。`，`生成视频` 显示 `对话流生成的视频会出现在这里。`，`回收站` 显示 `删除的资产会出现在这里。`。
+- 本轮验证：多次本地 `npm run build` 通过，多次服务器 `npm run build` 通过；仅剩既有 `local-assets.ts` 动态 generated 路径和 `ffmpeg-static` Turbopack tracing warning。PM2 已重启并保存。
+- 后续第一优先级：绑定域名到 `101.47.19.109` 并配置 HTTPS；HTTPS 完成后关闭 `FORCE_INSECURE_AUTH_COOKIE`；然后把 `/generated/...` 的最终公网地址作为 HTTPS URL，继续接 BytePlus 第一方 `素材&虚拟人像库 / CreateAsset` 审核流程。
+
+### 2026-06-05 本轮追加：前后台 UI 修正、模型开关链路修复和部署交接
+
+- 本轮用户继续要求后续回答简单直接，并在本轮结束时要求把当前对话框内所有重要内容写入交接文档和更新日志，尤其提醒下一个 AI 开始做公网部署。
+- 下一个 AI 首要任务：开始做公网部署。部署目的包括让服务器上的 `/generated/...`、用户上传图、资产图、生成图都能通过公网 HTTPS URL 访问。BytePlus 第一方素材审核接口需要可下载的 `originalUrl`，本地 `localhost` 或本地路径不能用。
+- 公网部署完成后继续接 BytePlus 第一方 `素材&虚拟人像库 / CreateAsset` 审核机制。正式流程：图片保存到公网 HTTPS URL -> 调 BytePlus 第一方素材创建/审核接口 -> 轮询状态 -> 保存 `assetId/materialId` -> Seedance 2.0 视频生成时传 `asset://assetId` 作为参考图。该流程用于处理写实真人/数字人角色图直接传普通 URL/base64 时触发 `InputImageSensitiveContentDetected.PrivacyInformation` 的问题。
+- 用户明确不接第三方 SeeDance 素材接口。第三方文档只证明 BytePlus 底层存在类似 `CreateAsset` 能力。下一个 AI 需要从 BytePlus 控制台、客服或销售拿第一方 `CreateAsset / 查询素材状态` 文档、开通方式、素材&虚拟人像库权限和 IP 白名单要求。
+- 前台资产库调整：`对话流资产` 下新增 `上传图片` 分类，只展示 `/generated/upload_image/...`；`生成图片` 只展示对话流生成图片；`生成视频` 展示对话流视频。`上传图片` 图标使用用户提供的本地 SVG，不能直接导入 `RiImageUploadLine`，因为当前 `react-icons/ri` 没有该导出，曾导致页面打不开。
+- `@引用资产` 弹窗调整：去掉旧 `对话流图片` 分类，新增 `上传图片` 分类且只展示上传图；角色图片、场景图片、分镜图片保留。
+- 资产库右侧体验修复：切左侧分类时强制回到顶部，不再恢复每个分类历史滚动位置；标题区固定高度，避免不同分类标题/说明导致内容上下跳动。右侧主内容保持居中。生成视频保持大屏一行 4 个，网格总宽与其它分类一致。
+- 后台历史对话弹窗排序修复：不再使用会被 workspace 保存污染的 `session.updatedAt`，改为按该对话内最后一条消息 `createdAt` 排序和显示时间；无消息时才回退 `session.createdAt / session.updatedAt`。
+- 后台媒体弹窗修复：`对话流图片 / 对话流视频 / 资产库图片` 左侧主图不再用缩略图，改用原图；右侧列表继续用缩略图；文件名不再叠在主图左上角，改为显示在参数行最前面。文件名为黑色，和后面灰色参数同一行但不用竖线分隔；参数之间继续用竖线。资产库图片参数最后追加风格。
+- 后台入口文案按用户最终要求保留为 `对话流图片 / 对话流视频 / 资产库图片`，不再单独增加 `对话流上传图片` 入口；上传图仍包含在 `对话流图片` 内。
+- 后台模型开关链路全面修复：`/api/model-availability` 现在返回 `imageModels / assetImageModels / videoModels / agentImageModels / agentVideoModels` 五组列表。前端分别用于图片生成模式、资产库生成、视频生成模式、Agent 自动生图、Agent 自动生视频。
+- 服务端最终校验同步拆分：`/api/image` 按 `metadata.creditSource` 区分 `agent_image_generation`、资产库生成和普通对话流图片；`/api/video` 按 `agent_video_generation` 区分 Agent 自动视频和普通对话流视频。BytePlus provider key 也分为 `agent-image.* / agent-video.* / conversation-image.* / asset-image.* / video.*`。
+- 修复普通 Agent 自动生图提示 `连接不到模型，请联系管理员！` 的根因：以前普通 Agent 固定拿 OpenRouter `DEFAULT_IMAGE_MODEL`，后台切到 BytePlus 后会被服务端互斥拦截。现在 Agent 自动生图/生视频会按后台 Agent 自动生成策略可用列表选择和兜底。
+- 首页 UI 调整：简化输入框保持原尺寸，当前为深色玻璃平底，无上下渐变、无边框渐变；首页发送按钮常态/hover 与右上角 `进入工作台 / 登录` 一致，`进入工作台 / 登录` 去掉描边。
+- 本轮验证：多次 `npm run lint` 通过，仅剩 `src/components/chat-workbench.tsx` 原有两个 warning；多次 `npm run build` 通过，仅剩既有 `local-assets.ts` 动态路径和 `ffmpeg-static` Turbopack tracing warning。一次 build 因 Google Fonts 网络请求失败，重跑通过，非代码错误。
+
+### 2026-06-04 本轮追加：BytePlus 图片误判修复、视频错误编号、素材&虚拟人像库和公网部署后续
+
+- 本轮用户继续要求回答简单直接，并要求把当前对话框内所有重要改动写入交接文档和更新日志，方便下一个 AI 继续接手。
+- BytePlus 图片模型直连测试结果：`Seedream 4.5` 和 `Seedream 5.0 Lite` API 本身都能通，均能返回图片。直连最小请求 `seedream-4-5-251128 / 2048x2048` 成功约 `6.6s`，`seedream-5-0-260128 / output_format=jpeg / 2048x2048` 成功约 `12.8s`。因此“连不上”不是 Key、网络或 BytePlus API 不可用。
+- BytePlus 图片前台失败根因已修：BytePlus 返回的是远程临时 URL，项目先展示远程 URL、后台异步落盘；刚返回时 `imageDimensions` 可能为空。`/api/image` 之前按目标尺寸精确过滤，尺寸为空时把成功返回的远程图过滤成 `0` 张，触发 `image-generation empty delivery`。现在 `pickRequestedImages()` 如果没有尺寸匹配但 `images.length > 0`，会回退交付原始返回图片，不再把 BytePlus 成功图误判失败。
+- 本轮说明 OpenRouter 与 BytePlus 图片返回链路差异：OpenRouter 聚合层可能返回 `choices.message.images[].image_url.url`、根级 `images[].url`、`data[].url` 或 `b64_json`，项目都兼容；base64/data URL 会同步保存并读尺寸。BytePlus `Seedream 4.5 / 5.0 Lite` 当前基本返回 `data[].url` 远程 URL，所以更依赖异步落盘链路，不能因为临时无尺寸判失败。
+- 视频红字编号丢失已修两处。第一处：`/api/video` 创建任务失败已有 `B_数字`，但轮询任务后平台返回失败时直接透传 `error.message`，没有走 `createCodedApiError()`；现在轮询失败分支也会生成编号。第二处：`toUserErrorMessage()` 对 `sensitive / privacy / real person / 隐私 / 敏感` 会重新映射中文固定文案，曾把已有 `(B_数字)` 丢掉；现在所有固定映射都会保留已有编号。
+- 用户这次视频失败红字为 `参考图可能包含真人或隐私敏感信息，平台拒绝生成`，对应 BytePlus/火山错误码 `InputImageSensitiveContentDetected.PrivacyInformation`。官方 API 参考写明：`seedance 2.0` 系列不支持直接上传含有真人人脸的参考图/视频；视频生成 `content.image_url.url` 支持普通 URL、base64 和素材 ID，素材 ID 格式为 `asset://<ASSET_ID>`，用于预置素材及虚拟人像，可从 `素材&虚拟人像库` 获取。
+- 本轮查官网和第三方资料后确认：BytePlus 第一方确实存在 `素材&虚拟人像库`/素材审核入库机制。第三方文档 `E:\project\【1】Api key\三方提供：seedance 2.0\SeeDance接入说明\AI聚合三方素材接口接入文档.pdf` 里 `/openApi/material/create` 会提交 `originalUrl`、`type=1`、`fileType=1`、`thirdChannel=1`，返回 `materialId: asset-xxxx` 和 `status=1`；`/openApi/material/pageList` 查询 `status=1 处理中 / 2 已完成 / 3 处理失败`。更关键的是第三方错误响应暴露官方底层 `Action=CreateAsset`、`Service=ark`、`Region=cn-beijing`，说明 BytePlus 底层有 `CreateAsset` 能力。
+- 用户明确：不要接第三方，只接 BytePlus 第一方。第三方文档仅用于证明流程。下一个 AI 应从 BytePlus 控制台或客服/销售获取第一方 `CreateAsset / 查询素材状态` 文档、开通方式、IP 白名单要求和 `素材&虚拟人像库` 使用权限；不要把第三方 AK/SK 接入正式项目。
+- 重要后续顺序已定：下一步先做公网部署。原因是 BytePlus 素材创建/审核接口要求 `originalUrl` 是可访问图片资源地址；本地 `localhost` 或本地 `/generated/...` 不能被 BytePlus 访问。项目部署到公网服务器后，必须让用户上传图、资产图、生成图能通过公网 HTTPS URL 访问；若 BytePlus 素材接口需要白名单，提交服务器公网出口 IP。
+- 部署后继续做 BytePlus 素材审核机制：图片保存到服务器公开 URL -> 调 BytePlus 第一方素材创建接口 -> 保存 `assetId/materialId` 和状态 -> 轮询状态到完成 -> 在资产库中标记 BytePlus 审核通过 -> 视频生成时对这类审核通过的角色图传 `asset://asset-xxxx`，而不是普通 URL/base64。这样可用于 AI 生成的写实真人/数字人角色图，减少直接上传参考图触发隐私/真人拦截。
+- 当前不应尝试用提示词绕过 `PrivacyInformation` 拦截，也不应把 Content Pre-filter 当作可关闭解决方案。官方规则即使关闭内容预过滤仍有基础安全策略；合规做法是走素材/虚拟人像库审核后使用 `asset://...`。
+- 关键文件：`src/app/api/image/route.ts`、`src/app/api/video/route.ts`、`src/lib/error-message.ts`、`src/lib/openrouter-video.ts`、`src/lib/upload-rules.ts`、`src/lib/media-save-queue.ts`、`handover/04-keys-and-integrations.md`。
+- 本轮验证：`npm run lint` 通过，仅剩 `chat-workbench.tsx` 原有两个 warning。
+
+### 2026-06-04 本轮追加：对话流/资产库缩略图稳定、资产命名、资产库刷新位置和使用量统计
+
+- 本轮用户继续要求回答简单直接，并要求把当前对话框内所有重要改动写入交接文档和更新日志，方便下一个 AI 继续接手。
+- 后台生成记录里最新视频显示 `0（扣分异常）` 的根因已查明并修复：视频扣费流水写的是远程签名 URL，工作区后来异步落盘替换成本地 `/generated/videos/...mp4`，后台原先只按 URL 回填扣费导致匹配失败。现在后台媒体项带 `requestId`，生成列表扣费回填优先按 `requestId` 匹配；后台从流水构造明细时也优先用同 `requestId` 的本地 workspace URL，避免同一视频出现“远程扣费项 + 本地 0 分占位项”。
+- 后台媒体名称显示规则重新统一。前端用户改名后只显示用户改的名；后台显示 `系统名 / 用户改名`，没改名时只显示系统名。对话流生成媒体读 `message.mediaSystemNames`，资产库媒体读资产 `systemName + userName/name`，删除对话恢复出的媒体也带原名称。
+- 资产命名已改成更稳定的双字段规则：`systemName` 是系统名，生成/上传/入库后不可被用户改名覆盖；`userName` 是用户改名，默认空；`name` 作为兼容显示字段，始终等于 `userName || systemName`。用户改名只写 `userName`，系统同步逻辑只更新 `systemName`。旧数据如果已有 `systemName` 且 `name !== systemName`，会自动把旧 `name` 识别为 `userName`，避免过段时间又变回系统名。
+- 对话流图片卡、预览页右侧图片缩略图、视频封面缩略图、输入框上方参考图、用户消息参考图、`@资产` 菜单小图、文本内联 `@资产` 小图、资产生成页右侧引用图、后台列表/明细缩略图都改为走 `/api/media-thumbnail` 的 512px 等比缩略图。主预览图、资产生成页左侧主图、后台悬停大图仍用原图。
+- `/api/media-thumbnail` 缩略图规则保持：最长边不超过 512px，`scale=512:512:force_original_aspect_ratio=decrease`，不裁切、不拉伸，输出 jpg 缓存到 `public/generated/image-thumbnails/...`。卡片上如果用 `object-cover`，视觉可能裁切，但缩略图文件本身比例不变。
+- 对话流图片改缩略图后曾出现成功图显示失败卡。根因是缩略图 `512x288/512x283` 被 `onLoad` 写回 `imageDimensions`，前端尺寸过滤把成功图误判为不匹配并补失败卡。已修：缩略图加载不再写回原图尺寸；`512` 缩略图尺寸不算可信真实尺寸；前端不再因为尺寸过滤把成功图合成失败卡，固定槽位只尊重真实 `image/pending/failed` 状态。
+- 图片生成固定槽位规则继续收紧。生成几张就固定几个槽位，槽位永远显示 `image / pending / failed` 之一，不能空白。此前一张完成后其它 pending 槽位会暂时消失，原因是尺寸分页逻辑只拿成功图的 `slotIndexes`，漏掉 pending 槽位；现在固定槽位直接按原数组渲染，不再被尺寸分页截掉。等待卡百分比也按槽位编号加稳定小偏移，同批 1/2/3/4 不再完全同步。
+- 前台小图新增悬停原图预览：输入框上方参考图、用户消息参考图、`@资产` 菜单小图、文本内联小图、资产生成页右侧引用图都会显示缩略图，鼠标悬停用 portal 挂到 `document.body` 展示原图。浮层会按浏览器边界判断左右/上下位置，图片加载后按真实宽高比例重算显示尺寸，横图不会离鼠标太远，竖图也会在可视区内收缩。
+- 右上角使用量浮窗新增当前对话流生成媒体数量。在 `Tk` 下方插入图片图标 + 当前对话流成功图片数、视频图标 + 当前对话流成功视频数；上传参考图不计入。顺序为 `Tk / 图片数 / 视频数 / 积分 / 美元 / 人民币约`。
+- 资产库刷新定位已修。新增本地 UI 状态 `flashmuse-workspace-ui-state-v1`，立即保存当前一级面板、资产库标签和每个标签的滚动位置；刷新时优先读本地 UI 状态，避免服务端工作区 500ms 防抖未写入导致回到旧标签。点击一级“资产库”只进入资产库，不再强制切回 `角色图片` 或滚到顶部。滚动位置恢复只在进入资产库或切换标签时执行，不在滚动过程中反复 `scrollTo`，避免右侧滚动条抖动。
+- 点击资产库或资产库分类时会自动关闭右侧文档预览面板；点击资产卡进入资产预览时也会关闭文档预览，避免文档预览残留在右侧遮挡资产库。
+- 关键文件：`src/components/chat-workbench.tsx`、`src/app/admin/page.tsx`、`src/app/admin/admin-users-panel.tsx`、`src/app/admin/admin-records-panel.tsx`、`src/app/admin/admin-credits-panel.tsx`。
+- 本轮验证：多次 `npm run lint` 通过，仅剩 `chat-workbench.tsx` 原有两个 warning；多次 `npm run build` 通过。当前 build 仍有既有 `ffmpeg-static`/Turbopack tracing warning，另有 `local-assets.ts` 动态 generated 路径 tracing warning，均非阻断。
+
+### 2026-06-04 本轮追加：资产库性能、视频封面、后台删除规则、积分显示和错误编号补齐
+
+- 本轮用户继续要求回答简单直接，并要求把本对话框内所有重要改动写入交接文档和更新日志，方便下一个 AI 继续接手。
+- 资产库分类加载慢已优化第一轮。新增 `/api/media-thumbnail`，本地 `/generated/...` 图片首次请求会用 `ffmpeg-static` 生成 512px 缩略图，缓存到 `public/generated/image-thumbnails/...`；资产库图片卡改为加载缩略图并 `loading="lazy"`。分类过滤改为 `useMemo`，初始分批渲染从 30 调到 24。
+- 资产库视频卡不再批量加载真实 `<video preload="metadata">`。有 `asset.posterUrl` 或同名 `/generated/video-posters/xxx.jpg` 时显示封面缩略图；没有封面时显示轻量灰色视频占位。这样切到 `对话流视频` 不会一次性读取所有视频 metadata。
+- 本轮手动给所有旧本地视频补封面。`public/generated/videos` 下共 22 个视频，原有 2 个封面，本轮新建 20 个封面，最终 `public/generated/video-posters` 下有 22 个 `.jpg`；`public/generated/videos/manifest.json` 已补 `posterUrl`。后续新视频仍由 `media-save-queue` 落盘后自动调用 `video-poster.ts` 抽帧。
+- 视频封面视觉统一：对话流视频封面和资产库视频封面都只保留中央 `RiPlayLargeFill / play-large-fill` 播放按钮；此前左上角视频图标已按用户要求去掉。无封面灰底占位仍保留基础电影图标作为兜底。
+- 预览页右侧缩略图上下按钮闪烁已修。旧逻辑用 `previewThumbsNeedScroll` 状态和当前页高度判断，滚轮切到最后一页时当前页缩略图数量变少，按钮会一会消失一会出现。现在按钮显示直接由 `previewMediaOptions.length > previewThumbPageSize` 决定，缩略图列表高度固定为一页容量。
+- 后台 `用户已删除` 规则重新统一：用户删除对用户来说是删除；对后台来说只是用户操作，不是真删除。后台必须保留原内容、图片、视频、提示词、参数、积分，只追加红色 `用户已删除` 标识。删除标识不能覆盖原提示词或参数。
+- 后台删除误判已修。此前把“扣费流水有 URL，但当前 workspace 媒体索引没匹配到”当成用户已删除，导致很多前端未删除的图片被标红。现在只有 workspace 明确 `trash/deletedAt` 或整条对话已删除，才显示删除标识。
+- 后台媒体弹窗已修：`AdminMediaDialog` 不再用 `用户已删除` 替换参数和提示词；参数照常显示，提示词照常显示，只在参数下方追加红色 `用户已删除 时间`。右侧缩略图保留红色删除条。
+- 后台历史对话删除态已修：删除整条对话后，左侧保留原标题并追加红色 `用户已删除`；右侧顶部追加红色 `用户已删除 时间`；不再用一条空系统消息覆盖内容。能从 `CreditLedger` 恢复出的图片、视频和提示词继续显示。
+- 删除对话排序和媒体恢复已修：删除算最后操作时间，删除对话按 `updatedAtTs` 排在前面；删除对话内部媒体按原生成时间正序显示。删除对话里的图片/视频也会补回后台 `对话流图片 / 对话流视频` 列表并按 URL 去重。
+- 后台生成记录重复项已修。此前同一张资产库图可能同时来自真实资产和 deleted ledger 补记录，出现两条同 URL 记录；现在不再额外拼接 deleted ledger 媒体，删除状态在真实记录上追加红字即可。
+- 删除不再等于失败。后台之前把删除媒体 `status` 设为 `failed`，导致生成数量和积分统计少算。现在删除只通过 `errorText: "用户已删除"` 展示红字，`status` 保持原成功状态；真正生成失败才是 `failed`。
+- 后台生成记录的积分扣除显示已修。`admin-records-panel.tsx` 原来把 workspace 媒体转成生成列表时固定 `credits: 0`，导致很多生成图片显示 `-0`；现在按媒体 URL 从 `conversationCreditDetails / assetGenerationCreditDetails` 回填真实扣费、美元、人民币、Token 和模型。
+- 积分显示规则：上传类显示 `--`；扣分关闭显示 `0（扣分关闭）`；生成记录里确实找不到绑定流水的旧媒体显示 `0（扣分异常）`，记录仍保留。`0（扣分异常）` 多半是旧数据 URL 与旧流水没有精确绑定，不代表当前新链路没扣费。
+- 错误编号兜底已补。此前前端在 `/api/image` 成功响应但 `images` 为空时自己抛 `服务器繁忙，请稍候再试.....`，没有 `B_数字`。现在 `/api/image` 对 `deliveredImages.length === 0` 直接返回 `createCodedApiError()`；`/api/video` 对任务完成但没有视频 URL 也返回带编号错误。
+- 最新 BytePlus 生图失败排查：`byteplus:conversation-image.seedream-4-5` 有 BytePlus timing，但服务端得到 `image-generation empty delivery`，说明平台响应流程完成但没有可交付图片，也没有真实原因。现在日志会有 `[B_124]` 等编号，用户端显示 `(B_124) 服务器繁忙，请稍候再试.....`。
+- 关键文件：`src/app/api/media-thumbnail/route.ts`、`src/components/chat-workbench.tsx`、`src/app/admin/page.tsx`、`src/app/admin/admin-users-panel.tsx`、`src/app/admin/admin-records-panel.tsx`、`src/app/admin/admin-credits-panel.tsx`、`src/app/api/image/route.ts`、`src/app/api/video/route.ts`、`public/generated/videos/manifest.json`、`public/generated/video-posters/`。
+- 本轮验证：多次 `npm run lint` 通过，仅剩 `chat-workbench.tsx` 原有两个 warning；多次 `npm run build` 通过，仅剩既有 `ffmpeg-static` Turbopack NFT tracing warning。
+
+### 2026-06-03 本轮追加：主题入口临时禁用、模型上传规则校验和后台上传规则表
+
+- 本轮用户继续要求回答简单直接，并要求把当前对话框内所有重要改动写入交接文档和更新日志，方便下一个 AI 继续接手。
+- 前台用户菜单里的主题入口已临时置灰禁用。现状：按钮显示当前主题文案和图标，但 `disabled`、不可点击、鼠标移入也不会打开主题二级菜单。主题功能代码、`flashmuse-workspace-theme-v1`、深色模式 token 和二级菜单代码都保留，后续如果继续调深色模式可以恢复入口。
+- 本轮先去 OpenRouter 和 BytePlus 官方页面/本机 BytePlus 官方文档副本核对当前模型输入能力。确认 BytePlus 图片规则最完整：Seedream 4.5/5.0 Lite 支持文本、单图、多图，图片 URL 或 base64，参考图最多 14 张，单图最大 30MB，单图最大 3600 万像素，输入格式含 `jpeg/png/webp/bmp/tiff/gif/heic/heif`；批量输出最多 15 张且“输入参考图 + 输出图 <= 15”。
+- 确认 BytePlus 视频 Seedance 2.0 系列官方规则：支持文本、图片、视频、音频混合参考；图片 1-9 张，单图 <=30MB；视频 0-3 个，mp4/mov，单个 <=50MB，2-15 秒，总时长 <=15 秒；音频 0-3 个，mp3/wav，单个 <=15MB，2-15 秒，总时长 <=15 秒；音频不能单独输入，必须同时有图片或视频；请求体 <=64MB；参考视频只支持 URL，不支持 base64 视频。
+- 当前项目上传链路确认：用户上传图片先保存到本地 `/generated/upload_image/...` URL；生成时服务端会把本地 `/generated/...` 读成 `data:image/...base64` 发给 OpenRouter/BytePlus。本地没有公网 URL 也能继续用原来的 base64 打包方案测试多图，但大图/多图更容易 413。普通文档上传目前是前端读取文本并拼进 prompt，不是模型真实 file 输入。
+- 新增 `src/lib/upload-rules.ts`，建立按 `mode + modelId + transportMode` 的统一上传规则。前端和后端共用这套规则，不要在后台另写一份规则。当前 `transportMode` 有 `local-base64` 和 `server-url`，后续用户明确说“不会有对象存储，未来方案是上传到服务器本地，然后生成服务器 URL 传给模型”。
+- 对话流上传已接入模型规则：`addFilesToInput()` 会按当前模式/模型动态校验文件类型、格式、数量和单文件大小。`accept` 和拖拽提示也按当前规则动态显示。视频/音频在当前本地 base64 链路下只识别并提示：如果当前模型支持但需要服务器 URL，会提示“参考视频/音频需要服务器公网链接，当前本地环境暂不支持”；如果模型不支持则提示“当前模型不支持上传视频/音频”。
+- 对话流 `@资产` 引用、资产库卡片“使用资产”、历史消息缩略图再次引用都已计入同一个参考图数量限制。例：当前模型最多 3 张，用户上传 2 张再 @ 1 张可以；再上传或再 @ 第 4 张会弹 `当前模型最多支持 3 张参考图，不能上传更多图片`。发送前也会兜底拦截手动输入过多 `@资产名` 的情况，不再静默截断。
+- 资产库角色/场景/分镜生成页的 `@引用资产` 已接入当前资产生成模型的上传规则。点击引用和发送生成前都会校验引用图数量，超限提示同样是 `当前模型最多支持 X 张参考图，不能上传更多图片`。资产生成页仍不支持直接粘贴图片，保留原提示。
+- 后端 `/api/image` 和 `/api/video` 已加参考图数量兜底校验，防止绕过前端直接提交超量参考图。`/api/image` 会按对话流图片或资产库图片区分 `mode: image / asset-image`；`/api/video` 按 `mode: video` 校验。
+- 当前规则摘要：Agent 模式图片最多 5 张、文档最多 5 个；OpenRouter 图片模型最多 3 张图；OpenRouter Seedance 视频最多 3 张图；OpenRouter Kling/Veo 最多 2 张图；BytePlus 图片本地 base64 先限制 6 张，未来服务器 URL 可放到官方 14 张；BytePlus 视频图片最多 9 张，视频/音频规则已记录但当前未真正开放上传给模型。
+- 后台 `系统设置` 底部新增“上传规则”表格，直接读取 `src/lib/upload-rules.ts` 展示。表格列为 `使用场景 / 模型范围 / 图片 / 文件 / 视频 / 音频`，说明文字已移到“使用场景”单元格下方灰字显示，格式长时会自动换行，整体宽度控制在 `1180px` 内。
+- 后台上传规则表中未完全做实的能力已用红字标出：GPT 文件输入未做实（当前文档仅读文本拼 prompt）；BytePlus 特殊图片格式 `heic/heif/tiff/bmp/gif` 浏览器预览链路未完整做实；服务器 URL 传模型链路未做实；BytePlus 参考视频上传未做实；BytePlus 参考音频上传未做实。
+- 重要后续提醒：下一个 AI 要继续做“上传功能做实”。优先事项：1）实现上传到服务器后生成公网/服务器 URL 并优先传 URL 给模型，保留本地 base64 兜底；2）接 `referenceVideos / referenceAudios` 前后端状态和 UI；3）BytePlus Seedance 2.0 视频/音频参考按官方数量、时长、大小校验并真正传给模型；4）特殊图片格式预览/识别链路补齐或明确转码；5）OpenRouter GPT-5.4 Image 2 如要支持真实 file 输入，需要单独接 OpenRouter 文件/Responses 能力，不要继续只在表格里显示为已完成。
+- 关键文件：`src/lib/upload-rules.ts`、`src/components/chat-workbench.tsx`、`src/app/api/image/route.ts`、`src/app/api/video/route.ts`、`src/app/admin/admin-system-settings-panel.tsx`。
+- 本轮验证：多次 `npm run lint` 通过，只剩 `chat-workbench.tsx` 原有两个 warning；`npm run build` 通过，只剩既有 `ffmpeg-static` / Turbopack NFT tracing 非阻断 warning。
+
+### 2026-06-03 本轮追加：对话流媒体性能、视频封面、主题菜单和深色模式细化
+
+- 本轮用户继续要求回答简单直接，并要求把本对话框内所有重要改动写入交接文档和更新日志，方便下一个 AI 直接接手。
+- 对话流媒体卡顿问题已处理第一轮。原因确认：工作台只渲染当前对话，切换对话会卸载旧 DOM；重新进入媒体很多的对话时图片/视频会重新挂载和解码。图片卡原来 `loading="eager" + fetchPriority="high"`，视频卡和预览缩略图原来会大量 `preload="metadata"`，导致卡顿。
+- 图片卡已改为懒加载；对话流图片/视频结果区域新增 `LazyMediaMount`，只有滚动到视口附近才挂载媒体 DOM。后续不要改成“所有对话 DOM 常驻缓存”，那会明显增加内存占用。
+- 视频封面链路已落地。新增 `src/lib/video-poster.ts`，新增依赖 `ffmpeg-static`。远程视频后台落盘到本地后会抽第一帧，保存到 `public/generated/video-posters`，并把 `posterUrl` 写入 media save job 和 `public/generated/videos/manifest.json`。
+- `/api/media-save-status` 已返回 `posterUrl`。前端新增 `Message.videoPosters` 和 `AssetItem.posterUrl`，保存状态轮询成功后会把 `posterUrl` 写入对话流、资产库和预览媒体项。旧本地视频还支持同名封面兜底：`/generated/videos/xxx.mp4 -> /generated/video-posters/xxx.jpg`。
+- 远程 URL 阶段视频展示保持旧体验不变：仍直接显示真实 `<video>`，鼠标悬停可播放，点击可预览。只有本地保存并有封面后，才先显示封面，鼠标移入再加载真实视频，用户侧应尽量无感。
+- 已手动为 d28 两个视频抽帧并写 manifest：`video_1_d28` 的封面为 `/generated/video-posters/1780404101729-1970df97-a38f-44bd-9094-82da87ba04a2.jpg`；`video_2_d28` 的封面为 `/generated/video-posters/1780454887939-f010e856-7f46-4fdc-9290-8dd58bd22d85.jpg`。
+- 前台用户菜单新增主题二级菜单，支持 `浅色模式 / 深色模式 / 跟随系统`。配置保存在 `localStorage` key `flashmuse-workspace-theme-v1`，跟随系统会监听 `prefers-color-scheme: dark`。点击任一主题后一级和二级菜单都会关闭。
+- 深色模式改为 token 化色板，核心在 `src/app/globals.css`：`--fm-bg / --fm-sidebar / --fm-panel / --fm-control / --fm-hover / --fm-selected / --fm-border-subtle / --fm-border / --fm-border-strong / --fm-text / --fm-text-muted / --fm-text-subtle / --fm-brand / --fm-brand-hover`。后续调深色优先改 token，不要到处散写硬编码。
+- 深色模式左侧栏按用户截图修正：未选中按钮透明，选中才显示底；Logo 文字图反白；底部分隔线、积分卡、个人免费版底色、用户菜单圆角和二级菜单层级都已调整。注意左侧栏整体层级只能保持普通 `z-10`，不能再提到 `z-[9998]`，否则会盖住资产生成页和预览页。
+- 对话流媒体卡底色规则已统一。图片/视频成功卡和失败卡都用 `--flashmuse-media-surface`；深色模式下该变量为 `--fm-control`。资产库外部失败卡也接入同一变量。不要再让成功卡透明，也不要给失败卡单独更亮底。
+- 反馈按钮规则已定：对话流下方复制/重新生成/赞踩/回答不对/更多按钮常态透明，hover 时才显示底色；`感谢反馈 时间` 文案要更淡。
+- 预览页规则已定：左侧舞台和工具按钮保持浅色模式视觉；右侧信息栏为较浅黑 `#2a303c`；缩略图普通边框 `#d8d8d8`、hover `#bdbdbd`、选中 `#367cee`。缩略图中间容器按当前页内容高度收缩，底部翻页按钮和最后一张缩略图距离与顶部一致。
+- 资产生成页规则已定：左侧舞台保持浅色毛玻璃视觉；右侧栏使用和预览页一致的 `#2a303c`；右侧输入框深色下使用 `--fm-panel` 混合底；生成图片按钮浅色模式不变，深色模式可用态纯蓝 `--fm-brand`，禁用态淡蓝 `#1f3454 / #6f9fe8`；中间空状态颜色按浅色模式灰色 `#9a9a9a`。
+- 本轮反复踩坑：深色模式不要用过宽的 `[class*="bg-[#..."]`、`[class*="border..."]` 去覆盖所有元素，容易误伤 hover 类、成功/失败媒体卡、预览页缩略图和生成页右侧按钮。后续新增深色样式优先加专用 class，再用 token 覆盖。
+- 关键文件：`src/components/chat-workbench.tsx`、`src/app/globals.css`、`src/lib/video-poster.ts`、`src/lib/media-save-queue.ts`、`src/app/api/media-save-status/route.ts`、`src/app/api/video/route.ts`、`src/lib/video-manifest.ts`、`package.json`、`next.config.ts`。
+- 本轮验证：多次 `npm run lint` 通过，只剩 `chat-workbench.tsx` 原有两个 warning；多次 `npm run build` 通过。`ffmpeg-static` 会导致 Turbopack `Encountered unexpected file in NFT list` 非阻断 warning，当前不影响 build。
+
+### 2026-06-03 本轮继续：远程媒体先展示后落盘、媒体保存队列、错误红字规则和日志补齐
+
+- 本轮用户要求继续保持回答简单直接，并要求把当前对话内所有重要改动写入交接文档和更新日志，方便下一个 AI 直接接手。
+- 媒体保存流程已调整为“远程 URL 先展示，后台异步下载落盘”。只要模型/供应商返回的是 `http/https` 图片或视频 URL，接口会先把远程 URL 返回给前端展示，同时服务端创建后台下载任务；下载成功后前端轮询 `/api/media-save-status` 并把对话流、资产库、生成任务里的远程 URL 自动替换成本地 `/generated/...` URL。`data:image/...base64` 或本地 `/generated/...` 不走异步队列，仍按原逻辑同步保存或直接使用。
+- 新增 `src/lib/media-save-queue.ts` 和 `/api/media-save-status`。队列状态持久化在 `.runtime/media-save-jobs.json`，按远程 URL hash 去重，记录 `pending / downloading / saved / failed / expired`、`attempts`、`expiresAt`、`localUrl`、`dimensions`、`requestId`、`model` 等。下载失败按退避重试；`downloading` 中任务不会重复启动，除非超过 30 分钟被视为僵尸任务。
+- 远程媒体日志已补齐。生成接口日志记录 `requestId / model / providerMs / saveQueueMs / totalMs`；保存队列日志记录 `[media-save] queued remote asset / downloading remote asset / saved remote asset / remote asset save failed`，包含 `requestId / model / attempts / queuedMs / downloadMs / localUrl / dimensions / host / pathTail`。日志不打印完整签名 URL。base64 同步保存会记录 `[media-save] saved inline asset`。
+- 视频接口 `/api/video` 成功轮询到远程视频后不再同步等待 `saveGeneratedAsset()`，而是入队后台保存并立即返回远程 URL。`CreditLedger.metadata` 会写 `remoteMediaUrls / delivered / savedLocal / localSaveStatus / mediaSaveJobId`。`video-manifest.json` 后续由保存队列在落盘成功时更新为本地 URL。
+- 图片接口 `/api/image` 也已覆盖所有供应商和模型的远程 URL。OpenRouter 图片、BytePlus 图片、后续其它 provider 只要返回远程 URL，都会先展示再后台下载；只有 base64 保持同步保存。此前资产库 `candidateMode="best"` 曾保留同步下载以按尺寸筛图，本轮按用户要求已取消该例外。
+- 本轮排查 `video_2_d28` 和 `video_1_d29`：`video_2_d28` 曾因旧下载任务重复调度保存出两个相同 mp4，已用 SHA256 确认重复并删除孤儿文件 `1780454968504-21fb484e-7894-45cb-b730-63c475ee71f2.mp4`。`video_1_d29` 实际已保存为 `/generated/videos/1780455861980-3d512beb-cddc-4f54-b7a6-2dc4c0725fb1.mp4`，完成时间约 `2026-06-03 11:08:09.233`。
+- 本轮排查 `image_1_d29` 到 `image_4_d29`：这组为 `openai/gpt-5.4-image-2 / 16:9 / 1K / 4张`，不是 BytePlus，且生成时已经同步保存为本地 png；4 张落盘时间约 `2026-06-03 11:13:25.975`、`11:13:26.572`、`11:13:27.674`、`11:13:30.076`。当时还没有远程媒体异步保存队列记录。
+- 图片供应商请求已加 `5分钟` 超时，避免模型商连接不返回导致对话流永远 pending。`Unexpected end of JSON input`、响应不完整、5xx 等临时错误会重试一次；模型拒绝、内容过滤、没有返回图片不再重试，避免拒绝类错误拖到 7-9 分钟。本轮手动清理了本地用户 `ID_779117` 的旧挂起请求 `1243c1a8-531a-4330-abe7-32d547a08bdc`，把 4 个槽位标记失败并移除 pending。
+- 对话流错误红字规则已统一：优先显示模型/提供商返回的真实中文原因；没有真实原因时显示通用原因 `服务器繁忙，请稍候再试.....`；所有生成错误都保留 `B_数字` 错误编号，便于后续查日志。用户端不显示供应商名称，不显示 `OpenRouter / BytePlus / ModelArk / OpenAI / Gemini / Google`，不显示 `<system-reminder>`、`finish_reason`、`native_finish_reason`、HTML、堆栈或其它内部英文技术内容。后端日志仍保留原始错误用于排查。
+- 对话流多张图片/多个视频失败时，每个失败原因写入 `message.mediaErrorReasons`，红字上方显示 `<1/4>` 这类翻页控件。超过一个错误才显示翻页；默认定位到第一条真实原因，如果前几条是通用原因、后面有真实原因，会自动显示真实原因所在页。整批失败原因会在前端日志中记录 `[media-generation] image failure reasons` 或 `[media-generation] video failure reasons`，包含 `requestId / model / successCount / failureCount / reasons`。
+- 资产库生成错误规则保持：资产库外部失败卡只显示“图片生成失败 / 查看失败”，不在外部卡片展示原因；真实原因只显示在全屏资产生成页。资产库失败原因同样经过中文清洗和供应商名过滤。
+- 本轮后续修复开发浮层 `5 Issues`。`lint/build` 本身没有错误，dev 日志真实错误是预览页 `Maximum update depth exceeded`。已给预览图片尺寸、缩略图分页和预览资产同步加“相同值不重复 setState”保护；生成图片缩略图改为 `Image fill + object-contain`，减少 Next 图片宽高比例 warning。
+- 对话流图片生成展示规则重新对齐为“固定槽位”。用户请求几张就固定几个槽位，最多 4 个；每个槽位只允许 `pending / image / failed`。成功、失败、失败卡重试都只替换对应槽位，不允许追加第 5、第 6 个等待卡或失败卡。
+- 本轮反复修正失败卡规则。正确规则：失败卡数量只来自固定槽位里的 `failed` 状态，不能用 `mediaErrorReasons.length` 推断。全失败请求 4 张显示 4 个失败卡；3 成功 1 失败显示 3 图 + 1 失败卡；红字 `<1/4>` 只对应当前仍失败的槽位。后续不要再按失败原因数量补卡，否则会出现 5 张失败卡。
+- 对话流图片额外返回规则已改。模型多返回图片不再显示、不再分页；服务端 `/api/image` 会优先按用户请求尺寸筛图，例如请求 4K 只返回真实 4K 图，1K/2K/非请求尺寸不展示、不绑定为本次交付媒体。旧对话流前端也按该规则过滤展示，但必须保留 pending/failed 槽位。
+- 绿色成功提醒规则已对齐。图片专业模式同一批任意一个槽位成功即可弹一次 `图片生成已完成`；全失败不能弹绿色成功。提醒只在单槽成功分支触发，并由 `notifyGenerationCompleteOnce(requestId, ...)` 去重。曾短暂改成整批结束后再弹，已按用户要求撤回。
+- 再次修复 `video_2_d28`。本地用户 `ID_779117` 的工作区曾被打开的旧浏览器状态覆盖回已删除 URL `/generated/videos/1780454968504-21fb484e-7894-45cb-b730-63c475ee71f2.mp4`，导致视频卡和预览 404。已替换为有效文件 `/generated/videos/1780454887939-f010e856-7f46-4fdc-9290-8dd58bd22d85.mp4`，最终验证数据库 `old 0 / new 6`。`/api/workspace-state` GET/PUT 和工作台加载都加了旧 URL 替换兜底，防止旧浏览器状态再次覆盖。
+- `public/generated/videos/manifest.json` 中 BytePlus Fast 任务 `cgt-20260602204634-97h8d` 的 `localVideoUrl` 已改成有效本地文件。`src/lib/media-save-queue.ts` 增加 saved job 后补 `videoTaskId` 时回写 `video-manifest.json` 的逻辑，避免 manifest 继续指向远程或旧地址。
+- 错误清洗补漏：`图片平台没有返回图片，且没有返回可用原因。`、`没有返回可用原因`、`没有返回原因` 等无真实原因文本现在会显示通用 `服务器繁忙，请稍候再试.....`，但模型返回真实中文拒绝原因仍显示。
+- 本轮讨论了媒体多时卡顿的后续优化方向：对话流视频默认不挂载真实 `<video>`，只点开/悬停时加载；预览右侧视频缩略图不用 `<video preload="metadata">`；历史图片懒加载或使用缩略图缓存。尚未全面实现，只做了部分图片缩略图加载修复。
+- 关键文件：`src/lib/media-save-queue.ts`、`src/app/api/media-save-status/route.ts`、`src/app/api/workspace-state/route.ts`、`src/app/api/video/route.ts`、`src/app/api/image/route.ts`、`src/lib/openrouter.ts`、`src/lib/error-message.ts`、`src/lib/error-code.ts`、`src/components/chat-workbench.tsx`、`src/app/admin/page.tsx`、`public/generated/videos/manifest.json`。
+- 本轮多次验证：`npm run lint` 通过，仅剩 `chat-workbench.tsx` 原有两个 warning；`npm run build` 通过。
+
+### 2026-06-02 本轮继续：后台概览看板、BytePlus 视频时长、日志、积分弹窗和 GitHub 同步
+
+- 本轮开始先阅读 `handover/` 交接文档和更新日志，确认当前重点是 BytePlus 接入、后台系统设置、费用计算、视频能力测试和后台管理继续完善。用户要求后续回答简单直接。
+- 复测并确认 BytePlus `Seedream 5.0 Lite` 当前 `output_format=jpeg` 不报错，且输出确实为 `.jpg` 图片。新增专用测试脚本 `scripts/test-byteplus-seedream-5-lite-px-matrix.mjs`，只测 `seedream-5-0-260128 + output_format=jpeg + size=WIDTHxHEIGHT px`。
+- `Seedream 5.0 Lite` 的 12 个尺寸组合全部成功，结果写入 `AI-Video-Assistant_Project Planning/test/byteplus-seedream-5-lite-px-size-test-results.md` 和 `byteplus-seedream-5-lite-px-size-test-raw.json`，图片保存到 `AI-Video-Assistant_Project Planning/test/byteplus-seedream-5-lite-px-images/`。成功尺寸：`16:9 2K=2848x1600 / 4K=5504x3040`、`9:16 2K=1600x2848 / 4K=3040x5504`、`1:1 2K=2048x2048 / 4K=4096x4096`、`4:3 2K=2304x1728 / 4K=4704x3520`、`3:4 2K=1728x2304 / 4K=3520x4704`、`21:9 2K=3136x1344 / 4K=6240x2656`。
+- 排查 d28 对话流预览右侧缩略图不显示“全部图片”的问题。结论：d28 实际成功图片为 17 张；另有两条 assistant 消息各有 4 个 `imageResultSlots` 但没有图片 URL，属于失败/空槽，预览不会显示。右侧缩略图本身是分页渲染，不是一次性渲染全部；如果翻页也看不到成功图片才算 bug。
+- 统一图片/视频分辨率图标规则。图片 K 数标识 `1K / 2K / 4K` 一律空心边框；视频分辨率 `SD / HD / FHD / 4K` 才使用黑底实心。修复图片设置菜单里 `4K` 被误渲染成视频黑底图标的问题，移除不再使用的 `Ri4kLine`。
+- 查阅 BytePlus 视频文档 `E:\project\【1】Api key\Byteplus\创建视频生成任务说明.md` 和 `Seedance 2.0接口文档.md`。确认 BytePlus 视频尺寸由 `resolution + ratio` 控制，不传 `size=WIDTHxHEIGHT`。字段包括 `model / content / resolution / ratio / duration / generate_audio / watermark / seed / return_last_frame / priority / callback_url`。`Seedance 2.0 Fast` 不支持 `1080p`，`Seedance 2.0` 支持 `480p / 720p / 1080p`。
+- BytePlus 两个视频模型的时长能力已改为文档规则 `4-15秒` 每秒可选，只影响 `byteplus:video.seedance-2-0-fast` 和 `byteplus:video.seedance-2-0`。OpenRouter Seedance/Kling/Veo 时长保持原规则。服务端 `getDuration()` 对 BytePlus 增加 `4-15` 秒兜底，异常时长会 clamp 到合法范围。
+- 视频时长菜单已改为两列显示。当前视觉顺序为左列从上到下 `15秒 / 14秒 / 13秒 / 12秒 / 11秒 / 10秒`，右列从上到下 `9秒 / 8秒 / 7秒 / 6秒 / 5秒 / 4秒`，也就是每列从下往上递增。
+- 排查 d28 最后两个 BytePlus 视频任务慢的问题。当前之前没有视频分段 timing 日志，只能从 manifest 和 dev log 反推。任务 `cgt-20260602203824-qf5tz`（Seedance 2.0，480p/16:9/5秒）总耗时约 4分09秒，成功保存本地；任务 `cgt-20260602204634-97h8d`（Seedance 2.0 Fast，720p/16:9/15秒）总耗时约 13分55秒，远程 URL 约 2 分多钟已生成，最后 `localVideoUrl` 仍是远程 URL，说明主要卡在远程 mp4 下载保存而不是模型生成。
+- `/api/video` 已新增非敏感 timing 日志：`[video-generation] BytePlus created` 记录 `createMs / model / taskId / ratio / resolution / duration / referenceCount`；`[video-generation] BytePlus polling` 记录 `queryMs / status / hasVideoUrl`；`[video-generation] BytePlus completed` 记录 `queryMs / saveMs / totalMs / savedLocal / saveFailed / saveError`。不打印完整远程签名 URL。
+- 后台 `系统设置` 顶部 API 输入框宽度继续调整。OpenRouter 输入区加长到 `620px`；BytePlus 输入区加长到 `450px`；顶部 API 区总宽 `1090px`，仍低于下方模型表 `1180px`。只改 UI 宽度，不改保存逻辑。
+- 后台 `积分管理` 展开区里的 `当前积分` 已可点击，新增 `当前积分变动明细` 弹窗。弹窗按时间最新排序，三列表格显示 `变动原因 / 积分变动 / 变动后剩余积分`；每条 `CreditLedger` 都展示，包括注册送积分、后台调积分、对话/规划、图片、视频、资产库图片、反推/优化提示词。余额通过当前余额倒推每条流水后的余额。
+- 后台 `概览` 页已从占位升级为运营看板。新增核心卡、近 30 日活跃/新增折线图、近 7 日积分/美元消耗折线图、近 7 日生成柱状图、1/3/7 日留存、系统状态、模型使用 Top 8、供应商使用占比、失败原因 Top 10、最近活跃用户 Top 10、消耗积分用户 Top 10。图表用轻量 SVG/CSS 实现，未引入新依赖。数据来自 `User / Session.lastSeenAt / UserWorkspaceState / CreditLedger / systemSettings / creditSettings`。
+- 本轮确认两个 lint warning 暂不需要处理：`chat-workbench.tsx` 的 `Unused eslint-disable directive` 和 `showInputTip` hook dependency warning，当前不影响运行和 build，后续可单独清理。
+- 本轮验证：多次 `npm run lint` 通过，仅剩上述两个原有 warning；`npm run build` 通过。
+- 已将业务代码、后台/API、Prisma、脚本和交接文档提交并推送到 GitHub `origin/main`，提交为 `a538b32 Update admin dashboard and BytePlus integrations`。推送前做过暂存区敏感信息扫描，未提交 `.env / .env.local`，也未提交 `AI-Video-Assistant_Project Planning/`。注意：本条交接文档更新发生在该提交之后，如需 GitHub 也包含本次交接更新，需要再单独提交推送。
+
 ### 2026-06-02 本轮继续：BytePlus 开关落实、费用计算、视频显示和交互修正
 
 - 后台 `系统设置` 顶部 `OpenRouter API / BytePlus API` 输入框已临时改为明文显示，方便用户核对当前 Key。只改输入框 `type`，不改保存逻辑。后续如用户确认安全要求，可再改回密码显示。

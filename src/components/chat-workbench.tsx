@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SVGProps } from "react";
 import Image from "next/image";
+import { createPortal } from "react-dom";
 import {
   RiAddLine,
   RiAddLargeLine,
@@ -44,6 +45,7 @@ import {
   RiMultiImageLine,
   RiMailLine,
   RiPhoneLine,
+  RiPlayLargeFill,
   RiOpenaiFill,
   RiEditBoxLine,
   RiPushpinLine,
@@ -81,6 +83,9 @@ import {
   RiTerminalWindowFill,
   RiLogoutBoxRLine,
   RiSettingsLine,
+  RiSunLine,
+  RiMoonLine,
+  RiComputerLine,
   RiNotification2Line,
   RiShieldUserLine,
   RiSaveLine,
@@ -89,6 +94,7 @@ import { ADVANCED_CHAT_MODEL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_V
 import { toUserErrorMessage } from "@/lib/error-message";
 import { useBodyScrollLock } from "@/components/use-body-scroll-lock";
 import { BytePlusIcon } from "@/components/byteplus-icon";
+import { getSupportedUploadTypeLabel, getUploadAcceptValue, getUploadKindFromFileName, getUploadRule } from "@/lib/upload-rules";
 
 type Message = {
   id: string;
@@ -108,6 +114,7 @@ type Message = {
   videoUrl?: string;
   videos?: string[];
   videoPrompts?: Record<string, string>;
+  videoPosters?: Record<string, string>;
   videoDimensionsMap?: Record<string, ImageDimensions>;
   statusText?: string;
   pendingImageCount?: number;
@@ -119,6 +126,7 @@ type Message = {
   retryingFailedVideoIndexes?: number[];
   retryingFailedVideoStartedAt?: Record<number, number>;
   error?: string;
+  mediaErrorReasons?: string[];
   mode?: WorkMode;
   generationMeta?: MessageGenerationMeta;
 };
@@ -135,6 +143,7 @@ type ImageDimensions = {
 
 type ImageResultSlot =
   | { type: "image"; url: string }
+  | { type: "pending"; startedAt?: number }
   | { type: "failed"; retryingStartedAt?: number };
 
 type CharacterGenerationResult = {
@@ -171,7 +180,9 @@ type AssetItem = {
   type: AssetType;
   name: string;
   systemName?: string;
+  userName?: string;
   url: string;
+  posterUrl?: string;
   librarySource?: "asset_generation" | "conversation";
   sourcePrompt: string;
   previewMeta?: PreviewMediaMeta;
@@ -294,7 +305,7 @@ type ActivePanel = "chat" | "workflow" | "assets";
 type UserDialogTab = "profile" | "credits" | "security" | "settings";
 type WorkspaceStorageMode = "loading" | "user";
 type UserLanguage = "简体中文" | "繁体中文";
-type AssetFilter = AssetType | "conversation_images" | "conversation_videos";
+type AssetFilter = AssetType | "conversation_images" | "conversation_uploads" | "conversation_videos";
 type AssetCategoryTarget = UploadableImageAssetType | "conversation_image";
 type WorkSession = {
   id: string;
@@ -316,6 +327,9 @@ type WorkSession = {
 type WorkspaceStatePayload = {
   sessions?: WorkSession[];
   nextConversationNumber?: number;
+  activePanel?: ActivePanel;
+  assetFilter?: AssetFilter;
+  assetScrollTopByFilter?: Partial<Record<AssetFilter, number>>;
   workflowItems?: WorkflowItem[];
   assetGenerateJobs?: AssetGenerateJob[];
   activeSessionId?: string;
@@ -468,20 +482,169 @@ type AgentModelTier = "normal" | "advanced";
 
 const HOME_PROMPT_STORAGE_KEY = "flashmuse-home-prompt-v1";
 const WORKSPACE_USER_DIALOG_STORAGE_KEY = "flashmuse-workspace-user-dialog-v1";
+const WORKSPACE_THEME_STORAGE_KEY = "flashmuse-workspace-theme-v1";
+const WORKSPACE_UI_STATE_STORAGE_KEY = "flashmuse-workspace-ui-state-v1";
+type WorkspaceThemeMode = "light" | "dark" | "system";
+
+function getStoredWorkspaceThemeMode(): WorkspaceThemeMode {
+  if (typeof window === "undefined") return "light";
+  try {
+    const stored = window.localStorage.getItem(WORKSPACE_THEME_STORAGE_KEY);
+    if (stored === "light" || stored === "dark" || stored === "system") return stored;
+  } catch {
+    return "light";
+  }
+  return "light";
+}
+
+function getSystemPrefersDark() {
+  return typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
 const ASSET_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_PERSISTED_SESSIONS = 30;
 const MAX_INTENT_MEMORY_RULES = 50;
 const MAX_FEEDBACK_LOGS = 300;
 const USD_TO_CNY_RATE = 7.2;
 const MAX_UPLOADED_IMAGES = 10;
-const MAX_UPLOADED_DOCUMENTS = 8;
 const MAX_SESSION_PENDING_REQUESTS = 10;
-const supportedDocumentExtensions = ["pdf", "txt", "csv", "docx", "doc", "xlsx", "xls", "pptx", "ppt", "md"];
+const GENERIC_MEDIA_ERROR_MESSAGE = "服务器繁忙，请稍候再试.....";
+const legacyMediaUrlReplacements = new Map([
+  ["/generated/videos/1780454968504-21fb484e-7894-45cb-b730-63c475ee71f2.mp4", "/generated/videos/1780454887939-f010e856-7f46-4fdc-9290-8dd58bd22d85.mp4"],
+]);
+function stripErrorCodePrefix(value: string) {
+  return value.replace(/^\(B_\d+\)\s*/, "").trim();
+}
+
+function isGenericMediaReason(value: string | undefined) {
+  if (!value) return true;
+  const text = stripErrorCodePrefix(value);
+  return text === GENERIC_MEDIA_ERROR_MESSAGE || [
+    "请求失败，请稍后再试。",
+    "图片生成失败，请稍后再试。",
+    "视频生成失败，请稍后再试。",
+    "请求超时，请稍后重试。",
+    "网络连接异常，请稍后重试。",
+    "平台服务临时异常，请稍后重试。",
+    "任务失败，请联系管理员！",
+  ].includes(text);
+}
+
+type MediaSaveStatusJob = {
+  remoteUrl: string;
+  localUrl?: string;
+  posterUrl?: string;
+  status: "pending" | "downloading" | "saved" | "failed" | "expired";
+  dimensions?: ImageDimensions;
+};
+
+function isRemoteMediaUrl(url: string | undefined): url is string {
+  return typeof url === "string" && /^https?:\/\//i.test(url);
+}
+
+function collectRemoteMediaUrls(sessions: WorkSession[], assets: AssetItem[], assetGenerateJobs: AssetGenerateJob[]) {
+  const urls = new Set<string>();
+  sessions.forEach((session) => {
+    session.messages.forEach((message) => {
+      message.images?.forEach((url) => { if (isRemoteMediaUrl(url)) urls.add(url); });
+      message.imageResultSlots?.forEach((slot) => { if (slot.type === "image" && isRemoteMediaUrl(slot.url)) urls.add(slot.url); });
+      if (isRemoteMediaUrl(message.videoUrl)) urls.add(message.videoUrl);
+      message.videos?.forEach((url) => { if (isRemoteMediaUrl(url)) urls.add(url); });
+    });
+  });
+  assets.forEach((asset) => { if (isRemoteMediaUrl(asset.url)) urls.add(asset.url); });
+  assetGenerateJobs.forEach((job) => { if (isRemoteMediaUrl(job.result.url)) urls.add(job.result.url); });
+  return Array.from(urls);
+}
+
+function replaceUrlValue(value: string | undefined, replacements: Map<string, string>) {
+  return value && replacements.get(value) ? replacements.get(value) : value;
+}
+
+function replaceUrlArray(values: string[] | undefined, replacements: Map<string, string>) {
+  if (!values) return values;
+  let changed = false;
+  const next = values.map((value) => {
+    const replacement = replacements.get(value);
+    if (replacement) changed = true;
+    return replacement ?? value;
+  });
+  return changed ? next.filter((url, index, array) => array.indexOf(url) === index) : values;
+}
+
+function replaceUrlRecord<T>(record: Record<string, T> | undefined, replacements: Map<string, string>, extra?: Record<string, T>) {
+  if (!record && !extra) return record;
+  let changed = false;
+  const next: Record<string, T> = {};
+  Object.entries(record ?? {}).forEach(([key, value]) => {
+    const replacement = replacements.get(key);
+    if (replacement) changed = true;
+    next[replacement ?? key] = value;
+  });
+  Object.entries(extra ?? {}).forEach(([key, value]) => {
+    next[key] = value;
+    changed = true;
+  });
+  return changed ? next : record;
+}
+
+function replaceMessageMediaUrls(message: Message, replacements: Map<string, string>, dimensions: Record<string, ImageDimensions>, videoPosters: Record<string, string>) {
+  const images = replaceUrlArray(message.images, replacements);
+  const videos = replaceUrlArray(message.videos, replacements);
+  const videoUrl = replaceUrlValue(message.videoUrl, replacements);
+  const imageResultSlots = message.imageResultSlots?.map((slot) => slot.type === "image" ? { ...slot, url: replacements.get(slot.url) ?? slot.url } : slot);
+  const imageResultSlotsChanged = Boolean(message.imageResultSlots?.some((slot, index) => slot.type === "image" && imageResultSlots?.[index]?.type === "image" && slot.url !== imageResultSlots[index].url));
+  const imageDimensions = replaceUrlRecord(message.imageDimensions, replacements, dimensions);
+  const imagePrompts = replaceUrlRecord(message.imagePrompts, replacements);
+  const videoPrompts = replaceUrlRecord(message.videoPrompts, replacements);
+  const nextVideoPosters = replaceUrlRecord(message.videoPosters, replacements, videoPosters);
+  const mediaSystemNames = replaceUrlRecord(message.mediaSystemNames, replacements);
+  const videoDimensionsMap = replaceUrlRecord(message.videoDimensionsMap, replacements);
+  const imageReferences = message.imageReferences?.map((item) => ({ ...item, url: replacements.get(item.url) ?? item.url }));
+  const imageReferencesChanged = Boolean(message.imageReferences?.some((item, index) => item.url !== imageReferences?.[index]?.url));
+
+  if (images === message.images && videos === message.videos && videoUrl === message.videoUrl && !imageResultSlotsChanged && imageDimensions === message.imageDimensions && imagePrompts === message.imagePrompts && videoPrompts === message.videoPrompts && nextVideoPosters === message.videoPosters && mediaSystemNames === message.mediaSystemNames && videoDimensionsMap === message.videoDimensionsMap && !imageReferencesChanged) return message;
+
+  return {
+    ...message,
+    images,
+    videos,
+    videoUrl,
+    imageResultSlots: imageResultSlotsChanged ? imageResultSlots : message.imageResultSlots,
+    imageDimensions,
+    imagePrompts,
+    videoPrompts,
+    videoPosters: nextVideoPosters,
+    mediaSystemNames,
+    videoDimensionsMap,
+    imageReferences: imageReferencesChanged ? imageReferences : message.imageReferences,
+  };
+}
+
+function replaceSessionMediaUrls(session: WorkSession, replacements: Map<string, string>, dimensions: Record<string, ImageDimensions>, videoPosters: Record<string, string> = {}) {
+  let changed = false;
+  const messages = session.messages.map((message) => {
+    const next = replaceMessageMediaUrls(message, replacements, dimensions, videoPosters);
+    if (next !== message) changed = true;
+    return next;
+  });
+  const videoTaskUrl = replaceUrlValue(session.videoTask?.videoUrl, replacements);
+  const videoTaskChanged = videoTaskUrl !== session.videoTask?.videoUrl;
+  return changed || videoTaskChanged ? { ...session, updatedAt: Date.now(), messages, videoTask: session.videoTask && videoTaskChanged ? { ...session.videoTask, videoUrl: videoTaskUrl } : session.videoTask } : session;
+}
+
+function replaceAssetMediaUrls(asset: AssetItem, replacements: Map<string, string>, videoPosters: Record<string, string> = {}) {
+  const url = replacements.get(asset.url);
+  const posterUrl = (url && videoPosters[url]) || videoPosters[asset.url];
+  return url || posterUrl ? { ...asset, url: url ?? asset.url, posterUrl: posterUrl ?? asset.posterUrl } : asset;
+}
+
+function replaceAssetGenerateJobMediaUrls(job: AssetGenerateJob, replacements: Map<string, string>, dimensions: Record<string, ImageDimensions>) {
+  const url = replaceUrlValue(job.result.url, replacements);
+  return url && url !== job.result.url ? { ...job, result: { ...job.result, url, dimensions: dimensions[url] ?? job.result.dimensions } } : job;
+}
 const readableDocumentExtensions = ["md", "txt", "csv"];
 const MAX_DOCUMENT_TEXT_CHARS = 12000;
 const MAX_DOCUMENT_CONTEXT_CHARS = 30000;
-const uploadAcceptValue = `image/*,${supportedDocumentExtensions.map((extension) => `.${extension}`).join(",")}`;
-const supportedUploadTypeLabel = `图片、${supportedDocumentExtensions.join(", ")}`;
 const MAX_DRAFT_INPUT_LENGTH = 2000;
 const MAX_USER_NICKNAME_LENGTH = 8;
 const RETRY_IMAGE_SIDE = 1280;
@@ -517,11 +680,11 @@ const assetTypeLabels: Record<AssetType, string> = {
 };
 const assetTypeOrder: AssetType[] = ["character_image", "scene_image", "shot_image", "shot_video", "other", "trash"];
 const assetGenerationTypes: UploadableImageAssetType[] = ["character_image", "scene_image", "shot_image"];
-type MentionAssetGroupType = UploadableImageAssetType | "conversation_image";
-const mentionAssetTypes: MentionAssetGroupType[] = ["character_image", "scene_image", "shot_image", "conversation_image"];
+type MentionAssetGroupType = UploadableImageAssetType | "conversation_upload";
+const mentionAssetTypes: MentionAssetGroupType[] = ["character_image", "scene_image", "shot_image", "conversation_upload"];
 const assetUploadTypes: UploadableImageAssetType[] = ["character_image", "scene_image", "shot_image"];
 const ASSET_UPLOAD_SLOT_COUNT = 8;
-const ASSET_RENDER_PAGE_SIZE = 30;
+const ASSET_RENDER_PAGE_SIZE = 24;
 const assetTypeIcons: Record<AssetType, typeof RiImageLine> = {
   character_image: RiAccountBoxLine,
   scene_image: RiLandscapeLine,
@@ -540,7 +703,7 @@ const mentionAssetTypeLabels: Record<MentionAssetGroupType, string> = {
   character_image: "角色图片",
   scene_image: "场景图片",
   shot_image: "分镜图片",
-  conversation_image: "对话流图片",
+  conversation_upload: "上传图片",
 };
 const assetCategoryTargetIcons: Record<AssetCategoryTarget, typeof RiImageLine> = {
   character_image: RiAccountBoxLine,
@@ -559,8 +722,91 @@ function isConversationAsset(asset: AssetItem) {
 
 function isMentionGroupAsset(asset: AssetItem, groupType: MentionAssetGroupType) {
   if (asset.type === "trash" || asset.deletedAt || isVideoAsset(asset)) return false;
-  if (groupType === "conversation_image") return isConversationAsset(asset);
+  if (groupType === "conversation_upload") return isConversationUploadedAsset(asset);
   return asset.type === groupType && isAssetGenerationAsset(asset);
+}
+
+function getMediaThumbnailUrl(url: string) {
+  if (!url.startsWith("/generated/")) return url;
+  return `/api/media-thumbnail?url=${encodeURIComponent(url)}`;
+}
+
+type HoverImagePreviewPosition = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+function getHoverImagePreviewPosition(clientX: number, clientY: number, naturalSize?: ImageDimensions): HoverImagePreviewPosition {
+  const margin = 16;
+  const gap = 14;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const availableRight = Math.max(0, viewportWidth - clientX - gap - margin);
+  const availableLeft = Math.max(0, clientX - gap - margin);
+  const useLeft = availableLeft > availableRight;
+  const maxWidth = Math.max(120, Math.min(720, (useLeft ? availableLeft : availableRight) || viewportWidth - margin * 2));
+  const maxHeight = Math.max(120, Math.min(760, viewportHeight - margin * 2));
+  const naturalWidth = Math.max(1, naturalSize?.width ?? maxWidth);
+  const naturalHeight = Math.max(1, naturalSize?.height ?? maxHeight);
+  const scale = Math.min(maxWidth / naturalWidth, maxHeight / naturalHeight, 1);
+  const width = Math.max(120, Math.round(naturalWidth * scale));
+  const height = Math.max(120, Math.round(naturalHeight * scale));
+  const rawLeft = useLeft ? clientX - gap - width : clientX + gap;
+  const rawTop = clientY + gap + height > viewportHeight - margin ? clientY - gap - height : clientY + gap;
+  const left = Math.min(Math.max(margin, rawLeft), Math.max(margin, viewportWidth - margin - width));
+  const top = Math.min(Math.max(margin, rawTop), Math.max(margin, viewportHeight - margin - height));
+
+  return { left, top, width, height };
+}
+
+function HoverImagePreview({ src, alt, wrapperClassName = "inline-block", children }: { src: string; alt: string; wrapperClassName?: string; children: ReactNode }) {
+  const [position, setPosition] = useState<HoverImagePreviewPosition | null>(null);
+  const [naturalSize, setNaturalSize] = useState<ImageDimensions | undefined>(undefined);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const updatePosition = (clientX: number, clientY: number, size = naturalSize) => {
+    pointerRef.current = { x: clientX, y: clientY };
+    setPosition(getHoverImagePreviewPosition(clientX, clientY, size));
+  };
+  const preview = position && typeof document !== "undefined" ? createPortal(
+    <span className="pointer-events-none fixed z-[9999] flex items-center justify-center rounded-[10px] border border-white/70 bg-white p-1 shadow-[0_18px_60px_rgba(0,0,0,0.32)]" style={{ left: position.left, top: position.top, width: position.width + 8, height: position.height + 8 }}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={src} alt={alt} className="block object-contain" style={{ width: position.width, height: position.height }} onLoad={(event) => {
+        const image = event.currentTarget;
+        if (!image.naturalWidth || !image.naturalHeight) return;
+        const nextSize = { width: image.naturalWidth, height: image.naturalHeight };
+        setNaturalSize(nextSize);
+        const pointer = pointerRef.current;
+        if (pointer) setPosition(getHoverImagePreviewPosition(pointer.x, pointer.y, nextSize));
+      }} />
+    </span>,
+    document.body,
+  ) : null;
+
+  return (
+    <span
+      className={wrapperClassName}
+      onMouseEnter={(event) => updatePosition(event.clientX, event.clientY)}
+      onMouseMove={(event) => updatePosition(event.clientX, event.clientY)}
+      onMouseLeave={() => {
+        pointerRef.current = null;
+        setPosition(null);
+      }}
+    >
+      {children}
+      {preview}
+    </span>
+  );
+}
+
+function getAssetCardImageUrl(asset: Pick<AssetItem, "url" | "posterUrl">) {
+  const posterUrl = asset.posterUrl ?? getLocalVideoPosterUrl(asset.url);
+  return posterUrl ? getMediaThumbnailUrl(posterUrl) : getMediaThumbnailUrl(asset.url);
+}
+
+function getAssetCardPosterUrl(asset: Pick<AssetItem, "url" | "posterUrl">) {
+  return asset.posterUrl ?? getLocalVideoPosterUrl(asset.url);
 }
 const MIN_TYPING_DURATION_MS = 1000;
 const MAX_TYPING_DURATION_MS = 8000;
@@ -1015,24 +1261,30 @@ function getFeedbackDissatisfactionCount(sessionId: string, mode: "image" | "vid
     .length;
 }
 
-function getAgentGenerationModel(agentTier: AgentModelTier, generationMode: WorkMode, selectedGenerationModels: Record<"image" | "video", ModelName>, options?: { sourceText?: string; session?: WorkSession; feedbackLogs?: FeedbackLogEntry[] }) {
+function getAvailableGenerationModel(generationMode: "image" | "video", desiredModel: ModelName, enabledModels?: Record<"image" | "video", string[]>) {
+  const availableModels = enabledModels?.[generationMode] ?? [];
+  if (availableModels.length === 0 || availableModels.includes(desiredModel)) return desiredModel;
+  return availableModels[0] as ModelName;
+}
+
+function getAgentGenerationModel(agentTier: AgentModelTier, generationMode: WorkMode, selectedGenerationModels: Record<"image" | "video", ModelName>, options?: { sourceText?: string; session?: WorkSession; feedbackLogs?: FeedbackLogEntry[]; enabledModels?: Record<"image" | "video", string[]> }) {
   if (generationMode === "image") {
-    if (agentTier === "normal") return DEFAULT_IMAGE_MODEL;
+    if (agentTier === "normal") return getAvailableGenerationModel("image", DEFAULT_IMAGE_MODEL, options?.enabledModels);
     const dissatisfactionCount = getRecentUserDissatisfactionCount(options?.session, "image") + getFeedbackDissatisfactionCount(options?.session?.id ?? "", "image", options?.feedbackLogs ?? []);
     const slowCount = getRecentSlowComplaintCount(options?.session, "image");
-    if (dissatisfactionCount >= 2) return "openai/gpt-5.4-image-2";
-    if (slowCount >= 2) return "google/gemini-3.1-flash-image-preview";
-    return selectedGenerationModels.image;
+    if (dissatisfactionCount >= 2) return getAvailableGenerationModel("image", "openai/gpt-5.4-image-2", options?.enabledModels);
+    if (slowCount >= 2) return getAvailableGenerationModel("image", "google/gemini-3.1-flash-image-preview", options?.enabledModels);
+    return getAvailableGenerationModel("image", selectedGenerationModels.image, options?.enabledModels);
   }
 
   if (generationMode === "video") {
-    if (isExplicit4KVideoRequest(options?.sourceText ?? "")) return "google/veo-3.1";
-    if (agentTier === "normal") return DEFAULT_VIDEO_MODEL;
+    if (isExplicit4KVideoRequest(options?.sourceText ?? "")) return getAvailableGenerationModel("video", "google/veo-3.1", options?.enabledModels);
+    if (agentTier === "normal") return getAvailableGenerationModel("video", DEFAULT_VIDEO_MODEL, options?.enabledModels);
     const dissatisfactionCount = getRecentUserDissatisfactionCount(options?.session, "video") + getFeedbackDissatisfactionCount(options?.session?.id ?? "", "video", options?.feedbackLogs ?? []);
     const slowCount = getRecentSlowComplaintCount(options?.session, "video");
-    if (dissatisfactionCount >= 2) return "bytedance/seedance-2.0";
-    if (slowCount >= 2) return "bytedance/seedance-2.0-fast";
-    return selectedGenerationModels.video;
+    if (dissatisfactionCount >= 2) return getAvailableGenerationModel("video", "bytedance/seedance-2.0", options?.enabledModels);
+    if (slowCount >= 2) return getAvailableGenerationModel("video", "bytedance/seedance-2.0-fast", options?.enabledModels);
+    return getAvailableGenerationModel("video", selectedGenerationModels.video, options?.enabledModels);
   }
 
   return agentTier === "advanced" ? ADVANCED_CHAT_MODEL : DEFAULT_CHAT_MODEL;
@@ -1295,6 +1547,34 @@ function getMessageVideos(message: Message) {
   return [...(message.videos ?? []), ...(message.videoUrl ? [message.videoUrl] : [])].filter((url, index, array) => Boolean(url) && array.indexOf(url) === index);
 }
 
+function getSessionMediaCounts(session?: WorkSession | null) {
+  const imageUrls = new Set<string>();
+  const videoUrls = new Set<string>();
+
+  for (const message of session?.messages ?? []) {
+    if (message.role !== "assistant") continue;
+
+    const slotImageUrls = message.imageResultSlots?.flatMap((slot) => slot.type === "image" ? [slot.url] : []) ?? [];
+    const images = slotImageUrls.length > 0 ? slotImageUrls : message.images ?? [];
+    images.filter(Boolean).forEach((url) => imageUrls.add(normalizeMediaUrlForMatch(url)));
+    getMessageVideos(message).forEach((url) => videoUrls.add(normalizeMediaUrlForMatch(url)));
+  }
+
+  return { images: imageUrls.size, videos: videoUrls.size };
+}
+
+function getLocalVideoPosterUrl(url: string | undefined) {
+  if (!url?.startsWith("/generated/videos/")) return undefined;
+  const fileName = url.split("/").pop()?.split("?")[0];
+  if (!fileName) return undefined;
+  const baseName = fileName.replace(/\.(mp4|webm|mov)$/i, "");
+  return baseName === fileName ? undefined : `/generated/video-posters/${baseName}.jpg`;
+}
+
+function getVideoPosterForMessage(message: Message, url: string) {
+  return message.videoPosters?.[url] ?? getLocalVideoPosterUrl(url);
+}
+
 function isWorkMode(value: unknown): value is WorkMode {
   return value === "agent" || value === "image" || value === "video";
 }
@@ -1402,9 +1682,11 @@ function BlackHoverTooltip({ label, children, className = "", side = "top" }: { 
   );
 }
 
-function UsageSummaryButton({ summary }: { summary?: UsageSummary }) {
+function UsageSummaryButton({ summary, mediaCounts }: { summary?: UsageSummary; mediaCounts?: { images: number; videos: number } }) {
   const safeSummary = normalizeUsageSummary(summary);
-  const hasUsage = safeSummary.totalTokens > 0 || safeSummary.usd > 0 || safeSummary.credits > 0;
+  const imageCount = mediaCounts?.images ?? 0;
+  const videoCount = mediaCounts?.videos ?? 0;
+  const hasUsage = safeSummary.totalTokens > 0 || safeSummary.usd > 0 || safeSummary.credits > 0 || imageCount > 0 || videoCount > 0;
   const cny = safeSummary.usd * USD_TO_CNY_RATE;
 
   return (
@@ -1417,6 +1699,8 @@ function UsageSummaryButton({ summary }: { summary?: UsageSummary }) {
         {hasUsage ? (
           <div className="space-y-0 whitespace-nowrap">
             <div>• Tk {safeSummary.totalTokens.toLocaleString("en-US")}</div>
+            <div>• <RiImageLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {imageCount.toLocaleString("en-US")}</div>
+            <div>• <RiFilmLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {videoCount.toLocaleString("en-US")}</div>
             <div>• <RiVipDiamondLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {safeSummary.credits.toLocaleString("en-US")}</div>
             <div>• <RiMoneyDollarCircleLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {safeSummary.usd.toFixed(4)}</div>
             <div>• <RiMoneyCnyCircleLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {cny.toFixed(2)} 约</div>
@@ -1492,18 +1776,28 @@ function CompactResolutionIcon({ option, mode, qualityBadgeLabel }: { option?: s
   );
 }
 
+function isLikelyThumbnailDimensions(dimensions?: ImageDimensions) {
+  if (!dimensions) return false;
+  return Math.max(dimensions.width, dimensions.height) <= 512;
+}
+
 function getImageSizeText(message: Message, imageUrl?: string) {
   if (message.mode !== "image") return undefined;
   const imageDimensions = message.imageDimensions ?? {};
 
   if (imageUrl && imageDimensions[imageUrl]) {
     const dimensions = imageDimensions[imageUrl];
+    if (isLikelyThumbnailDimensions(dimensions)) {
+      const expected = message.generationMeta?.mode === "image" ? getExpectedImageDimensions(message.generationMeta.model, message.generationMeta.settings?.resolution, message.generationMeta.settings?.ratio) : undefined;
+      return expected?.width && expected.height ? `${expected.width} × ${expected.height}` : undefined;
+    }
     return `${dimensions.width} × ${dimensions.height}`;
   }
 
   const sizeTexts = (message.images ?? [])
     .map((url) => imageDimensions[url])
     .filter((dimensions): dimensions is ImageDimensions => Boolean(dimensions))
+    .filter((dimensions) => !isLikelyThumbnailDimensions(dimensions))
     .map((dimensions) => `${dimensions.width} × ${dimensions.height}`);
 
   return Array.from(new Set(sizeTexts)).join(" / ") || undefined;
@@ -1547,8 +1841,11 @@ function getVideoResolutionFromDimensions(dimensions?: ImageDimensions) {
 
 function getMessageMediaDimensions(message: Message, imageUrl?: string) {
   if (message.mode === "image") {
-    if (imageUrl) return message.imageDimensions?.[imageUrl];
-    return (message.images ?? []).map((url) => message.imageDimensions?.[url]).find(Boolean);
+    if (imageUrl) {
+      const dimensions = message.imageDimensions?.[imageUrl];
+      return isLikelyThumbnailDimensions(dimensions) ? undefined : dimensions;
+    }
+    return (message.images ?? []).map((url) => message.imageDimensions?.[url]).find((dimensions) => dimensions && !isLikelyThumbnailDimensions(dimensions));
   }
 
   if (message.mode === "video") return message.videoDimensions;
@@ -1567,50 +1864,53 @@ type ImageVariantGroup = {
   slotIndexes?: number[];
 };
 
+function getRequestedImageDisplayCount(message: Message) {
+  const meta = message.generationMeta;
+  if (meta?.mode !== "image") return undefined;
+  if (meta.settings?.imageCount) return getImageCountValue(meta.settings.imageCount, meta.agentGenerated ? Number.POSITIVE_INFINITY : 4);
+  return meta.agentGenerated ? undefined : 4;
+}
+
+function getExpectedDimensionsForMessage(message: Message) {
+  const meta = message.generationMeta;
+  return meta?.mode === "image" ? getExpectedImageDimensions(meta.model, meta.settings?.resolution, meta.settings?.ratio) : undefined;
+}
+
+function getDisplayImageItemsForMessage(message: Message) {
+  const requestedImageCount = getRequestedImageDisplayCount(message);
+  const items: Array<{ url: string; imageIndex: number; slotIndex?: number }> = message.imageResultSlots?.flatMap((slot, slotIndex) => slot.type === "image" ? [{ url: slot.url, imageIndex: slotIndex, slotIndex }] : []) ?? (message.images ?? []).map((url, imageIndex) => ({ url, imageIndex, slotIndex: undefined }));
+
+  if (requestedImageCount === undefined) return items;
+  return items.slice(0, requestedImageCount);
+}
+
+function getDisplayImagesForMessage(message: Message) {
+  return getDisplayImageItemsForMessage(message).map((item) => item.url);
+}
+
+function getDisplayImageResultSlotsForMessage(message: Message) {
+  if (!message.imageResultSlots) return undefined;
+  const requestedImageCount = getRequestedImageDisplayCount(message);
+  if (requestedImageCount === undefined) return message.imageResultSlots;
+  return message.imageResultSlots.slice(0, requestedImageCount);
+}
+
 function getImageVariantPages(message: Message): ImageVariantGroup[] {
-  const images = message.images ?? [];
+  const displayImageItems = getDisplayImageItemsForMessage(message);
+  const images = displayImageItems.map((item) => item.url);
   const imageDimensions = message.imageDimensions ?? {};
   const groups = new Map<string, ImageVariantGroup>();
   const meta = message.generationMeta;
-  const expected = meta?.mode === "image" ? getExpectedImageDimensions(meta.model, meta.settings?.resolution, meta.settings?.ratio) : undefined;
-  const expectedKey = expected ? `${expected.width}x${expected.height}` : "expected";
-  const requestedImageCount = getImageCountValue(meta?.settings?.imageCount, meta?.agentGenerated ? Number.POSITIVE_INFINITY : 4);
-  const totalImageCount = message.imageResultSlots?.filter((slot) => slot.type === "image").length ?? images.length;
+  const expected = getExpectedDimensionsForMessage(message);
 
-  if (!meta?.agentGenerated && totalImageCount <= requestedImageCount) {
+  if (!meta?.agentGenerated) {
     return [{
       key: "requested:0",
       images,
-      imageIndexes: images.map((_, index) => index),
+      imageIndexes: displayImageItems.map((item) => item.imageIndex),
       dimensions: expected,
-      slotIndexes: message.imageResultSlots?.map((_, index) => index),
+      slotIndexes: displayImageItems.map((item) => item.slotIndex).filter((slotIndex): slotIndex is number => slotIndex !== undefined),
     }];
-  }
-
-  if (!meta?.agentGenerated && requestedImageCount > 0 && totalImageCount > requestedImageCount) {
-    const imageSlotItems = message.imageResultSlots?.flatMap((slot, slotIndex) => slot.type === "image" ? [{ url: slot.url, slotIndex }] : []) ?? images.map((url, slotIndex) => ({ url, slotIndex }));
-    const imageUrls = imageSlotItems.map((item) => item.url);
-    const firstPageImages = imageUrls.slice(0, requestedImageCount);
-    const extraImages = imageUrls.slice(requestedImageCount);
-    const pages: ImageVariantGroup[] = [{
-      key: "requested:0",
-      images: firstPageImages.slice(0, 4),
-      imageIndexes: firstPageImages.slice(0, 4).map((_, index) => index),
-      dimensions: expected,
-      slotIndexes: message.imageResultSlots ? imageSlotItems.slice(0, Math.min(4, requestedImageCount)).map((item) => item.slotIndex) : undefined,
-    }];
-
-    for (let index = 0; index < extraImages.length; index += 4) {
-      const pageImages = extraImages.slice(index, index + 4);
-      pages.push({
-        key: `extra:${index / 4}`,
-        images: pageImages,
-        imageIndexes: pageImages.map((_, pageImageIndex) => requestedImageCount + index + pageImageIndex),
-        slotIndexes: message.imageResultSlots ? imageSlotItems.slice(requestedImageCount + index, requestedImageCount + index + 4).map((item) => item.slotIndex) : undefined,
-      });
-    }
-
-    return pages;
   }
 
   const addToGroup = (url: string, imageIndex: number, slotIndex?: number) => {
@@ -1627,22 +1927,8 @@ function getImageVariantPages(message: Message): ImageVariantGroup[] {
     }
   };
 
-  if (message.imageResultSlots?.length) {
-    let imageIndex = 0;
-    message.imageResultSlots.forEach((slot, slotIndex) => {
-      if (slot.type === "image") {
-        addToGroup(slot.url, imageIndex, slotIndex);
-        imageIndex += 1;
-        return;
-      }
-
-      const group = groups.get(expectedKey);
-      if (group) {
-        group.slotIndexes = [...(group.slotIndexes ?? []), slotIndex];
-      } else {
-        groups.set(expectedKey, { key: expectedKey, images: [], dimensions: expected, slotIndexes: [slotIndex] });
-      }
-    });
+  if (displayImageItems.length) {
+    displayImageItems.forEach((item) => addToGroup(item.url, item.imageIndex, item.slotIndex));
   } else {
     images.forEach((url, imageIndex) => addToGroup(url, imageIndex));
   }
@@ -1939,6 +2225,14 @@ function AiGenerate3dIcon({ className = "h-[18px] w-[18px] shrink-0 text-[#77777
   );
 }
 
+function ImageUploadLineIcon({ className = "h-4 w-4", ...props }: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className} {...props}>
+      <path d="M24 19H21V23H19V19H16L20 15L24 19ZM21.0078 3C21.5555 3 21.9999 3.44482 22 3.99316V13H20V5H4V18.999L14 9L17 12V14.8291L14 11.8281L6.82715 19H14V21H2.99219C2.44451 21 2.00013 20.5552 2 20.0068V3.99316C2.00013 3.44463 2.45577 3 2.99219 3H21.0078ZM8 7C9.10457 7 10 7.89543 10 9C10 10.1046 9.10457 11 8 11C6.89543 11 6 10.1046 6 9C6 7.89543 6.89543 7 8 7Z" />
+    </svg>
+  );
+}
+
 function RiAiIcon({ className = "h-4 w-4", ...props }: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className} {...props}>
@@ -2063,7 +2357,7 @@ function FeedbackButton({
         type="button"
         onClick={onClick}
         aria-label={label}
-        className="flex h-8 w-8 items-center justify-center rounded-md text-[#8a8a8a] transition hover:bg-[#f2f2f2] hover:text-[#111111]"
+        className="flashmuse-feedback-button flex h-8 w-8 items-center justify-center rounded-md bg-transparent text-[#8a8a8a] transition hover:bg-[#f2f2f2] hover:text-[#111111]"
       >
         {state === "success" ? <RiCheckLine className="h-4.5 w-4.5 text-[#111111]" aria-hidden="true" /> : state === "error" ? <RiCloseLine className="h-4.5 w-4.5 text-[#111111]" aria-hidden="true" /> : children}
       </button>
@@ -2162,7 +2456,7 @@ function createSession(conversationNumber?: number): WorkSession {
   const conversationCode = conversationNumber ? `d${conversationNumber}` : undefined;
 
   return {
-    id: crypto.randomUUID(),
+    id: createClientId(),
     title: "新对话",
     conversationCode,
     nextImageNumber: 1,
@@ -2204,6 +2498,11 @@ function nowTimestamp() {
   return Date.now();
 }
 
+function createClientId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `id_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function getNextWorkflowTitle(items: WorkflowItem[]) {
   let nextIndex = 1;
 
@@ -2216,7 +2515,7 @@ function getNextWorkflowTitle(items: WorkflowItem[]) {
 
 function createWorkflowItem(items: WorkflowItem[]): WorkflowItem {
   return {
-    id: crypto.randomUUID(),
+    id: createClientId(),
     title: getNextWorkflowTitle(items),
     createdAt: Date.now(),
   };
@@ -2321,13 +2620,15 @@ function formatElapsedTime(startedAt?: number, now = Date.now()) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function getVideoWaitProgress(startedAt?: number, now = Date.now()) {
+function getVideoWaitProgress(startedAt?: number, now = Date.now(), index = 0) {
   const start = startedAt ?? now;
   const elapsedSeconds = Math.max(0, (now - start) / 1000);
-  if (elapsedSeconds <= 30) return Math.min(45, Math.max(1, Math.round(1 + (elapsedSeconds / 30) * 44)));
-  if (elapsedSeconds <= 90) return Math.round(45 + ((elapsedSeconds - 30) / 60) * 30);
-  if (elapsedSeconds <= 180) return Math.round(75 + ((elapsedSeconds - 90) / 90) * 20);
-  return 95 + (Math.abs(Math.floor(start / 1000)) % 5);
+  const stableOffset = index > 0 ? ((index * 7 + Math.abs(Math.floor(start / 1000))) % 7) - 3 : 0;
+  const applyOffset = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value + stableOffset));
+  if (elapsedSeconds <= 30) return applyOffset(Math.round(1 + (elapsedSeconds / 30) * 44), 1, 45);
+  if (elapsedSeconds <= 90) return applyOffset(Math.round(45 + ((elapsedSeconds - 30) / 60) * 30), 43, 78);
+  if (elapsedSeconds <= 180) return applyOffset(Math.round(75 + ((elapsedSeconds - 90) / 90) * 20), 73, 98);
+  return 95 + ((Math.abs(Math.floor(start / 1000)) + index * 3) % 5);
 }
 
 function isModelInfoQuestion(text: string) {
@@ -2342,6 +2643,45 @@ function normalizeIntentText(text: string) {
 
 function isAssetTargetType(value: unknown): value is AssetTargetType {
   return typeof value === "string" && assetTypeOrder.includes(value as AssetType);
+}
+
+function isAssetFilter(value: unknown): value is AssetFilter {
+  return typeof value === "string" && (assetTypeOrder.includes(value as AssetType) || value === "conversation_images" || value === "conversation_uploads" || value === "conversation_videos");
+}
+
+type StoredWorkspaceUiState = {
+  activePanel?: ActivePanel;
+  assetFilter?: AssetFilter;
+  assetScrollTopByFilter?: Partial<Record<AssetFilter, number>>;
+};
+
+function getStoredWorkspaceUiState(): StoredWorkspaceUiState {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(WORKSPACE_UI_STATE_STORAGE_KEY) ?? "{}");
+    if (!parsed || typeof parsed !== "object") return {};
+    const state = parsed as Record<string, unknown>;
+    const scrollRecord = state.assetScrollTopByFilter && typeof state.assetScrollTopByFilter === "object" ? state.assetScrollTopByFilter as Record<string, unknown> : undefined;
+    const assetScrollTopByFilter = scrollRecord ? Object.fromEntries(Object.entries(scrollRecord).filter(([key, value]) => isAssetFilter(key) && typeof value === "number" && Number.isFinite(value))) as Partial<Record<AssetFilter, number>> : undefined;
+
+    return {
+      activePanel: state.activePanel === "chat" || state.activePanel === "workflow" || state.activePanel === "assets" ? state.activePanel : undefined,
+      assetFilter: isAssetFilter(state.assetFilter) ? state.assetFilter : undefined,
+      assetScrollTopByFilter,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function setStoredWorkspaceUiState(next: StoredWorkspaceUiState) {
+  if (typeof window === "undefined") return;
+  try {
+    const current = getStoredWorkspaceUiState();
+    window.localStorage.setItem(WORKSPACE_UI_STATE_STORAGE_KEY, JSON.stringify({ ...current, ...next }));
+  } catch {
+    // UI state persistence is best-effort.
+  }
 }
 
 function normalizeSuggestionItem(suggestion: SuggestionInput): SuggestionItem | null {
@@ -2396,7 +2736,7 @@ function upsertIntentMemoryRule(rules: IntentMemoryRule[], source: string, mode:
 
   return [
     {
-      id: crypto.randomUUID(),
+      id: createClientId(),
       mode,
       keywords,
       source: source.slice(0, 80),
@@ -2583,6 +2923,10 @@ function isUploadedAssetUrl(url: string) {
 
 function isUploadedAsset(asset: Pick<AssetItem, "url" | "sourcePrompt">) {
   return asset.sourcePrompt === "资产库上传" || isUploadedAssetUrl(asset.url);
+}
+
+function isConversationUploadedAsset(asset: AssetItem) {
+  return isConversationAsset(asset) && !isVideoAsset(asset) && isUploadedAssetUrl(asset.url);
 }
 
 function normalizeSessionCodesAndMediaNames(sessions: WorkSession[], storedNextConversationNumber?: number) {
@@ -2804,7 +3148,7 @@ function getUploadedReferenceBaseName(fileName: string) {
 
 function createAssetUploadSlots(type: UploadableImageAssetType): AssetUploadSlot[] {
   return Array.from({ length: ASSET_UPLOAD_SLOT_COUNT }, () => ({
-    id: crypto.randomUUID(),
+    id: createClientId(),
     fileName: "",
     originalFileName: "",
     dataUrl: "",
@@ -2841,7 +3185,7 @@ function getDataUrlImageDimensions(dataUrl: string) {
 
 function toUploadedAssetReference(asset: Pick<AssetItem, "name" | "url">): UploadedImage {
   return {
-    id: crypto.randomUUID(),
+    id: createClientId(),
     name: asset.name,
     referenceName: asset.name,
     url: asset.url,
@@ -3092,16 +3436,20 @@ function normalizeStoredAssets(assets: AssetItem[]) {
   return assets.map((asset) => {
     const legacyType = asset.type as AssetType | "character" | "scene" | "video";
     const systemName = asset.systemName || asset.name;
-    if (asset.type === "trash") return { ...asset, systemName };
-    if (asset.librarySource === "asset_generation" && asset.type === "other") return { ...asset, systemName, type: getRestoreAssetType({ ...asset, systemName }) };
-    if (asset.lockedType && assetTypeOrder.includes(asset.type)) return { ...asset, systemName };
+    const userName = asset.userName || (asset.systemName && asset.name && asset.name !== asset.systemName ? asset.name : undefined);
+    const displayName = userName || systemName;
+    if (asset.type === "trash") return { ...asset, name: displayName, systemName, userName };
+    if (asset.librarySource === "asset_generation" && asset.type === "other") return { ...asset, name: displayName, systemName, userName, type: getRestoreAssetType({ ...asset, systemName }) };
+    if (asset.lockedType && assetTypeOrder.includes(asset.type)) return { ...asset, name: displayName, systemName, userName };
 
     const mode: WorkMode = legacyType === "video" || legacyType === "shot_video" || /\.(mp4|webm|mov)(\?|$)/i.test(asset.url) ? "video" : "image";
     const type = getAssetTypeFromText(asset.sourcePrompt, mode);
 
     return {
       ...asset,
+      name: displayName,
       systemName,
+      userName,
       type,
     };
   });
@@ -3124,7 +3472,7 @@ function normalizeStoredAssetGenerateJobs(value: unknown): AssetGenerateJob[] {
     if (job.style !== "realistic" && job.style !== "2d" && job.style !== "3d") return [];
     const model = job.model && generationModelOptions.image.some((item) => item.id === job.model) ? job.model : DEFAULT_CHARACTER_IMAGE_MODEL;
     const result = job.result?.status === "failed"
-      ? { status: "failed" as const, error: job.result.error || "图片生成失败，请稍后再试。" }
+      ? { status: "failed" as const, error: job.result.error || GENERIC_MEDIA_ERROR_MESSAGE }
       : job.result?.status === "generating"
         ? { status: "failed" as const, error: "页面刷新导致生成任务中断，请重新生成。" }
         : undefined;
@@ -3207,7 +3555,9 @@ function applySessionMediaSystemNamesToAssets(assets: AssetItem[], sessions: Wor
 
   return assets.map((asset) => {
     if (isUploadedAsset(asset)) {
-      return { ...asset, systemName: undefined };
+      const systemName = asset.systemName || asset.name;
+      const userName = asset.userName || (asset.systemName && asset.name !== asset.systemName ? asset.name : undefined);
+      return { ...asset, name: userName || systemName, systemName, userName };
     }
 
     const sessionSystemName = mediaSystemNames.get(normalizeMediaUrlForMatch(asset.url));
@@ -3217,18 +3567,9 @@ function applySessionMediaSystemNamesToAssets(assets: AssetItem[], sessions: Wor
     const temporaryPreviewNamePattern = /^生成(?:图片|视频)\d+$/;
     const oldSystemName = asset.systemName;
     const systemName = sessionSystemName || fallbackSystemName || oldSystemName || asset.name;
-    const isConversationGeneratedAsset = isConversationAsset(asset) && !isUploadedAsset(asset) && Boolean(sessionSystemName || fallbackSystemName);
-    const shouldReplaceDisplayName = isConversationGeneratedAsset || (
-      isConversationAsset(asset) && !isUploadedAsset(asset) && (
-        !oldSystemName ||
-        asset.name === oldSystemName ||
-        legacyRandomNamePattern.test(asset.name) ||
-        temporaryPreviewNamePattern.test(asset.name) ||
-        currentSystemNamePattern.test(asset.name)
-      )
-    );
+    const userName = asset.userName || (oldSystemName && asset.name !== oldSystemName && !legacyRandomNamePattern.test(asset.name) && !temporaryPreviewNamePattern.test(asset.name) && !currentSystemNamePattern.test(asset.name) ? asset.name : undefined);
 
-    return { ...asset, name: shouldReplaceDisplayName ? systemName : asset.name, systemName };
+    return { ...asset, name: userName || systemName, systemName, userName };
   });
 }
 
@@ -3247,7 +3588,9 @@ function applyAssetGenerationSystemNames(assets: AssetItem[]) {
 
   return assets.map((asset) => {
     const systemName = systemNames.get(asset.id);
-    return systemName ? { ...asset, name: systemName, systemName } : asset;
+    if (!systemName) return asset;
+    const userName = asset.userName || (asset.systemName && asset.name !== asset.systemName ? asset.name : undefined);
+    return { ...asset, name: userName || systemName, systemName, userName };
   });
 }
 
@@ -3281,7 +3624,7 @@ function extractAssetsFromSessions(sessions: WorkSession[], existingAssets: Asse
         nextAssets = [
           ...nextAssets,
           {
-            id: crypto.randomUUID(),
+            id: createClientId(),
             type,
             name,
             systemName,
@@ -3889,10 +4232,12 @@ function ReferencedTextContent({ content, references }: { content: string; refer
         if (!reference) return <span key={`${part}-${index}`}>{part}</span>;
 
         return (
-          <span key={`${part}-${index}`} className="mx-0.5 inline-flex items-center gap-1 align-middle text-[#4f7cff]">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={reference.url} alt={reference.name} className="inline-block h-[18px] w-[18px] rounded object-cover align-middle" />
-            <span>{part}</span>
+          <span key={`${part}-${index}`} className="mx-0.5 inline-flex items-center gap-1 align-[-3px] leading-none text-[#4f7cff]">
+            <HoverImagePreview src={reference.url} alt={reference.name} wrapperClassName="inline-flex h-[18px] w-[18px] shrink-0 items-center align-middle">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={getMediaThumbnailUrl(reference.url)} alt={reference.name} className="block h-[18px] w-[18px] rounded object-cover" />
+            </HoverImagePreview>
+            <span className="leading-[18px]">{part}</span>
           </span>
         );
       })}
@@ -3944,8 +4289,10 @@ function ReferenceThumbnailStrip({ references, onUseReference }: { references?: 
           onClick={() => onUseReference(reference)}
           className="relative h-[80px] w-[80px] shrink-0 overflow-hidden rounded-xl border border-[#e5e5e5] bg-[#f7f7f7] text-left"
         >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={reference.url} alt={reference.name} className="h-full w-full object-cover" />
+          <HoverImagePreview src={reference.url} alt={reference.name} wrapperClassName="block h-full w-full">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={getMediaThumbnailUrl(reference.url)} alt={reference.name} className="h-full w-full object-cover" />
+          </HoverImagePreview>
           <span className="absolute inset-x-0 bottom-0 block truncate bg-gradient-to-t from-black/75 to-transparent px-1.5 pb-0.5 pt-2 text-left font-medium leading-4 text-white">
             <span className="text-[10px] leading-4">@{reference.name}</span>
           </span>
@@ -4040,18 +4387,28 @@ function AssetManagementPanel({
     setAssetActionMenuPlacement((current) => ({ ...current, [assetId]: window.innerWidth - rect.right < menuWidth ? "left" : "right" }));
     onToggleActionMenu(assetId);
   };
-  const visibleAssets = assets.filter((asset) => {
+  const visibleAssets = useMemo(() => assets.filter((asset) => {
     if (assetFilter !== "trash" && (asset.type === "trash" || asset.deletedAt)) return false;
     if (assetFilter === "trash") return asset.type === "trash" || Boolean(asset.deletedAt);
-    if (assetFilter === "conversation_images") return isConversationAsset(asset) && !isVideoAsset(asset);
+    if (assetFilter === "conversation_images") return isConversationAsset(asset) && !isVideoAsset(asset) && !isUploadedAssetUrl(asset.url);
+    if (assetFilter === "conversation_uploads") return isConversationUploadedAsset(asset);
     if (assetFilter === "conversation_videos") return isConversationAsset(asset) && isVideoAsset(asset);
     if (assetGenerationTypes.includes(assetFilter as UploadableImageAssetType)) return isAssetGenerationAsset(asset) && asset.type === assetFilter;
     return true;
-  });
-  const visibleTypes: AssetType[] = assetFilter === "conversation_images" || assetFilter === "conversation_videos" ? assetTypeOrder : [assetFilter];
-  const title = assetFilter === "conversation_images" ? "对话流图片" : assetFilter === "conversation_videos" ? "对话流视频" : assetTypeLabels[assetFilter];
+  }), [assets, assetFilter]);
+  const visibleTypes: AssetType[] = assetFilter === "conversation_images" || assetFilter === "conversation_uploads" || assetFilter === "conversation_videos" ? assetTypeOrder : [assetFilter];
+  const title = assetFilter === "conversation_images" ? "生成图片" : assetFilter === "conversation_uploads" ? "上传图片" : assetFilter === "conversation_videos" ? "生成视频" : assetTypeLabels[assetFilter];
   const canUploadImages = assetGenerationTypes.includes(assetFilter as UploadableImageAssetType);
   const canGenerateImages = assetGenerationTypes.includes(assetFilter as UploadableImageAssetType);
+  const emptyText = assetFilter === "conversation_uploads"
+    ? "在对话流上传的图片会出现在这里。"
+    : assetFilter === "conversation_images"
+      ? "对话流生成的图片会出现在这里。"
+      : assetFilter === "conversation_videos"
+        ? "对话流生成的视频会出现在这里。"
+        : assetFilter === "trash"
+          ? "删除的资产会出现在这里。"
+          : "还没有生成资产。生成角色图、场景图或分镜图后会自动出现在这里。";
   const currentGenerateType = canGenerateImages ? assetFilter as AssetGenerationImageType : undefined;
   const CurrentGenerateIcon = currentGenerateType ? assetTypeIcons[currentGenerateType] : RiImageAddLine;
   const currentGenerateLabel = currentGenerateType === "character_image" ? "角色生成" : currentGenerateType === "scene_image" ? "场景生成" : currentGenerateType === "shot_image" ? "分镜生成" : "生成图片";
@@ -4073,7 +4430,7 @@ function AssetManagementPanel({
     const renderableTypeAssets = typeAssets.filter((asset) => !jobUrls.has(asset.url));
 
     return (
-    <div className={variant === "video-row" ? "grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4" : "grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"}>
+    <div className={variant === "video-row" ? "grid w-full grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4" : "grid w-full grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"}>
       {generateButtonType ? (
         <button type="button" onClick={generateButtonType === "scene_image" ? onOpenSceneGenerate : generateButtonType === "shot_image" ? onOpenShotGenerate : onOpenCharacterGenerate} className="flex aspect-square flex-col items-center justify-center gap-2 border border-dashed border-[#cfcfcf] bg-[#fafafa] text-[#777777] transition hover:border-[#b8b8b8] hover:bg-[#f5f5f5] hover:text-[#111111]" aria-label={generateButtonType === "scene_image" ? "生成场景图片" : generateButtonType === "shot_image" ? "生成分镜图片" : "生成角色图片"}>
           <RiAddLargeLine className="h-8 w-8" aria-hidden="true" />
@@ -4087,7 +4444,7 @@ function AssetManagementPanel({
         return (
           <div key={job.id} className="group relative aspect-square overflow-visible bg-[#f4f4f4]">
             <button type="button" onClick={() => { if (asset) onPreview(asset); }} className="block h-full w-full overflow-hidden bg-[#f4f4f4] text-left">
-              <Image src={job.result.url} alt={name} width={240} height={240} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+              <Image src={getMediaThumbnailUrl(job.result.url)} alt={name} width={240} height={240} loading="lazy" unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
             </button>
             <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/75 to-transparent" />
             {asset ? (
@@ -4145,7 +4502,7 @@ function AssetManagementPanel({
           </div>
         );
       })() : job.result.status === "failed" ? (
-        <div key={job.id} className="relative aspect-square overflow-hidden bg-[#f3f3f3] text-left text-[#777777]">
+        <div key={job.id} className="flashmuse-failed-media-card relative aspect-square overflow-hidden bg-[#f3f3f3] text-left text-[#777777]" style={{ backgroundColor: "var(--flashmuse-media-surface)" }}>
           <button type="button" onClick={() => onDismissGenerateJob(job.id)} className="absolute right-2 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-md text-[#999999] transition hover:bg-black/5 hover:text-[#333333]" aria-label="清除失败卡">
             <RiCloseLine className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -4176,15 +4533,22 @@ function AssetManagementPanel({
         </button>
       ))}
       {renderableTypeAssets.map((asset) => {
+        const assetCardPosterUrl = isVideoAsset(asset) ? getAssetCardPosterUrl(asset) : undefined;
+
         return (
         <div key={asset.id} className={variant === "video-row" ? "group relative aspect-video overflow-visible bg-[#f4f4f4]" : "group relative aspect-square overflow-visible bg-[#f4f4f4]"}>
           <button type="button" onClick={() => onPreview(asset)} className="block h-full w-full overflow-hidden bg-[#f4f4f4] text-left">
             {isVideoAsset(asset) ? (
-              <video src={asset.url} className="h-full w-full object-cover" muted playsInline preload="metadata" />
+              assetCardPosterUrl ? <Image src={getMediaThumbnailUrl(assetCardPosterUrl)} alt={asset.name} width={240} height={240} loading="lazy" unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} /> : <div className="flex h-full w-full items-center justify-center bg-[#ededed] text-[#8a8a8a]"><RiFilmLine className="h-8 w-8" aria-hidden="true" /></div>
             ) : (
-              <Image src={asset.url} alt={asset.name} width={240} height={240} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+              <Image src={getAssetCardImageUrl(asset)} alt={asset.name} width={240} height={240} loading="lazy" unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
             )}
           </button>
+          {isVideoAsset(asset) ? (
+            <span className="pointer-events-none absolute left-1/2 top-1/2 flex h-12 w-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/42 text-white shadow-[0_8px_24px_rgba(0,0,0,0.22)] backdrop-blur-[4px]">
+              <RiPlayLargeFill className="ml-0.5 h-6 w-6" aria-hidden="true" />
+            </span>
+          ) : null}
           <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/75 to-transparent" />
           {isVideoAsset(asset) ? (
             <div className="absolute bottom-2 left-2 max-w-[calc(100%-48px)] truncate text-white">
@@ -4254,8 +4618,8 @@ function AssetManagementPanel({
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 py-2">
-      <div>
-        <div className="flex items-center justify-between gap-4">
+      <div className="min-h-[64px]">
+        <div className="flex h-8 items-center justify-between gap-4">
           <div className="text-[26px] font-semibold tracking-[-0.02em] text-[#111111]">{title}</div>
           <div className="flex shrink-0 items-center gap-4">
             {canGenerateImages ? (
@@ -4272,12 +4636,14 @@ function AssetManagementPanel({
             ) : null}
           </div>
         </div>
-        {assetFilter === "trash" ? <div className="mt-2 text-sm leading-6 text-red-500">回收站中的内容将在30天后删除，不可恢复。</div> : null}
+        <div className="mt-2 min-h-6 text-sm leading-6 text-red-500">
+          {assetFilter === "trash" ? "回收站中的内容将在30天后删除，不可恢复。" : null}
+        </div>
       </div>
 
       {visibleAssets.length === 0 && assetFilter !== "character_image" && assetFilter !== "scene_image" && assetFilter !== "shot_image" ? (
-        <div className="rounded-2xl border border-dashed border-[#d8d8d8] bg-[#fafafa] px-6 py-12 text-center text-sm text-[#8a8a8a]">还没有生成资产。生成角色图、场景图或分镜图后会自动出现在这里。</div>
-      ) : assetFilter === "conversation_images" || assetFilter === "conversation_videos" ? (
+        <div className="rounded-2xl border border-dashed border-[#d8d8d8] bg-[#fafafa] px-6 py-12 text-center text-sm text-[#8a8a8a]">{emptyText}</div>
+      ) : assetFilter === "conversation_images" || assetFilter === "conversation_uploads" || assetFilter === "conversation_videos" ? (
         renderAssetGrid(getRenderableAssets(visibleAssets), assetFilter === "conversation_videos" ? "video-row" : "square")
       ) : assetFilter === "character_image" ? (
         renderAssetGrid(getRenderableAssets(visibleAssets), "square", "character_image")
@@ -4506,14 +4872,20 @@ function mediaFailureMessage(results: PromiseSettledResult<unknown>[], failureCo
   return fallback;
 }
 
+function mediaFailureReasons(results: PromiseSettledResult<unknown>[], fallback: string) {
+  return results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => toUserErrorMessage(result.reason, fallback));
+}
+
 function normalizeMediaErrorText(error: string | undefined, mode: WorkMode | undefined) {
   if (!error) return undefined;
   const imageMatch = error.match(/^有\s*\d+\s*张图片生成失败[：:]\s*(.+)$/);
   if (imageMatch?.[1]) return imageMatch[1];
   const videoMatch = error.match(/^有\s*\d+\s*个视频生成失败[：:]\s*(.+)$/);
   if (videoMatch?.[1]) return videoMatch[1];
-  if (/^有\s*\d+\s*张图片生成失败/.test(error)) return "图片生成失败，请稍后再试。";
-  if (/^有\s*\d+\s*个视频生成失败/.test(error)) return "视频生成失败，请稍后再试。";
+  if (/^有\s*\d+\s*张图片生成失败/.test(error)) return GENERIC_MEDIA_ERROR_MESSAGE;
+  if (/^有\s*\d+\s*个视频生成失败/.test(error)) return GENERIC_MEDIA_ERROR_MESSAGE;
   if (mode === "image" && /平台服务临时异常|500|internal server error/i.test(error)) return "平台服务临时异常，请稍后重试。";
   return error;
 }
@@ -4541,48 +4913,96 @@ function getMessageType(message: Message): "text" | "image" | "video" {
   return "text";
 }
 
-function InlineVideoResult({ url, onPreview, onLoadedDimensions, rounded = false, compact = false }: { url: string; onPreview: () => void; onLoadedDimensions?: (dimensions: ImageDimensions) => void; rounded?: boolean; compact?: boolean }) {
+function LazyMediaMount({ children, height, className = "" }: { children: ReactNode; height: number; className?: string }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [shouldRender, setShouldRender] = useState(false);
+
+  useEffect(() => {
+    if (shouldRender) return;
+    const element = rootRef.current;
+    if (!element) return;
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setShouldRender(true);
+        observer.disconnect();
+      }
+    }, { rootMargin: "900px 0px" });
+
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [shouldRender]);
+
+  return <div ref={rootRef} className={className} style={shouldRender ? undefined : { minHeight: height }}>{shouldRender ? children : null}</div>;
+}
+
+function InlineVideoResult({ url, posterUrl, onPreview, onLoadedDimensions, rounded = false, compact = false }: { url: string; posterUrl?: string; onPreview: () => void; onLoadedDimensions?: (dimensions: ImageDimensions) => void; rounded?: boolean; compact?: boolean }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [shouldLoadVideo, setShouldLoadVideo] = useState(!posterUrl);
+  const [isHovering, setIsHovering] = useState(false);
+  const mediaSurfaceStyle = { backgroundColor: "var(--flashmuse-media-surface)" } as CSSProperties;
+
+  useEffect(() => {
+    if (!shouldLoadVideo || !isHovering) return;
+    void videoRef.current?.play().catch(() => undefined);
+  }, [isHovering, shouldLoadVideo]);
 
   const playVideo = () => {
+    setIsHovering(true);
+    setShouldLoadVideo(true);
     void videoRef.current?.play().catch(() => undefined);
   };
 
   const pauseVideo = () => {
+    setIsHovering(false);
     videoRef.current?.pause();
   };
 
   return (
-    <button type="button" onClick={onPreview} className={`flex h-[360px] ${compact ? "w-full" : "w-[640px]"} max-w-full items-center justify-center overflow-hidden bg-[#f4f4f4] text-left ${rounded ? "rounded-[10px]" : ""}`}>
-      <video
-        ref={videoRef}
-        src={url}
-        className="block max-h-full max-w-full object-contain"
-        controls
-        loop
-        playsInline
-        preload="metadata"
-        onMouseEnter={playVideo}
-        onMouseLeave={pauseVideo}
-        onFocus={playVideo}
-        onBlur={pauseVideo}
-        onLoadedMetadata={(event) => {
-          const video = event.currentTarget;
-          if (video.videoWidth && video.videoHeight) onLoadedDimensions?.({ width: video.videoWidth, height: video.videoHeight });
-        }}
-      />
+    <button type="button" onClick={onPreview} className={`flashmuse-success-media-card flex h-[360px] ${compact ? "w-full" : "w-[640px]"} max-w-full items-center justify-center overflow-hidden bg-[#f4f4f4] text-left ${rounded ? "rounded-[10px]" : ""}`} style={mediaSurfaceStyle}>
+      {posterUrl && !shouldLoadVideo ? (
+        <span onMouseEnter={playVideo} onFocus={playVideo} className="relative flex h-full w-full items-center justify-center">
+          <Image src={posterUrl} alt="视频封面" fill sizes={compact ? "50vw" : "640px"} unoptimized className="object-contain" />
+          <span className="pointer-events-none absolute left-1/2 top-1/2 flex h-14 w-14 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/42 text-white shadow-[0_8px_24px_rgba(0,0,0,0.22)] backdrop-blur-[4px]">
+            <RiPlayLargeFill className="ml-0.5 h-7 w-7" aria-hidden="true" />
+          </span>
+        </span>
+      ) : (
+        <video
+          ref={videoRef}
+          src={url}
+          poster={posterUrl}
+          className="block max-h-full max-w-full object-contain"
+          controls
+          loop
+          playsInline
+          preload={posterUrl ? "none" : "metadata"}
+          onMouseEnter={playVideo}
+          onMouseLeave={pauseVideo}
+          onFocus={playVideo}
+          onBlur={pauseVideo}
+          onLoadedMetadata={(event) => {
+            const video = event.currentTarget;
+            if (video.videoWidth && video.videoHeight) onLoadedDimensions?.({ width: video.videoWidth, height: video.videoHeight });
+            if (isHovering) void video.play().catch(() => undefined);
+          }}
+        />
+      )}
     </button>
   );
 }
 
 function ImageResultThumb({ url, imageIndex, onPreview, onLoadedDimensions, rounded = false }: { url: string; imageIndex: number; onPreview: (url: string, index: number) => void; onLoadedDimensions?: (url: string, dimensions: ImageDimensions) => void; rounded?: boolean }) {
   const [isLoaded, setIsLoaded] = useState(false);
+  const mediaSurfaceStyle = { backgroundColor: "var(--flashmuse-media-surface)" } as CSSProperties;
+  const displayUrl = getMediaThumbnailUrl(url);
 
   return (
     <button
       type="button"
       onClick={() => onPreview(url, imageIndex)}
-      className={`group relative flex h-[250px] w-[250px] shrink-0 items-center justify-center overflow-hidden bg-[#f4f4f4] transition ${rounded ? "rounded-[10px]" : ""}`}
+      className={`flashmuse-success-media-card group relative flex h-[250px] w-[250px] shrink-0 items-center justify-center overflow-hidden bg-[#f4f4f4] transition ${rounded ? "rounded-[10px]" : ""}`}
+      style={mediaSurfaceStyle}
     >
       {!isLoaded ? (
         <div className="absolute left-4 top-4 z-10 inline-flex items-center text-[13px] font-medium leading-none text-[#777777]">
@@ -4591,18 +5011,16 @@ function ImageResultThumb({ url, imageIndex, onPreview, onLoadedDimensions, roun
         </div>
       ) : null}
       <Image
-        src={url}
+        src={displayUrl}
         alt="生成图片"
-        width={250}
-        height={250}
+        fill
         unoptimized
-        loading="eager"
-        fetchPriority="high"
+        loading="lazy"
         sizes="250px"
-        className="max-h-full max-w-full object-contain transition group-hover:scale-[1.02]"
-        style={{ width: "auto", height: "auto" }}
+        className="object-contain transition group-hover:scale-[1.02]"
         onLoad={(event) => {
           setIsLoaded(true);
+          if (displayUrl !== url) return;
           const image = event.currentTarget;
           if (image.naturalWidth && image.naturalHeight) onLoadedDimensions?.(url, { width: image.naturalWidth, height: image.naturalHeight });
         }}
@@ -4636,7 +5054,7 @@ function ImageResultStrip({ images, imageIndexes, pendingCount, failedCount, ret
           }
 
           return (
-            <div key={`failed-${item.failedIndex}`} className={`relative h-[250px] w-[250px] shrink-0 overflow-hidden bg-[#f3f3f3] text-[#777777] ${rounded ? "rounded-[10px]" : ""}`}>
+            <div key={`failed-${item.failedIndex}`} className={`flashmuse-failed-media-card relative h-[250px] w-[250px] shrink-0 overflow-hidden bg-[#f4f4f4] text-[#777777] ${rounded ? "rounded-[10px]" : ""}`} style={{ backgroundColor: "var(--flashmuse-media-surface)" }}>
               <div className="absolute left-4 top-4 inline-flex items-center gap-2 text-[13px] font-medium leading-none text-[#777777]">
                 <RiEmotionSadLine className="h-5 w-5 shrink-0" aria-hidden="true" />
                 <span>图片生成失败</span>
@@ -4670,6 +5088,10 @@ function ImageResultSlotStrip({ slots, imageIndexes, pendingCount, createdAt, no
             return <MediaWaitingCard key={`pending-${item.pendingIndex}`} createdAt={createdAt} now={now} isImage index={slots.length + item.pendingIndex + 1} rounded={rounded} />;
           }
 
+          if (item.slot.type === "pending") {
+            return <MediaWaitingCard key={`slot-pending-${item.slotIndex}`} createdAt={item.slot.startedAt ?? createdAt} now={now} isImage index={item.slotIndex + 1} rounded={rounded} />;
+          }
+
           if (item.slot.type === "image") {
             const imageOrdinal = slots.slice(0, item.slotIndex + 1).filter((slot) => slot.type === "image").length - 1;
             return <ImageResultThumb key={`${item.slot.url}-${item.slotIndex}`} url={item.slot.url} imageIndex={imageIndexes?.[imageOrdinal] ?? imageOrdinal} onPreview={onPreview} onLoadedDimensions={onLoadedDimensions} rounded={rounded} />;
@@ -4681,7 +5103,7 @@ function ImageResultSlotStrip({ slots, imageIndexes, pendingCount, createdAt, no
           }
 
           return (
-            <div key={`failed-${item.slotIndex}`} className={`relative h-[250px] w-[250px] shrink-0 overflow-hidden bg-[#f3f3f3] text-[#777777] ${rounded ? "rounded-[10px]" : ""}`}>
+            <div key={`failed-${item.slotIndex}`} className={`flashmuse-failed-media-card relative h-[250px] w-[250px] shrink-0 overflow-hidden bg-[#f4f4f4] text-[#777777] ${rounded ? "rounded-[10px]" : ""}`} style={{ backgroundColor: "var(--flashmuse-media-surface)" }}>
               <div className="absolute left-4 top-4 inline-flex items-center gap-2 text-[13px] font-medium leading-none text-[#777777]">
                 <RiEmotionSadLine className="h-5 w-5 shrink-0" aria-hidden="true" />
                 <span>图片生成失败</span>
@@ -4702,7 +5124,7 @@ function ImageResultSlotStrip({ slots, imageIndexes, pendingCount, createdAt, no
 
 function VideoFailedCard({ rounded = false, compact = false, onRetry }: { rounded?: boolean; compact?: boolean; onRetry?: () => void }) {
   return (
-    <div className={`relative h-[360px] ${compact ? "w-full" : "w-[640px]"} max-w-full overflow-hidden bg-[#f3f3f3] text-[#777777] ${rounded ? "rounded-[10px]" : ""}`}>
+    <div className={`flashmuse-failed-media-card relative h-[360px] ${compact ? "w-full" : "w-[640px]"} max-w-full overflow-hidden bg-[#f4f4f4] text-[#777777] ${rounded ? "rounded-[10px]" : ""}`} style={{ backgroundColor: "var(--flashmuse-media-surface)" }}>
       <div className="absolute left-4 top-4 inline-flex items-center gap-2 text-[13px] font-medium leading-none text-[#777777]">
         <RiEmotionSadLine className="h-5 w-5 shrink-0" aria-hidden="true" />
         <span>视频生成失败</span>
@@ -4719,14 +5141,14 @@ function VideoFailedCard({ rounded = false, compact = false, onRetry }: { rounde
 
 function MediaWaitingCard({ createdAt, now, isImage, index, rounded = false, compactVideo = false }: { createdAt?: number; now: number; isImage: boolean; index?: number; rounded?: boolean; compactVideo?: boolean }) {
   return (
-    <div className={`${isImage ? "relative h-[250px] w-[250px] shrink-0 overflow-hidden bg-[#eaf7ff] text-sm text-[#4f6f86]" : `relative h-[360px] ${compactVideo ? "w-full" : "w-[640px]"} max-w-full overflow-hidden bg-[#eaf7ff] text-sm text-[#4f6f86]`} ${rounded ? "rounded-[10px]" : ""}`}>
+    <div className={`flashmuse-media-card ${isImage ? "relative h-[250px] w-[250px] shrink-0 overflow-hidden bg-[#eaf7ff] text-sm text-[#4f6f86]" : `relative h-[360px] ${compactVideo ? "w-full" : "w-[640px]"} max-w-full overflow-hidden bg-[#eaf7ff] text-sm text-[#4f6f86]`} ${rounded ? "rounded-[10px]" : ""}`}>
       <div className="absolute inset-0 animate-[yinzaoVideoWaiting_5s_ease-in-out_infinite] bg-[radial-gradient(circle_at_16%_22%,rgba(193,210,255,0.7),transparent_31%),radial-gradient(circle_at_42%_70%,rgba(188,177,255,0.46),transparent_34%),radial-gradient(circle_at_76%_34%,rgba(126,205,255,0.52),transparent_35%),radial-gradient(circle_at_86%_82%,rgba(174,247,241,0.5),transparent_31%),linear-gradient(120deg,#eef8ff_0%,#d8efff_36%,#edfaff_68%,#dcf8ff_100%)]" />
       <div className="absolute -left-20 top-8 h-48 w-48 animate-[yinzaoBlobOne_4.5s_ease-in-out_infinite] rounded-full bg-[#b8c8ff]/45 blur-3xl" />
       <div className="absolute -right-16 bottom-10 h-56 w-56 animate-[yinzaoBlobTwo_6s_ease-in-out_infinite] rounded-full bg-[#9eeef0]/50 blur-3xl" />
       <div className="absolute left-20 top-48 h-40 w-40 animate-[yinzaoBlobThree_5.5s_ease-in-out_infinite] rounded-full bg-[#b5e0ff]/55 blur-3xl" />
       <div className="absolute inset-0 animate-[yinzaoVideoShimmer_2.8s_ease-in-out_infinite] bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.35),transparent_22%),radial-gradient(circle_at_70%_80%,rgba(255,255,255,0.22),transparent_28%)]" />
       <div className="relative z-10 ml-3 mt-3 inline-flex rounded-md bg-black/12 px-2.5 py-1 text-xs font-medium text-black/75 backdrop-blur-sm">
-        {getVideoWaitProgress(createdAt, now)}%{isImage ? "生成中" : "渲染中"}{index ? ` ${index}` : ""}
+        {getVideoWaitProgress(createdAt, now, index ?? 0)}%{isImage ? "生成中" : "渲染中"}{index ? ` ${index}` : ""}
       </div>
       <div className="absolute bottom-4 left-5 z-10 text-xs text-[#4f6f86]">
         <div className="mt-1 text-[#6f8fa3]">已等待 {formatElapsedTime(createdAt, now)}</div>
@@ -4790,7 +5212,7 @@ function readFileAsUploadedImage(file: File): Promise<UploadedImage> {
     const reader = new FileReader();
     reader.onload = () => {
       resolve({
-        id: crypto.randomUUID(),
+        id: createClientId(),
         name: file.name || "粘贴图片",
         referenceName: getUploadedReferenceBaseName(file.name || "粘贴图片"),
         source: "upload",
@@ -4804,10 +5226,6 @@ function readFileAsUploadedImage(file: File): Promise<UploadedImage> {
 
 function getFileExtension(fileName: string) {
   return fileName.split(".").pop()?.toLowerCase() ?? "";
-}
-
-function isSupportedDocumentFile(file: File) {
-  return supportedDocumentExtensions.includes(getFileExtension(file.name));
 }
 
 function isReadableDocumentFile(file: File | string) {
@@ -4945,7 +5363,7 @@ function createUploadedDocumentEntry(file: File): UploadedDocumentFile {
   const readable = isReadableDocumentFile(file);
 
   return {
-    id: crypto.randomUUID(),
+    id: createClientId(),
     name: file.name,
     storageName: getUploadedFileStorageName(file),
     size: file.size,
@@ -4997,6 +5415,9 @@ export function ChatWorkbench() {
   const selectedModel: ModelName = agentModelTier === "advanced" ? ADVANCED_CHAT_MODEL : DEFAULT_CHAT_MODEL;
   const [activePanel, setActivePanel] = useState<ActivePanel>("chat");
   const [assetFilter, setAssetFilter] = useState<AssetFilter>("character_image");
+  const [assetScrollTopByFilter, setAssetScrollTopByFilter] = useState<Partial<Record<AssetFilter, number>>>({});
+  const assetScrollTopByFilterRef = useRef<Partial<Record<AssetFilter, number>>>({});
+  const previousAssetFilterRef = useRef<AssetFilter>(assetFilter);
   const [selectedRatios, setSelectedRatios] = useState<Record<WorkMode, string>>({
     agent: ratioOptions[0],
     image: ratioOptions[0],
@@ -5026,6 +5447,10 @@ export function ChatWorkbench() {
     image: imageGenerationModels.map((model) => model.id),
     video: videoGenerationModels.map((model) => model.id),
   });
+  const [enabledAgentGenerationModelIds, setEnabledAgentGenerationModelIds] = useState<Record<"image" | "video", string[]>>({
+    image: frontendImageGenerationModels.map((model) => model.id),
+    video: [...videoGenerationModels, ...bytePlusVideoGenerationModels].map((model) => model.id),
+  });
   const [enabledAssetImageModelIds, setEnabledAssetImageModelIds] = useState<string[]>([DEFAULT_CHARACTER_IMAGE_MODEL, ...imageGenerationModels.map((model) => model.id)]);
   const [sessions, setSessions] = useState<WorkSession[]>([]);
   const [nextConversationNumber, setNextConversationNumber] = useState(1);
@@ -5036,6 +5461,9 @@ export function ChatWorkbench() {
   const [openWorkflowMenuId, setOpenWorkflowMenuId] = useState("");
   const [openSessionMenuId, setOpenSessionMenuId] = useState("");
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
+  const [themeMode, setThemeMode] = useState<WorkspaceThemeMode>(getStoredWorkspaceThemeMode);
+  const [systemPrefersDark, setSystemPrefersDark] = useState(getSystemPrefersDark);
   const sendMessageRef = useRef<((suggestion?: SuggestionInput, forcedMode?: WorkMode) => void | Promise<void>) | null>(null);
   const [currentUserId, setCurrentUserId] = useState("");
   const [currentUserEmail, setCurrentUserEmail] = useState("user@example.com");
@@ -5132,7 +5560,6 @@ export function ChatWorkbench() {
   const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
   const [previewNaturalSize, setPreviewNaturalSize] = useState({ width: 0, height: 0 });
   const [previewFitScale, setPreviewFitScale] = useState(1);
-  const [previewThumbsNeedScroll, setPreviewThumbsNeedScroll] = useState(false);
   const [previewThumbPageStart, setPreviewThumbPageStart] = useState(0);
   const [previewThumbPageSize, setPreviewThumbPageSize] = useState(4);
   const [isPreviewDragging, setIsPreviewDragging] = useState(false);
@@ -5147,6 +5574,7 @@ export function ChatWorkbench() {
   const [imageVariantIndexes, setImageVariantIndexes] = useState<Record<string, number>>({});
   const [agentPromptExpandedIds, setAgentPromptExpandedIds] = useState<Record<string, boolean>>({});
   const [agentPromptPageIndexes, setAgentPromptPageIndexes] = useState<Record<string, number>>({});
+  const [mediaErrorPageIndexes, setMediaErrorPageIndexes] = useState<Record<string, number>>({});
   const [isDragUploadActive, setIsDragUploadActive] = useState(false);
   const [canScrollUploadedFiles, setCanScrollUploadedFiles] = useState({ left: false, right: false });
   const [canScrollUploadedImages, setCanScrollUploadedImages] = useState({ left: false, right: false });
@@ -5203,6 +5631,10 @@ export function ChatWorkbench() {
   const selectedResolution = mode === "image" ? normalizeImageResolutionForModel(selectedGenerationModels.image, selectedRatios.image === "智能比例" ? "智能比例" : selectedResolutions.image) : mode === "video" ? (selectedRatios.video === "智能比例" ? "720p" : normalizeVideoResolutionForModel(selectedGenerationModels.video, selectedResolutions.video)) : selectedResolutions[mode];
   const selectedImageCount = selectedImageCounts[mode];
   const selectedGenerationModel = mode === "agent" ? selectedModel : selectedGenerationModels[mode];
+  const currentUploadRule = useMemo(() => getUploadRule({ mode, modelId: selectedGenerationModel, transportMode: "local-base64" }), [mode, selectedGenerationModel]);
+  const currentMaxReferenceImages = currentUploadRule.image.maxCount;
+  const uploadAcceptValue = useMemo(() => getUploadAcceptValue(currentUploadRule), [currentUploadRule]);
+  const supportedUploadTypeLabel = useMemo(() => getSupportedUploadTypeLabel(currentUploadRule), [currentUploadRule]);
   const selectedGenerationModelLabel = mode === "agent" ? "" : getGenerationModelLabel(mode, selectedGenerationModel);
   const currentDurationOptions = getVideoDurationOptions(selectedGenerationModels.video);
   const selectedVideoDuration = currentDurationOptions.includes(selectedDurations.video) ? selectedDurations.video : currentDurationOptions[0];
@@ -5210,6 +5642,8 @@ export function ChatWorkbench() {
   const isShotGeneration = assetGenerateType === "shot_image";
   const characterGenerateDisplayRatio = characterGenerateRatio === "single" ? "9:16" : "16:9";
   const characterGenerateDisplayResolution = normalizeImageResolutionForModel(characterGenerateModel, characterGenerateResolution);
+  const assetGenerateUploadRule = useMemo(() => getUploadRule({ mode: "asset-image", modelId: characterGenerateModel, transportMode: "local-base64" }), [characterGenerateModel]);
+  const assetGenerateMaxReferenceImages = assetGenerateUploadRule.image.maxCount;
   const characterGenerateDisplayDimensions = getDisplayDimensions(characterGenerateDisplayRatio, characterGenerateDisplayResolution, "image", characterGenerateModel);
   const characterGenerateQualityBadgeLabel = getImageQualityBadgeLabel(characterGenerateDisplayResolution);
   const assetGenerateTitle = isShotGeneration ? "分镜生成" : isSceneGeneration ? "场景生成" : "角色生成";
@@ -5454,6 +5888,9 @@ export function ChatWorkbench() {
   const activeUploadedImages = activeSession?.uploadedImages ?? [];
   const hasReadingUploadedFiles = activeUploadedFiles.some((file) => typeof file !== "string" && file.status === "reading");
   const activeSessionIdValue = activeSession?.id ?? "";
+  const resolvedTheme: "light" | "dark" = themeMode === "system" ? systemPrefersDark ? "dark" : "light" : themeMode;
+  const themeModeLabel = themeMode === "dark" ? "深色模式" : themeMode === "system" ? `跟随系统 · ${resolvedTheme === "dark" ? "深色" : "浅色"}` : "浅色模式";
+  const ThemeModeIcon = themeMode === "dark" ? RiMoonLine : themeMode === "system" ? RiComputerLine : RiSunLine;
   const quickActionRows = useMemo(() => getQuickActionRows(activeSessionIdValue), [activeSessionIdValue]);
   const activeConversationImageReferences = useMemo(() => getConversationImageReferences(messages), [messages]);
   const assetNameByUrl = useMemo(() => new Map(assets.map((asset) => [normalizeMediaUrlForMatch(asset.url), asset.name])), [assets]);
@@ -5527,6 +5964,7 @@ export function ChatWorkbench() {
       ...asset,
       name: asset.name || getMediaSystemName(sourceMessage, mediaUrl, asset.name),
       sourcePrompt: isVideo ? sourceMessage.videoPrompts?.[mediaUrl] ?? sourceMessage.generationMeta?.originalPrompt ?? sourceMessage.content : getImageSourcePrompt(sourceMessage, mediaUrl),
+      posterUrl: isVideo ? getVideoPosterForMessage(sourceMessage, mediaUrl) ?? asset.posterUrl : asset.posterUrl,
       previewMeta: getPreviewMediaMeta(sourceMessage, isVideo ? undefined : mediaUrl),
       sessionId: sourceSession.id,
       messageId: sourceMessage.id,
@@ -5539,7 +5977,8 @@ export function ChatWorkbench() {
       return assets.filter((asset) => {
         if (assetFilter !== "trash" && (asset.type === "trash" || asset.deletedAt)) return false;
         if (assetFilter === "trash") return asset.type === "trash" || Boolean(asset.deletedAt);
-        if (assetFilter === "conversation_images") return isConversationAsset(asset) && !isVideoAsset(asset);
+        if (assetFilter === "conversation_images") return isConversationAsset(asset) && !isVideoAsset(asset) && !isUploadedAssetUrl(asset.url);
+        if (assetFilter === "conversation_uploads") return isConversationUploadedAsset(asset);
         if (assetFilter === "conversation_videos") return isConversationAsset(asset) && isVideoAsset(asset);
         if (assetGenerationTypes.includes(assetFilter as UploadableImageAssetType)) return isAssetGenerationAsset(asset) && asset.type === assetFilter;
         return true;
@@ -5549,12 +5988,12 @@ export function ChatWorkbench() {
     return messages.flatMap((message) => {
       if (message.role !== "assistant") return [];
 
-      const imageSlotItems = message.imageResultSlots?.flatMap((slot, slotIndex) => slot.type === "image" ? [{ url: slot.url, imageIndex: slotIndex }] : []) ?? (message.images ?? []).map((url, imageIndex) => ({ url, imageIndex }));
-      const imageItems = imageSlotItems.map(({ url, imageIndex }) => ({
+      const imageItems = getDisplayImageItemsForMessage(message).map(({ url, imageIndex }) => ({
         id: `${message.id}-${imageIndex}`,
         type: "other" as const,
         name: getCanonicalMediaName(message, url, `生成图片${imageIndex + 1}`),
         url,
+        posterUrl: undefined,
         sourcePrompt: getImageSourcePrompt(message, url),
         previewMeta: getPreviewMediaMeta(message, url),
         sessionId: activeSessionIdValue,
@@ -5567,6 +6006,7 @@ export function ChatWorkbench() {
         type: "shot_video" as const,
         name: getCanonicalMediaName(message, url, `生成视频${videoIndex + 1}`),
         url,
+        posterUrl: getVideoPosterForMessage(message, url),
         sourcePrompt: message.videoPrompts?.[url] ?? message.generationMeta?.itemPrompts?.[videoIndex] ?? message.generationMeta?.originalPrompt ?? message.content,
         previewMeta: getPreviewMediaMeta(message),
         sessionId: activeSessionIdValue,
@@ -5639,9 +6079,16 @@ export function ChatWorkbench() {
   useEffect(() => {
     if (!previewAsset || isVideoAsset(previewAsset)) return;
     const latest = previewMediaOptions.find((item) => item.id === previewAsset.id || normalizeMediaUrlForMatch(item.url) === normalizeMediaUrlForMatch(previewAsset.url));
-    if (!latest || (latest.name === previewAsset.name && latest.sourcePrompt === previewAsset.sourcePrompt && latest.previewMeta === previewAsset.previewMeta)) return;
+    const latestPreviewMetaKey = latest?.previewMeta ? JSON.stringify(latest.previewMeta) : "";
+    const currentPreviewMetaKey = previewAsset.previewMeta ? JSON.stringify(previewAsset.previewMeta) : "";
+    if (!latest || (latest.name === previewAsset.name && latest.sourcePrompt === previewAsset.sourcePrompt && latestPreviewMetaKey === currentPreviewMetaKey)) return;
     const timer = window.setTimeout(() => {
-      setPreviewAsset((current) => current && (current.id === previewAsset.id || normalizeMediaUrlForMatch(current.url) === normalizeMediaUrlForMatch(previewAsset.url)) ? { ...current, name: latest.name, sourcePrompt: latest.sourcePrompt, previewMeta: latest.previewMeta, sessionId: latest.sessionId, messageId: latest.messageId } : current);
+      setPreviewAsset((current) => {
+        if (!current || (current.id !== previewAsset.id && normalizeMediaUrlForMatch(current.url) !== normalizeMediaUrlForMatch(previewAsset.url))) return current;
+        const currentMetaKey = current.previewMeta ? JSON.stringify(current.previewMeta) : "";
+        if (current.name === latest.name && current.sourcePrompt === latest.sourcePrompt && currentMetaKey === latestPreviewMetaKey && current.sessionId === latest.sessionId && current.messageId === latest.messageId) return current;
+        return { ...current, name: latest.name, sourcePrompt: latest.sourcePrompt, previewMeta: latest.previewMeta, sessionId: latest.sessionId, messageId: latest.messageId };
+      });
     }, 0);
     return () => window.clearTimeout(timer);
   }, [previewAsset, previewMediaOptions]);
@@ -5663,6 +6110,12 @@ export function ChatWorkbench() {
   }, [clampPreviewScale]);
   const visiblePreviewScale = previewFitMode === "fit" ? previewFitScale : previewScale;
   const previewScalePercent = `${Math.round(visiblePreviewScale * 100)}%`;
+  const previewLightToolButtonStyle = resolvedTheme === "dark" ? {
+    borderColor: "rgba(210, 210, 210, 0.72)",
+    background: "linear-gradient(135deg, rgba(255, 255, 255, 0.34), rgba(232, 234, 238, 0.42))",
+    boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.72), inset 0 -1px 0 rgba(255, 255, 255, 0.2)",
+    color: "#777777",
+  } as CSSProperties : undefined;
 
   const updateCharacterImageFitScale = useCallback((dimensions = characterImageNaturalSize) => {
     if (!hasCharacterGeneratedImage || !dimensions.width || !dimensions.height) return;
@@ -5706,7 +6159,6 @@ export function ChatWorkbench() {
     if (!previewAssetId) return;
     const frame = window.requestAnimationFrame(() => {
       resetPreviewTransform();
-      setPreviewThumbsNeedScroll(false);
     });
 
     return () => window.cancelAnimationFrame(frame);
@@ -5721,7 +6173,7 @@ export function ChatWorkbench() {
       if (normalizeMediaUrlForMatch(image.currentSrc || image.src) !== normalizeMediaUrlForMatch(previewAsset.url)) return;
 
       const dimensions = { width: image.naturalWidth, height: image.naturalHeight };
-      setPreviewNaturalSize(dimensions);
+      setPreviewNaturalSize((current) => current.width === dimensions.width && current.height === dimensions.height ? current : dimensions);
       updatePreviewFitScale(dimensions);
     });
 
@@ -5760,22 +6212,16 @@ export function ChatWorkbench() {
   useEffect(() => {
     if (!previewAsset || previewMediaOptions.length <= 1) return;
 
-    const list = previewThumbListRef.current;
-    if (!list) return;
-
     const updateThumbScrollState = () => {
-      const nextPageSize = Math.max(1, Math.floor((list.clientHeight + 8) / 58));
-      setPreviewThumbPageSize(nextPageSize);
-      setPreviewThumbsNeedScroll(previewMediaOptions.length > nextPageSize);
+      const availableHeight = Math.max(166, window.innerHeight - 320);
+      const nextPageSize = Math.max(1, Math.floor((availableHeight + 8) / 58));
+      setPreviewThumbPageSize((current) => current === nextPageSize ? current : nextPageSize);
     };
 
     updateThumbScrollState();
-    const resizeObserver = new ResizeObserver(updateThumbScrollState);
-    resizeObserver.observe(list);
     window.addEventListener("resize", updateThumbScrollState);
 
     return () => {
-      resizeObserver.disconnect();
       window.removeEventListener("resize", updateThumbScrollState);
     };
   }, [previewAsset, previewMediaOptions.length]);
@@ -5830,6 +6276,8 @@ export function ChatWorkbench() {
   }, [previewAsset, previewMediaOptions, previewThumbPageSize, previewThumbPageStart, resetPreviewTransform]);
 
   const pagePreviewThumbs = useMemo(() => previewMediaOptions.slice(previewThumbPageStart, previewThumbPageStart + previewThumbPageSize), [previewMediaOptions, previewThumbPageSize, previewThumbPageStart]);
+  const previewThumbsNeedScroll = previewMediaOptions.length > previewThumbPageSize;
+  const pagePreviewThumbListHeight = Math.max(0, previewThumbPageSize * 50 + Math.max(0, previewThumbPageSize - 1) * 8);
   const previewThumbPreloadCount = Math.min(previewMediaOptions.length, Math.max(previewThumbPageSize * 2, previewThumbPageStart + previewThumbPageSize * 2));
   const canPagePreviewThumbsUp = previewThumbPageStart > 0;
   const canPagePreviewThumbsDown = previewThumbPageStart + previewThumbPageSize < previewMediaOptions.length;
@@ -6191,7 +6639,7 @@ export function ChatWorkbench() {
             const name = getVersionedName(item.name, nextAssets);
             nextAssets = [
               {
-            id: crypto.randomUUID(),
+            id: createClientId(),
             type: item.type,
             name,
             systemName: name,
@@ -6276,7 +6724,7 @@ export function ChatWorkbench() {
               messages: [{ role: "user", content: "请根据这张图片反推出一段可用于 AI 生图的中文提示词。只输出提示词正文，不要解释，不要分点。", images: [previewAsset.url] }],
               conversationId: activeSessionIdValue,
               conversationTitle: activeSession?.title,
-              requestId: crypto.randomUUID(),
+              requestId: createClientId(),
               metadata: { creditSource: "image_prompt_reverse", mediaUrls: [previewAsset.url], recordFailure: modelIndex === reverseModels.length - 1 },
             }),
           });
@@ -6309,9 +6757,10 @@ export function ChatWorkbench() {
         if (session.id !== activeSessionId) return session;
 
         const existingImages = session.uploadedImages ?? [];
-        const availableCount = Math.max(0, MAX_UPLOADED_IMAGES - existingImages.length);
+        const maxImages = currentUploadRule.image.maxCount;
+        const availableCount = Math.max(0, maxImages - existingImages.length);
         const newImages = images.filter((image) => !existingImages.some((item) => item.url === image.url)).slice(0, availableCount);
-        const nextUploadedImages = [...existingImages, ...newImages].slice(0, MAX_UPLOADED_IMAGES);
+        const nextUploadedImages = [...existingImages, ...newImages].slice(0, maxImages);
         const acceptedImages = images
           .map((image) => nextUploadedImages.find((item) => item.url === image.url))
           .filter((image): image is UploadedImage => Boolean(image));
@@ -6329,7 +6778,7 @@ export function ChatWorkbench() {
         };
       }),
     );
-  }, [activeSessionId]);
+  }, [activeSessionId, currentUploadRule.image.maxCount]);
 
   const removeActiveUploadedImage = useCallback((imageId: string) => {
     setSessions((current) => current.map((session) => (session.id === activeSessionId ? { ...session, uploadedImages: (session.uploadedImages ?? []).filter((image) => image.id !== imageId) } : session)));
@@ -6405,16 +6854,23 @@ export function ChatWorkbench() {
         };
 
         const applyWorkspaceState = (state: WorkspaceStatePayload, storageMode: WorkspaceStorageMode) => {
+          const uiState = getStoredWorkspaceUiState();
           const savedSessions = Array.isArray(state.sessions) && state.sessions.length > 0 ? state.sessions : [createSession(state.nextConversationNumber ?? 1)];
           const normalizedWorkspace = normalizeSessionCodesAndMediaNames(getPersistableSessions(savedSessions), state.nextConversationNumber);
-          const nextSessions = normalizedWorkspace.sessions;
+          const nextSessions = normalizedWorkspace.sessions.map((session) => replaceSessionMediaUrls(session, legacyMediaUrlReplacements, {}));
           const nextWorkflows = Array.isArray(state.workflowItems) ? state.workflowItems.filter((item) => item && typeof item.id === "string" && typeof item.title === "string") : [];
           const nextActiveSessionId = state.activeSessionId && nextSessions.some((session) => session.id === state.activeSessionId) ? state.activeSessionId : nextSessions[0].id;
-          const savedAssets = Array.isArray(state.assets) ? applyAssetGenerationSystemNames(applySessionMediaSystemNamesToAssets(normalizeStoredAssets(state.assets), nextSessions)) : [];
-          const savedAssetGenerateJobs = normalizeStoredAssetGenerateJobs(state.assetGenerateJobs);
+          const savedAssets = Array.isArray(state.assets) ? applyAssetGenerationSystemNames(applySessionMediaSystemNamesToAssets(normalizeStoredAssets(state.assets).map((asset) => replaceAssetMediaUrls(asset, legacyMediaUrlReplacements)), nextSessions)) : [];
+          const savedAssetGenerateJobs = normalizeStoredAssetGenerateJobs(state.assetGenerateJobs).map((job) => replaceAssetGenerateJobMediaUrls(job, legacyMediaUrlReplacements, {}));
 
           setWorkspaceStorageMode(storageMode);
           applyInputSettings(state.inputSettings);
+          const nextActivePanel = uiState.activePanel ?? (state.activePanel === "chat" || state.activePanel === "workflow" || state.activePanel === "assets" ? state.activePanel : undefined);
+          const nextAssetFilter = uiState.assetFilter ?? (isAssetFilter(state.assetFilter) ? state.assetFilter : undefined);
+          const nextAssetScrollTopByFilter = uiState.assetScrollTopByFilter ?? state.assetScrollTopByFilter;
+          if (nextActivePanel) setActivePanel(nextActivePanel);
+          if (nextAssetFilter) setAssetFilter(nextAssetFilter);
+          if (nextAssetScrollTopByFilter && typeof nextAssetScrollTopByFilter === "object") setAssetScrollTopByFilter(nextAssetScrollTopByFilter);
           setSessions(nextSessions);
           setNextConversationNumber(normalizedWorkspace.nextConversationNumber);
           setWorkflowItems(nextWorkflows);
@@ -6459,13 +6915,17 @@ export function ChatWorkbench() {
     const loadModelAvailability = async () => {
       try {
         const response = await fetch("/api/model-availability", { cache: "no-store" });
-        const data = (await response.json()) as { imageModels?: string[]; assetImageModels?: string[]; videoModels?: string[] };
+        const data = (await response.json()) as { imageModels?: string[]; assetImageModels?: string[]; videoModels?: string[]; agentImageModels?: string[]; agentVideoModels?: string[] };
         if (cancelled) return;
         const next = {
           image: Array.isArray(data.imageModels) ? data.imageModels : [],
           video: Array.isArray(data.videoModels) ? data.videoModels : [],
         };
         setEnabledGenerationModelIds(next);
+        setEnabledAgentGenerationModelIds({
+          image: Array.isArray(data.agentImageModels) ? data.agentImageModels : [],
+          video: Array.isArray(data.agentVideoModels) ? data.agentVideoModels : [],
+        });
         const nextAssetImageModels = Array.isArray(data.assetImageModels) ? data.assetImageModels : [];
         setEnabledAssetImageModelIds(nextAssetImageModels);
         setSelectedGenerationModels((current) => ({
@@ -6476,6 +6936,7 @@ export function ChatWorkbench() {
       } catch {
         if (!cancelled) {
           setEnabledGenerationModelIds({ image: [], video: [] });
+          setEnabledAgentGenerationModelIds({ image: [], video: [] });
           setEnabledAssetImageModelIds([]);
         }
       }
@@ -6571,11 +7032,23 @@ export function ChatWorkbench() {
 
   useEffect(() => {
     if (!isLoaded || workspaceStorageMode !== "user") return;
+    setStoredWorkspaceUiState({ activePanel, assetFilter, assetScrollTopByFilter });
+  }, [activePanel, assetFilter, assetScrollTopByFilter, isLoaded, workspaceStorageMode]);
+
+  useEffect(() => {
+    assetScrollTopByFilterRef.current = assetScrollTopByFilter;
+  }, [assetScrollTopByFilter]);
+
+  useEffect(() => {
+    if (!isLoaded || workspaceStorageMode !== "user") return;
     if (workspaceSaveTimerRef.current !== null) window.clearTimeout(workspaceSaveTimerRef.current);
 
     const payload: WorkspaceStatePayload = {
       sessions: getPersistableSessions(sessions),
       nextConversationNumber,
+      activePanel,
+      assetFilter,
+      assetScrollTopByFilter,
       workflowItems,
       assetGenerateJobs: getPersistableAssetGenerateJobs(assetGenerateJobs),
       activeSessionId,
@@ -6604,7 +7077,48 @@ export function ChatWorkbench() {
     return () => {
       if (workspaceSaveTimerRef.current !== null) window.clearTimeout(workspaceSaveTimerRef.current);
     };
-  }, [activeSessionId, agentModelTier, assetGenerateJobs, assets, feedbackLogs, intentMemoryRules, isLoaded, mode, nextConversationNumber, selectedDurations, selectedGenerationModels, selectedImageCounts, selectedRatios, selectedResolutions, sessions, workflowItems, workspaceStorageMode]);
+  }, [activePanel, activeSessionId, agentModelTier, assetFilter, assetGenerateJobs, assetScrollTopByFilter, assets, feedbackLogs, intentMemoryRules, isLoaded, mode, nextConversationNumber, selectedDurations, selectedGenerationModels, selectedImageCounts, selectedRatios, selectedResolutions, sessions, workflowItems, workspaceStorageMode]);
+
+  useEffect(() => {
+    if (!isLoaded || workspaceStorageMode !== "user") return;
+    let cancelled = false;
+
+    const pollMediaSaveStatus = async () => {
+      const urls = collectRemoteMediaUrls(sessionsRef.current, assets, assetGenerateJobs).slice(0, 80);
+      if (urls.length === 0) return;
+
+      try {
+        const response = await fetch("/api/media-save-status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ urls }),
+        });
+        const data = (await response.json()) as { jobs?: MediaSaveStatusJob[] };
+        if (cancelled) return;
+
+        const savedJobs = (data.jobs ?? []).filter((job) => job.status === "saved" && job.localUrl && job.remoteUrl && job.localUrl !== job.remoteUrl);
+        if (savedJobs.length === 0) return;
+
+        const replacements = new Map(savedJobs.map((job) => [job.remoteUrl, job.localUrl as string]));
+        const dimensions = Object.fromEntries(savedJobs.filter((job) => job.localUrl && job.dimensions).map((job) => [job.localUrl as string, job.dimensions as ImageDimensions]));
+        const videoPosters = Object.fromEntries(savedJobs.filter((job) => job.localUrl && job.posterUrl).map((job) => [job.localUrl as string, job.posterUrl as string]));
+
+        setSessions((current) => current.map((session) => replaceSessionMediaUrls(session, replacements, dimensions, videoPosters)));
+        setAssets((current) => current.map((asset) => replaceAssetMediaUrls(asset, replacements, videoPosters)));
+        setAssetGenerateJobs((current) => current.map((job) => replaceAssetGenerateJobMediaUrls(job, replacements, dimensions)));
+      } catch {
+        // Remote media saving is best-effort; generated content can still display via temporary URL.
+      }
+    };
+
+    void pollMediaSaveStatus();
+    const interval = window.setInterval(() => void pollMediaSaveStatus(), 12_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [assetGenerateJobs, assets, isLoaded, workspaceStorageMode]);
 
   useEffect(() => {
     if (!isLoaded || workspaceStorageMode !== "user") return;
@@ -6657,6 +7171,23 @@ export function ChatWorkbench() {
   }, [assets, isLoaded, timerNow]);
 
   useEffect(() => {
+    document.documentElement.dataset.flashmuseTheme = resolvedTheme;
+    document.documentElement.dataset.flashmuseThemeMode = themeMode;
+    try {
+      window.localStorage.setItem(WORKSPACE_THEME_STORAGE_KEY, themeMode);
+    } catch {
+      // Theme preference is optional.
+    }
+  }, [resolvedTheme, themeMode]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleChange = () => setSystemPrefersDark(mediaQuery.matches);
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, [themeMode]);
+
+  useEffect(() => {
     return () => {
       if (typingScrollFrameRef.current !== null) {
         window.cancelAnimationFrame(typingScrollFrameRef.current);
@@ -6684,7 +7215,15 @@ export function ChatWorkbench() {
 
   useEffect(() => {
     if (activePanel !== "assets") return;
-    chatScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    const filterChanged = previousAssetFilterRef.current !== assetFilter;
+    previousAssetFilterRef.current = assetFilter;
+    const top = filterChanged ? 0 : assetScrollTopByFilterRef.current[assetFilter] ?? 0;
+    if (filterChanged) {
+      assetScrollTopByFilterRef.current = { ...assetScrollTopByFilterRef.current, [assetFilter]: 0 };
+      setAssetScrollTopByFilter((current) => ({ ...current, [assetFilter]: 0 }));
+    }
+    const frame = window.requestAnimationFrame(() => chatScrollRef.current?.scrollTo({ top, behavior: "auto" }));
+    return () => window.cancelAnimationFrame(frame);
   }, [activePanel, assetFilter]);
 
   useEffect(() => {
@@ -6712,6 +7251,13 @@ export function ChatWorkbench() {
     const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
     if (activePanel === "assets") {
       setShowScrollToBottom(false);
+      setAssetScrollTopByFilter((current) => {
+        const currentTop = current[assetFilter] ?? 0;
+        if (Math.abs(currentTop - element.scrollTop) < 24) return current;
+        const next = { ...current, [assetFilter]: element.scrollTop };
+        assetScrollTopByFilterRef.current = next;
+        return next;
+      });
       if (distanceToBottom < 520) {
         setAssetRenderLimit((current) => current + ASSET_RENDER_PAGE_SIZE);
       }
@@ -6724,7 +7270,10 @@ export function ChatWorkbench() {
   const closeAllPopupMenus = (except?: "session" | "workflow" | "user" | "message" | "assetAction" | "control" | "mention") => {
     if (except !== "session") setOpenSessionMenuId("");
     if (except !== "workflow") setOpenWorkflowMenuId("");
-    if (except !== "user") setIsUserMenuOpen(false);
+    if (except !== "user") {
+      setIsUserMenuOpen(false);
+      setIsThemeMenuOpen(false);
+    }
     if (except !== "message") setOpenMessageMenuId("");
     if (except !== "assetAction") setOpenAssetActionMenuId("");
     if (except !== "control") setOpenControlMenu("");
@@ -6780,7 +7329,10 @@ export function ChatWorkbench() {
   useEffect(() => {
     if (!isUserMenuOpen) return;
 
-    const closeMenu = () => setIsUserMenuOpen(false);
+    const closeMenu = () => {
+      setIsUserMenuOpen(false);
+      setIsThemeMenuOpen(false);
+    };
     window.addEventListener("click", closeMenu);
 
     return () => window.removeEventListener("click", closeMenu);
@@ -6868,6 +7420,7 @@ export function ChatWorkbench() {
 
   const renderControlMenu = (name: ControlMenuName, label: string, title: string, options: string[], value: string, onChange: (value: string) => void, icon?: typeof RiImageLine) => {
     const isDurationMenu = name === "duration";
+    const isBytePlusDurationMenu = isDurationMenu && (selectedGenerationModels.video === "byteplus:video.seedance-2-0-fast" || selectedGenerationModels.video === "byteplus:video.seedance-2-0");
     const durationMenuRows = Math.ceil(options.length / 2);
     const durationMenuSplitIndex = Math.max(0, options.length - durationMenuRows);
 
@@ -6889,12 +7442,12 @@ export function ChatWorkbench() {
       {openControlMenu === name ? (
         <div className="absolute bottom-full left-0 z-[70] mb-2 max-h-[420px] min-w-[180px] overflow-y-auto rounded-[12px] bg-white p-2 shadow-[0_18px_40px_rgba(0,0,0,0.12)]">
           <div className="px-2 pb-2 text-[12px] font-medium text-[#a0a0a0]">{title}</div>
-          <div className={isDurationMenu ? "grid grid-cols-2 gap-1.5" : ""}>
+          <div className={isBytePlusDurationMenu ? "grid grid-cols-2 gap-1.5" : ""}>
           {options.map((option, index) => (
             <button
               key={option}
               type="button"
-              style={isDurationMenu ? { gridRow: durationMenuRows - (index < durationMenuSplitIndex ? index : index - durationMenuSplitIndex), gridColumn: index < durationMenuSplitIndex ? 2 : 1 } : undefined}
+              style={isBytePlusDurationMenu ? { gridRow: durationMenuRows - (index < durationMenuSplitIndex ? index : index - durationMenuSplitIndex), gridColumn: index < durationMenuSplitIndex ? 2 : 1 } : undefined}
               onClick={() => {
                 onChange(option);
                 setOpenControlMenu("");
@@ -7415,7 +7968,11 @@ export function ChatWorkbench() {
     const name = assetRenameInput.trim();
     if (!name) return;
 
-    setAssets((current) => current.map((asset) => (asset.id === renamingAssetId ? { ...asset, name } : asset)));
+    setAssets((current) => current.map((asset) => {
+      if (asset.id !== renamingAssetId) return asset;
+      const systemName = asset.systemName || asset.name;
+      return { ...asset, systemName, userName: name === systemName ? undefined : name, name };
+    }));
     setOpenAssetActionMenuId("");
     setRenamingAssetId("");
     setAssetRenameInput("");
@@ -7478,14 +8035,14 @@ export function ChatWorkbench() {
                 messages: [
                   ...session.messages,
                   {
-                    id: crypto.randomUUID(),
+                    id: createClientId(),
                     role: "assistant",
                     content: payload.content,
                     suggestions: normalizeMessageSuggestions(payload.suggestions),
                     createdAt: Date.now(),
                     requestId: payload.requestId,
                     images: payload.images,
-                    imageResultSlots: payload.imageResultSlots,
+                    imageResultSlots: payload.imageResultSlots ?? (payload.mode === "image" && payload.pendingImageCount ? Array.from({ length: payload.pendingImageCount }).map(() => ({ type: "pending" as const, startedAt: Date.now() })) : undefined),
                     imageDimensions: payload.imageDimensions,
                     imagePrompts: payload.imagePrompts,
                     imageReferences: payload.imageReferences,
@@ -7520,7 +8077,7 @@ export function ChatWorkbench() {
               messages: [
                 ...session.messages,
                 {
-                  id: crypto.randomUUID(),
+                  id: createClientId(),
                   role: "system",
                   content: payload.content,
                   mode: payload.mode,
@@ -7555,7 +8112,7 @@ export function ChatWorkbench() {
     );
   }, []);
 
-  const appendImagesToAssistantMessage = useCallback((sessionId: string, requestId: string, imageUrls: string[], imageDimensions: Record<string, ImageDimensions> = {}, pendingCompleteCount = 1, imagePrompts: Record<string, string> = {}, mediaSystemNames: Record<string, string> = {}, retryFailedIndex?: number) => {
+  const appendImagesToAssistantMessage = useCallback((sessionId: string, requestId: string, imageUrls: string[], imageDimensions: Record<string, ImageDimensions> = {}, pendingCompleteCount = 1, imagePrompts: Record<string, string> = {}, mediaSystemNames: Record<string, string> = {}, retryFailedIndex?: number, targetSlotIndex?: number) => {
     setSessions((current) =>
       current.map((session) =>
         session.id === sessionId
@@ -7568,24 +8125,26 @@ export function ChatWorkbench() {
                       ...message,
                       images: message.retryingFailedImageIndexes?.length ? [...(message.images ?? []), ...imageUrls] : [...(message.images ?? []), ...imageUrls],
                       imageResultSlots: (() => {
-                        if (!message.imageResultSlots && !(message.failedImageCount ?? 0) && retryFailedIndex === undefined && !message.retryingFailedImageIndexes?.length) return undefined;
+                        const requestedCount = getRequestedImageDisplayCount(message) ?? Math.max(1, (message.images?.length ?? 0) + (message.failedImageCount ?? 0) + (message.pendingImageCount ?? 0));
                         const currentSlots = message.imageResultSlots ?? [
                           ...(message.images ?? []).map((url) => ({ type: "image" as const, url })),
                           ...Array.from({ length: message.failedImageCount ?? 0 }).map((_, index) => ({ type: "failed" as const, retryingStartedAt: message.retryingFailedImageStartedAt?.[index] })),
+                          ...Array.from({ length: message.pendingImageCount ?? 0 }).map(() => ({ type: "pending" as const, startedAt: message.createdAt })),
                         ];
+                        while (currentSlots.length < requestedCount) currentSlots.push({ type: "pending" as const, startedAt: message.createdAt });
                         let failedOrdinal = -1;
-                        const retryingSlotIndex = retryFailedIndex === undefined
-                          ? currentSlots.findIndex((slot) => slot.type === "failed" && slot.retryingStartedAt)
+                        const replaceSlotIndex = targetSlotIndex ?? (retryFailedIndex === undefined
+                          ? currentSlots.findIndex((slot) => slot.type === "pending" || (slot.type === "failed" && slot.retryingStartedAt))
                           : currentSlots.findIndex((slot) => {
                               if (slot.type !== "failed") return false;
                               failedOrdinal += 1;
                               return failedOrdinal === retryFailedIndex;
-                            });
-                        if (retryingSlotIndex >= 0 && imageUrls[0]) {
-                          return currentSlots.flatMap((slot, index) => index === retryingSlotIndex ? imageUrls.map((url) => ({ type: "image" as const, url })) : [slot]);
+                            }));
+                        if (replaceSlotIndex >= 0 && imageUrls[0]) {
+                          return currentSlots.map((slot, index) => index === replaceSlotIndex ? { type: "image" as const, url: imageUrls[0] } : slot).slice(0, requestedCount);
                         }
 
-                        return [...currentSlots, ...imageUrls.map((url) => ({ type: "image" as const, url }))];
+                        return currentSlots.slice(0, requestedCount);
                       })(),
                       imageDimensions: { ...(message.imageDimensions ?? {}), ...imageDimensions },
                       imagePrompts: { ...(message.imagePrompts ?? {}), ...imagePrompts },
@@ -7604,7 +8163,7 @@ export function ChatWorkbench() {
     );
   }, []);
 
-  const markAssistantImageFailure = useCallback((sessionId: string, requestId: string, retryFailedIndex?: number, errorMessage?: string) => {
+  const markAssistantImageFailure = useCallback((sessionId: string, requestId: string, retryFailedIndex?: number, errorMessage?: string, targetSlotIndex?: number) => {
     setSessions((current) =>
       current.map((session) =>
         session.id === sessionId
@@ -7618,23 +8177,34 @@ export function ChatWorkbench() {
                       error: errorMessage ?? message.error,
                       failedImageCount: message.retryingFailedImageIndexes?.length ? message.failedImageCount : (message.failedImageCount ?? 0) + 1,
                       imageResultSlots: (() => {
+                        const requestedCount = getRequestedImageDisplayCount(message) ?? Math.max(1, (message.images?.length ?? 0) + (message.failedImageCount ?? 0) + (message.pendingImageCount ?? 0));
                         const currentSlots = message.imageResultSlots ?? [
                           ...(message.images ?? []).map((url) => ({ type: "image" as const, url })),
                           ...Array.from({ length: message.failedImageCount ?? 0 }).map((_, index) => ({ type: "failed" as const, retryingStartedAt: message.retryingFailedImageStartedAt?.[index] })),
+                          ...Array.from({ length: message.pendingImageCount ?? 0 }).map(() => ({ type: "pending" as const, startedAt: message.createdAt })),
                         ];
+                        while (currentSlots.length < requestedCount) currentSlots.push({ type: "pending" as const, startedAt: message.createdAt });
                         let failedOrdinal = -1;
-                        const retryingSlotIndex = retryFailedIndex === undefined
-                          ? currentSlots.findIndex((slot) => slot.type === "failed" && slot.retryingStartedAt)
+                        const failedSlotIndex = targetSlotIndex ?? (retryFailedIndex === undefined
+                          ? currentSlots.findIndex((slot) => slot.type === "pending" || (slot.type === "failed" && slot.retryingStartedAt))
                           : currentSlots.findIndex((slot) => {
                               if (slot.type !== "failed") return false;
                               failedOrdinal += 1;
                               return failedOrdinal === retryFailedIndex;
-                            });
-                        if (retryingSlotIndex >= 0) {
-                          return currentSlots.map((slot, index) => index === retryingSlotIndex ? { type: "failed" as const } : slot);
+                            }));
+                        if (failedSlotIndex >= 0) {
+                          return currentSlots.map((slot, index) => index === failedSlotIndex ? { type: "failed" as const } : slot).slice(0, requestedCount);
                         }
 
-                        return [...currentSlots, { type: "failed" as const }];
+                        return currentSlots.slice(0, requestedCount);
+                      })(),
+                      mediaErrorReasons: (() => {
+                        const reason = errorMessage ?? GENERIC_MEDIA_ERROR_MESSAGE;
+                        const currentReasons = message.mediaErrorReasons ?? [];
+                        if (retryFailedIndex === undefined) return [...currentReasons, reason];
+                        const nextReasons = [...currentReasons];
+                        nextReasons[retryFailedIndex] = reason;
+                        return nextReasons;
                       })(),
                       pendingImageCount: Math.max(0, (message.pendingImageCount ?? (message.retryingFailedImageIndexes?.length ? 0 : 1)) - 1),
                       retryingFailedImageIndexes: message.retryingFailedImageIndexes?.slice(1),
@@ -7649,7 +8219,7 @@ export function ChatWorkbench() {
     );
   }, []);
 
-  const finalizeAssistantImageFailures = useCallback((sessionId: string, requestId: string, failureCount: number, payload: Pick<Message, "content" | "mode"> & Partial<Pick<Message, "error" | "statusText">>) => {
+  const finalizeAssistantImageFailures = useCallback((sessionId: string, requestId: string, failureCount: number, payload: Pick<Message, "content" | "mode"> & Partial<Pick<Message, "error" | "statusText" | "mediaErrorReasons">>) => {
     setSessions((current) =>
       current.map((session) =>
         session.id === sessionId
@@ -7659,20 +8229,28 @@ export function ChatWorkbench() {
               messages: session.messages.map((message) => {
                 if (message.role !== "assistant" || message.requestId !== requestId) return message;
 
+                const requestedCount = getRequestedImageDisplayCount(message) ?? Math.max(1, (message.images?.length ?? 0) + failureCount);
                 const currentSlots = message.imageResultSlots ?? [
                   ...(message.images ?? []).map((url) => ({ type: "image" as const, url })),
                   ...Array.from({ length: message.failedImageCount ?? 0 }).map(() => ({ type: "failed" as const })),
+                  ...Array.from({ length: message.pendingImageCount ?? 0 }).map(() => ({ type: "pending" as const, startedAt: message.createdAt })),
                 ];
-                const currentFailedCount = currentSlots.filter((slot) => slot.type === "failed").length;
-                const missingFailureCount = Math.max(0, failureCount - currentFailedCount);
-                const finalizedSlots = currentSlots.map((slot) => slot.type === "failed" ? { type: "failed" as const } : slot);
+                while (currentSlots.length < requestedCount) currentSlots.push({ type: "pending" as const, startedAt: message.createdAt });
+                let remainingFailures = failureCount;
+                const finalizedSlots = currentSlots.map((slot) => {
+                  if (slot.type === "image") return slot;
+                  if (remainingFailures <= 0) return slot.type === "failed" ? { type: "failed" as const } : slot;
+                  remainingFailures -= 1;
+                  return { type: "failed" as const };
+                }).slice(0, requestedCount);
 
                 return {
                   ...message,
                   ...payload,
                   pendingImageCount: 0,
                   failedImageCount: Math.max(message.failedImageCount ?? 0, failureCount),
-                  imageResultSlots: missingFailureCount > 0 ? [...finalizedSlots, ...Array.from({ length: missingFailureCount }).map(() => ({ type: "failed" as const }))] : finalizedSlots,
+                  imageResultSlots: finalizedSlots,
+                  mediaErrorReasons: payload.mediaErrorReasons ?? message.mediaErrorReasons,
                   retryingFailedImageIndexes: undefined,
                   retryingFailedImageStartedAt: undefined,
                 };
@@ -7683,7 +8261,7 @@ export function ChatWorkbench() {
     );
   }, []);
 
-  const appendVideoToAssistantMessage = useCallback((sessionId: string, requestId: string, videoUrl: string, prompt: string, mediaSystemName?: string) => {
+  const appendVideoToAssistantMessage = useCallback((sessionId: string, requestId: string, videoUrl: string, prompt: string, mediaSystemName?: string, posterUrl?: string) => {
     setSessions((current) =>
       current.map((session) =>
         session.id === sessionId
@@ -7697,6 +8275,7 @@ export function ChatWorkbench() {
                       videoUrl: message.videoUrl ?? videoUrl,
                       videos: [...(message.videos ?? (message.videoUrl ? [message.videoUrl] : [])), videoUrl].filter((url, index, array) => array.indexOf(url) === index),
                       videoPrompts: { ...(message.videoPrompts ?? {}), [videoUrl]: prompt },
+                      videoPosters: posterUrl ? { ...(message.videoPosters ?? {}), [videoUrl]: posterUrl } : message.videoPosters,
                       mediaSystemNames: mediaSystemName ? { ...(message.mediaSystemNames ?? {}), [videoUrl]: mediaSystemName } : message.mediaSystemNames,
                       pendingVideoCount: Math.max(0, (message.pendingVideoCount ?? (message.retryingFailedVideoIndexes?.length ? 0 : 1)) - 1),
                       failedVideoCount: message.retryingFailedVideoIndexes?.length ? Math.max(0, (message.failedVideoCount ?? 1) - 1) : message.failedVideoCount,
@@ -7724,6 +8303,7 @@ export function ChatWorkbench() {
                   ? {
                       ...message,
                       error: errorMessage ?? message.error,
+                      mediaErrorReasons: [...(message.mediaErrorReasons ?? []), errorMessage ?? GENERIC_MEDIA_ERROR_MESSAGE],
                       failedVideoCount: message.retryingFailedVideoIndexes?.length ? message.failedVideoCount : (message.failedVideoCount ?? 0) + 1,
                       pendingVideoCount: Math.max(0, (message.pendingVideoCount ?? (message.retryingFailedVideoIndexes?.length ? 0 : 1)) - 1),
                       retryingFailedVideoIndexes: message.retryingFailedVideoIndexes?.slice(1),
@@ -7786,7 +8366,7 @@ export function ChatWorkbench() {
     );
   }, []);
 
-  const addGeneratedAssets = useCallback((sessionId: string, mode: WorkMode, sourcePrompt: string, urls: string[], messageId?: string, assetTargetType?: AssetTargetType, contextText = "", mediaSystemNames: Record<string, string> = {}) => {
+  const addGeneratedAssets = useCallback((sessionId: string, mode: WorkMode, sourcePrompt: string, urls: string[], messageId?: string, assetTargetType?: AssetTargetType, contextText = "", mediaSystemNames: Record<string, string> = {}, mediaPosterUrls: Record<string, string> = {}) => {
     if (urls.length === 0) return;
 
     setAssets((current) => {
@@ -7801,11 +8381,12 @@ export function ChatWorkbench() {
         const name = systemName;
         nextAssets = [
           {
-            id: crypto.randomUUID(),
+            id: createClientId(),
             type,
             name,
             systemName,
             url,
+            posterUrl: mediaPosterUrls[url],
             librarySource: "conversation",
             sourcePrompt: namingText || sourcePrompt,
             sessionId,
@@ -7835,7 +8416,7 @@ export function ChatWorkbench() {
 
         nextAssets = [
           {
-            id: crypto.randomUUID(),
+            id: createClientId(),
             type,
             name,
             systemName: name,
@@ -7957,7 +8538,24 @@ export function ChatWorkbench() {
         }
 
         const generationMode: WorkMode = plan.intent === "image" || plan.intent === "video" ? plan.intent : "agent";
-        const generationModel = getAgentGenerationModel(agentModelTier, generationMode, selectedGenerationModels, { sourceText, session: sessions.find((session) => session.id === sessionId), feedbackLogs });
+        let agentEnabledModels = enabledAgentGenerationModelIds;
+        if (generationMode === "image" || generationMode === "video") {
+          try {
+            const response = await fetch("/api/model-availability", { cache: "no-store" });
+            const data = (await response.json()) as { agentImageModels?: string[]; agentVideoModels?: string[] };
+            agentEnabledModels = {
+              image: Array.isArray(data.agentImageModels) ? data.agentImageModels : [],
+              video: Array.isArray(data.agentVideoModels) ? data.agentVideoModels : [],
+            };
+            setEnabledAgentGenerationModelIds(agentEnabledModels);
+          } catch {}
+
+          if (agentEnabledModels[generationMode].length === 0) {
+            appendSystemMessage(sessionId, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: generationMode });
+            return;
+          }
+        }
+        const generationModel = getAgentGenerationModel(agentModelTier, generationMode, selectedGenerationModels, { sourceText, session: sessions.find((session) => session.id === sessionId), feedbackLogs, enabledModels: agentEnabledModels });
         const agentSettings = getAgentGenerationSettingsFromPlan(plan, sourceText, generationMode, generationModel);
         const agentPrompt = generationMode === "image" || generationMode === "video" ? getAgentPromptFromPlan(plan, sourceText, generationMode) : undefined;
         const plannedItemPrompts = agentPrompt ? getAgentItemPromptsFromPlan(plan, sourceText, generationMode) : undefined;
@@ -8103,6 +8701,7 @@ export function ChatWorkbench() {
               conversationId: sessionId,
               conversationTitle,
               requestId: imageRequestId,
+              metadata: pendingRequest.agentGenerated ? { creditSource: "agent_image_generation" } : undefined,
             }),
           });
 
@@ -8133,7 +8732,7 @@ export function ChatWorkbench() {
           }
 
           const nextImages = imageData.images ?? [];
-          if (nextImages.length === 0) throw new Error("图片平台没有返回图片，请稍后再试。");
+          if (nextImages.length === 0) throw new Error(GENERIC_MEDIA_ERROR_MESSAGE);
           return { images: nextImages, imageDimensions: imageData.imageDimensions ?? {}, failureReasons: imageData.failureReasons ?? [], usage: imageData.usage, credit: imageData.credit, billableImageCount: imageData.billableImageCount };
         };
 
@@ -8150,12 +8749,12 @@ export function ChatWorkbench() {
                 addSessionUsage(sessionId, imageResult.usage);
                 applyCreditResult(sessionId, imageResult.credit);
                 const imagePrompts = Object.fromEntries(resultImages.map((url) => [url, itemPrompt]));
-                appendImagesToAssistantMessage(sessionId, pendingRequest.id, resultImages, resultDimensions, 1, imagePrompts, mediaSystemNames, pendingRequest.retryFailedIndex);
+                appendImagesToAssistantMessage(sessionId, pendingRequest.id, resultImages, resultDimensions, 1, imagePrompts, mediaSystemNames, pendingRequest.retryFailedIndex, pendingRequest.retryFailedIndex ?? index);
                 if (autoSaveHistory) addGeneratedAssets(sessionId, pendingRequest.mode, itemPrompt, resultImages, undefined, pendingRequest.assetTargetType, contextText, mediaSystemNames);
                 notifyGenerationCompleteOnce(pendingRequest.id, "图片生成已完成");
                 return resultImages;
               } catch (error) {
-                markAssistantImageFailure(sessionId, pendingRequest.id, pendingRequest.retryFailedIndex, toUserErrorMessage(error, "图片生成失败，请稍后再试。"));
+                markAssistantImageFailure(sessionId, pendingRequest.id, pendingRequest.retryFailedIndex, toUserErrorMessage(error, GENERIC_MEDIA_ERROR_MESSAGE), pendingRequest.retryFailedIndex ?? index);
                 throw error;
               }
             }),
@@ -8163,11 +8762,22 @@ export function ChatWorkbench() {
 
           const successCount = results.filter((result) => result.status === "fulfilled").length;
           const failureCount = results.length - successCount;
+          const failureReasons = mediaFailureReasons(results, GENERIC_MEDIA_ERROR_MESSAGE);
+          if (failureReasons.length > 0) {
+            console.warn("[media-generation] image failure reasons", {
+              requestId: pendingRequest.id,
+              model: pendingRequest.model,
+              successCount,
+              failureCount,
+              reasons: failureReasons,
+            });
+          }
 
           finalizeAssistantImageFailures(sessionId, pendingRequest.id, failureCount, {
             content: pendingRequest.agentGenerated ? pendingRequest.agentDisplayText ?? prompt : prompt,
             statusText: undefined,
-            error: failureCount > 0 ? (successCount > 0 ? mediaFailureMessage(results, failureCount, "图片生成失败，请稍后再试。") : resultErrorMessage(results) ?? "图片生成失败，请稍后再试。") : undefined,
+            error: failureCount > 0 ? (successCount > 0 ? mediaFailureMessage(results, failureCount, GENERIC_MEDIA_ERROR_MESSAGE) : resultErrorMessage(results) ?? GENERIC_MEDIA_ERROR_MESSAGE) : undefined,
+            mediaErrorReasons: failureReasons.length > 0 ? failureReasons : undefined,
             mode: pendingRequest.mode,
           });
       }
@@ -8188,7 +8798,7 @@ export function ChatWorkbench() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             signal: abortController.signal,
-            body: JSON.stringify({ prompt: withReferenceHint(videoPrompt), model: pendingRequest.model, referenceImages: pendingRequest.referenceImages, settings, conversationId: sessionId, conversationTitle, requestId: videoRequestId }),
+            body: JSON.stringify({ prompt: withReferenceHint(videoPrompt), model: pendingRequest.model, referenceImages: pendingRequest.referenceImages, settings, conversationId: sessionId, conversationTitle, requestId: videoRequestId, metadata: pendingRequest.agentGenerated ? { creditSource: "agent_video_generation" } : undefined }),
           });
 
           const taskData = await readJson<{ id?: string; polling_url?: string; pollingUrl?: string; usage?: UsageMeta }>(taskResponse);
@@ -8230,7 +8840,7 @@ export function ChatWorkbench() {
 
           const pollData = await readJson<{
             status?: string;
-            content?: { video_url?: string };
+            content?: { video_url?: string; poster_url?: string };
             error?: { message?: string } | string;
             usage?: UsageMeta;
             credit?: CreditMeta;
@@ -8276,8 +8886,8 @@ export function ChatWorkbench() {
             }
 
             const mediaSystemNames = reserveMediaSystemNames(sessionId, "video", [pollData.content.video_url]);
-            appendVideoToAssistantMessage(sessionId, pendingRequest.id, pollData.content.video_url, videoPrompt, mediaSystemNames[pollData.content.video_url]);
-            if (autoSaveHistory) addGeneratedAssets(sessionId, pendingRequest.mode, videoPrompt, [pollData.content.video_url], undefined, pendingRequest.assetTargetType, pendingRequest.messages.map((message) => message.content).join("\n"), mediaSystemNames);
+            appendVideoToAssistantMessage(sessionId, pendingRequest.id, pollData.content.video_url, videoPrompt, mediaSystemNames[pollData.content.video_url], pollData.content.poster_url);
+            if (autoSaveHistory) addGeneratedAssets(sessionId, pendingRequest.mode, videoPrompt, [pollData.content.video_url], undefined, pendingRequest.assetTargetType, pendingRequest.messages.map((message) => message.content).join("\n"), mediaSystemNames, pollData.content.poster_url ? { [pollData.content.video_url]: pollData.content.poster_url } : {});
             notifyGenerationCompleteOnce(pendingRequest.id, "视频生成已完成");
             return pollData.content.video_url;
           }
@@ -8300,7 +8910,7 @@ export function ChatWorkbench() {
             try {
               return await createAndPollVideo(videoPrompt, pendingRequest.agentItemSettings?.[index], index);
             } catch (error) {
-              markAssistantVideoFailure(sessionId, pendingRequest.id, toUserErrorMessage(error, "视频生成失败，请稍后再试。"));
+              markAssistantVideoFailure(sessionId, pendingRequest.id, toUserErrorMessage(error, GENERIC_MEDIA_ERROR_MESSAGE));
               throw error;
             }
           }),
@@ -8308,12 +8918,23 @@ export function ChatWorkbench() {
 
         const successCount = results.filter((result) => result.status === "fulfilled").length;
         const failureCount = results.length - successCount;
+        const failureReasons = mediaFailureReasons(results, GENERIC_MEDIA_ERROR_MESSAGE);
+        if (failureReasons.length > 0) {
+          console.warn("[media-generation] video failure reasons", {
+            requestId: pendingRequest.id,
+            model: pendingRequest.model,
+            successCount,
+            failureCount,
+            reasons: failureReasons,
+          });
+        }
 
         updateAssistantMessageByRequestId(sessionId, pendingRequest.id, {
           content: pendingRequest.agentGenerated ? pendingRequest.agentDisplayText ?? prompt : prompt,
           statusText: failureCount > 0 && successCount === 0 ? "视频生成失败" : videoStatusLabels.succeeded,
           pendingVideoCount: 0,
-          error: failureCount > 0 ? (successCount > 0 ? mediaFailureMessage(results, failureCount, "视频生成失败，请稍后再试。") : resultErrorMessage(results) ?? "视频生成失败，请稍后再试。") : undefined,
+          error: failureCount > 0 ? (successCount > 0 ? mediaFailureMessage(results, failureCount, GENERIC_MEDIA_ERROR_MESSAGE) : resultErrorMessage(results) ?? GENERIC_MEDIA_ERROR_MESSAGE) : undefined,
+          mediaErrorReasons: failureReasons.length > 0 ? failureReasons : undefined,
           mode: pendingRequest.mode,
           generationMeta: {
             mode: "video",
@@ -8329,11 +8950,12 @@ export function ChatWorkbench() {
       }
     } catch (error) {
       if (stoppedRequestIdsRef.current.has(pendingRequest.id) || (error instanceof DOMException && error.name === "AbortError")) return;
-      const message = toUserErrorMessage(error);
+      const message = toUserErrorMessage(error, pendingRequest.mode === "image" || pendingRequest.mode === "video" ? GENERIC_MEDIA_ERROR_MESSAGE : undefined);
       if (pendingRequest.mode === "video") {
         updateAssistantMessageByRequestId(sessionId, pendingRequest.id, {
           content: pendingRequest.agentGenerated ? pendingRequest.agentDisplayText ?? pendingRequest.prompt ?? "" : pendingRequest.prompt ?? "",
           error: message,
+          mediaErrorReasons: [message],
           statusText: "视频生成失败",
           mode: pendingRequest.mode,
         });
@@ -8342,6 +8964,7 @@ export function ChatWorkbench() {
         finalizeAssistantImageFailures(sessionId, pendingRequest.id, expectedFailureCount, {
           content: pendingRequest.agentGenerated ? pendingRequest.agentDisplayText ?? pendingRequest.prompt ?? "" : pendingRequest.prompt ?? "",
           error: message,
+          mediaErrorReasons: [message],
           statusText: imageStatusLabels.failed,
           mode: pendingRequest.mode,
         });
@@ -8354,7 +8977,7 @@ export function ChatWorkbench() {
       requestAbortControllersRef.current.delete(pendingRequest.id);
       stoppedRequestIdsRef.current.delete(pendingRequest.id);
     }
-  }, [addGeneratedAssets, addSessionUsage, agentModelTier, appendAssistantMessage, appendImagesToAssistantMessage, appendSystemMessage, appendVideoToAssistantMessage, applyCreditResult, autoSaveHistory, clearPendingRequest, feedbackLogs, finalizeAssistantImageFailures, markAssistantImageFailure, markAssistantVideoFailure, notifyGenerationCompleteOnce, reserveMediaSystemNames, selectedGenerationModels, selectedModel, sessions, updateAssistantMessageByRequestId, updatePendingRequest]);
+  }, [addGeneratedAssets, addSessionUsage, agentModelTier, appendAssistantMessage, appendImagesToAssistantMessage, appendSystemMessage, appendVideoToAssistantMessage, applyCreditResult, autoSaveHistory, clearPendingRequest, enabledAgentGenerationModelIds, feedbackLogs, finalizeAssistantImageFailures, markAssistantImageFailure, markAssistantVideoFailure, notifyGenerationCompleteOnce, reserveMediaSystemNames, selectedGenerationModels, selectedModel, sessions, updateAssistantMessageByRequestId, updatePendingRequest]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -8373,8 +8996,19 @@ export function ChatWorkbench() {
     const rawText = normalizedSuggestion ? normalizedSuggestion.label : activeInput.trim();
     const submitMode = forcedMode ?? mode;
     const modeForSettings: WorkMode = submitMode === "agent" ? mode : submitMode;
+    let generationModelsForSubmit = selectedGenerationModels;
+    let enabledModelsForSubmit = enabledGenerationModelIds;
     const availableUploadedImages = isSuggestionSend ? [] : activeUploadedImages;
     const availableUploadedFiles = isSuggestionSend ? [] : activeUploadedFiles;
+    const submitUploadRule = getUploadRule({ mode: submitMode, modelId: submitMode === "agent" ? selectedModel : generationModelsForSubmit[submitMode], transportMode: "local-base64" });
+    if (availableUploadedImages.length > submitUploadRule.image.maxCount) {
+      showInputTip(`当前模型最多支持 ${submitUploadRule.image.maxCount} 张参考图，不能上传更多图片`);
+      return;
+    }
+    if (availableUploadedFiles.length > submitUploadRule.document.maxCount) {
+      showInputTip(`当前模型最多支持 ${submitUploadRule.document.maxCount} 个文件`);
+      return;
+    }
     if (hasReadingUploadedFiles && !isSuggestionSend) {
       showInputTip("文件读取中");
       return;
@@ -8385,15 +9019,45 @@ export function ChatWorkbench() {
       return;
     }
 
-    if ((submitMode === "image" || submitMode === "video") && enabledGenerationModelIds[submitMode].length === 0) {
+    if (submitMode === "image" || submitMode === "video") {
+      const isCurrentModelAvailable = enabledModelsForSubmit[submitMode].includes(generationModelsForSubmit[submitMode]);
+      if (enabledModelsForSubmit[submitMode].length === 0 || !isCurrentModelAvailable) {
+        try {
+          const response = await fetch("/api/model-availability", { cache: "no-store" });
+          const data = (await response.json()) as { imageModels?: string[]; assetImageModels?: string[]; videoModels?: string[]; agentImageModels?: string[]; agentVideoModels?: string[] };
+          const refreshedModels = {
+            image: Array.isArray(data.imageModels) ? data.imageModels : [],
+            video: Array.isArray(data.videoModels) ? data.videoModels : [],
+          };
+          const refreshedAgentModels = {
+            image: Array.isArray(data.agentImageModels) ? data.agentImageModels : [],
+            video: Array.isArray(data.agentVideoModels) ? data.agentVideoModels : [],
+          };
+          const refreshedAssetImageModels = Array.isArray(data.assetImageModels) ? data.assetImageModels : [];
+          const nextSelectedModels = {
+            image: refreshedModels.image.includes(generationModelsForSubmit.image) ? generationModelsForSubmit.image : refreshedModels.image[0] as ModelName | undefined ?? generationModelsForSubmit.image,
+            video: refreshedModels.video.includes(generationModelsForSubmit.video) ? generationModelsForSubmit.video : refreshedModels.video[0] as ModelName | undefined ?? generationModelsForSubmit.video,
+          };
+          enabledModelsForSubmit = refreshedModels;
+          generationModelsForSubmit = nextSelectedModels;
+          setEnabledGenerationModelIds(refreshedModels);
+          setEnabledAgentGenerationModelIds(refreshedAgentModels);
+          setEnabledAssetImageModelIds(refreshedAssetImageModels);
+          setSelectedGenerationModels(nextSelectedModels);
+          setCharacterGenerateModel((current) => refreshedAssetImageModels.includes(current) ? current : refreshedAssetImageModels[0] as ModelName | undefined ?? current);
+        } catch {}
+      }
+    }
+
+    if ((submitMode === "image" || submitMode === "video") && enabledModelsForSubmit[submitMode].length === 0) {
       appendSystemMessage(activeSession.id, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: submitMode });
       return;
     }
-    if (submitMode === "image" && !enabledGenerationModelIds.image.includes(selectedGenerationModels.image)) {
+    if (submitMode === "image" && !enabledModelsForSubmit.image.includes(generationModelsForSubmit.image)) {
       appendSystemMessage(activeSession.id, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: submitMode });
       return;
     }
-    if (submitMode === "video" && !enabledGenerationModelIds.video.includes(selectedGenerationModels.video)) {
+    if (submitMode === "video" && !enabledModelsForSubmit.video.includes(generationModelsForSubmit.video)) {
       appendSystemMessage(activeSession.id, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: submitMode });
       return;
     }
@@ -8412,17 +9076,23 @@ export function ChatWorkbench() {
     const uploadedImageReferences = sendUploadedImages.map((image) => ({ name: getUploadedImageReferenceName(image, sendUploadedImages), url: image.url }));
     const recentReferenceImages = explicitImageReferences.length > 0 || uploadedImageReferences.length > 0 ? [] : getRecentReferenceImages(activeSession.messages, rawText);
     const recentImageReferences = recentReferenceImages.map((url, index) => ({ name: `图片${index + 1}`, url }));
-    const namedImageReferences: ImageReference[] = (explicitImageReferences.length > 0 ? explicitImageReferences : uploadedImageReferences.length > 0 ? uploadedImageReferences : recentImageReferences)
+    const sourceImageReferences = explicitImageReferences.length > 0 ? explicitImageReferences : uploadedImageReferences.length > 0 ? uploadedImageReferences : recentImageReferences;
+    if (sourceImageReferences.filter((reference, index, array) => Boolean(reference.url) && array.findIndex((item) => item.url === reference.url) === index).length > currentMaxReferenceImages) {
+      showInputTip(`当前模型最多支持 ${currentMaxReferenceImages} 张参考图，不能上传更多图片`);
+      return;
+    }
+    const namedImageReferences: ImageReference[] = sourceImageReferences
       .filter((reference, index, array) => Boolean(reference.url) && array.findIndex((item) => item.url === reference.url) === index)
-      .slice(0, MAX_UPLOADED_IMAGES);
+      .slice(0, currentMaxReferenceImages);
     const referenceImages = namedImageReferences.map((reference) => reference.url);
     const referencedAssets = getReferencedAssets(rawText, assets);
-    const displayImageReferences = (namedImageReferences.length > 0 ? namedImageReferences : referenceImages.map((url, index) => ({ name: `图片${index + 1}`, url }))).slice(0, MAX_UPLOADED_IMAGES);
+    const displayImageReferences = (namedImageReferences.length > 0 ? namedImageReferences : referenceImages.map((url, index) => ({ name: `图片${index + 1}`, url }))).slice(0, currentMaxReferenceImages);
     const text = rawText || getImageOnlyPrompt(submitMode);
-    const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: rawText, createdAt: nowTimestamp(), images: referenceImages.length > 0 ? referenceImages : undefined, imageReferences: displayImageReferences.length > 0 ? displayImageReferences : undefined, uploadedFiles: availableUploadedFiles.length > 0 ? availableUploadedFiles : undefined };
+    const userMessage: Message = { id: createClientId(), role: "user", content: rawText, createdAt: nowTimestamp(), images: referenceImages.length > 0 ? referenceImages : undefined, imageReferences: displayImageReferences.length > 0 ? displayImageReferences : undefined, uploadedFiles: availableUploadedFiles.length > 0 ? availableUploadedFiles : undefined };
     const payloadUserMessage: Message = { ...userMessage, content: text };
-    const optimisticMessages = [...activeSession.messages, payloadUserMessage];
-    const visibleOptimisticMessages = [...activeSession.messages, userMessage];
+    const messagesWithoutSuggestions = activeSession.messages.map((message) => (message.suggestions ? { ...message, suggestions: undefined } : message));
+    const optimisticMessages = [...messagesWithoutSuggestions, payloadUserMessage];
+    const visibleOptimisticMessages = [...messagesWithoutSuggestions, userMessage];
     const isDirectGenerationMode = submitMode !== "agent";
     const visibleMessages = isDirectGenerationMode ? activeSession.messages : visibleOptimisticMessages;
     addUploadedImagesToAssets(sessionId, sendUploadedImages, text);
@@ -8470,7 +9140,7 @@ export function ChatWorkbench() {
             messages: [{ role: "user", content: "请返回一次模型探测结果。" }],
             conversationId: sessionId,
             conversationTitle: activeSession.title,
-            requestId: crypto.randomUUID(),
+            requestId: createClientId(),
           }),
         });
         const data = await readJson<{ model?: string; usage?: UsageMeta; credit?: CreditMeta }>(response);
@@ -8510,7 +9180,7 @@ export function ChatWorkbench() {
       }
 
       const pendingRequest: PendingGeneration = {
-        id: crypto.randomUUID(),
+        id: createClientId(),
         model: selectedModel,
         mode: "agent",
         messages: payloadMessages,
@@ -8556,13 +9226,13 @@ export function ChatWorkbench() {
 
     const isAgentAutoGeneration = false;
     const assetTargetType = normalizedSuggestion?.assetTargetType ?? getAssetTypeFromText(text, generationMode);
-    const generationModel = isAgentAutoGeneration ? getAgentGenerationModel(agentModelTier, generationMode, selectedGenerationModels, { sourceText: text, session: activeSession, feedbackLogs }) : generationMode === "image" ? selectedGenerationModels.image : generationMode === "video" ? selectedGenerationModels.video : selectedModel;
+    const generationModel = isAgentAutoGeneration ? getAgentGenerationModel(agentModelTier, generationMode, generationModelsForSubmit, { sourceText: text, session: activeSession, feedbackLogs, enabledModels: enabledModelsForSubmit }) : generationMode === "image" ? generationModelsForSubmit.image : generationMode === "video" ? generationModelsForSubmit.video : selectedModel;
     const agentSettings = isAgentAutoGeneration ? getAgentGenerationSettings(text, generationMode, generationModel) : undefined;
     const generationResolution = agentSettings?.resolution ?? (generationMode === "image" ? normalizeImageResolutionForModel(generationModel, selectedResolutions[modeForSettings]) : generationMode === "video" ? (selectedRatios.video === "智能比例" ? "720p" : normalizeVideoResolutionForModel(generationModel, selectedResolutions.video)) : selectedResolutions[modeForSettings]);
     const generationRatio = agentSettings?.ratio ?? (generationMode === "video" ? (selectedRatios.video === "智能比例" ? "智能比例" : normalizeVideoRatioForModel(generationModel, selectedRatios.video, generationResolution)) : selectedRatios[modeForSettings]);
     const agentDisplayText = isAgentAutoGeneration ? getAgentMediaDisplayText(generationMode, text) : undefined;
     const pendingRequest: PendingGeneration = {
-      id: crypto.randomUUID(),
+      id: createClientId(),
       model: generationModel,
       promptModel: isAgentAutoGeneration ? selectedModel : undefined,
       mode: generationMode,
@@ -8668,7 +9338,7 @@ export function ChatWorkbench() {
               messages: [
                 ...session.messages,
                 {
-                  id: crypto.randomUUID(),
+                  id: createClientId(),
                   role: "system",
                   content: "已中断思考",
                   mode: "agent",
@@ -8693,7 +9363,7 @@ export function ChatWorkbench() {
 
     setFeedbackLogs((current) => [
       {
-        id: crypto.randomUUID(),
+        id: createClientId(),
         createdAt: Date.now(),
         kind,
         sessionId: activeSession.id,
@@ -8800,7 +9470,7 @@ export function ChatWorkbench() {
     const replayResolution = generationMode === "image" ? normalizeImageResolutionForModel(replayModel, replaySettings?.resolution ?? selectedResolutions[generationMode]) : generationMode === "video" ? ((replaySettings?.ratio ?? selectedRatios.video) === "智能比例" ? "720p" : normalizeVideoResolutionForModel(replayModel, replaySettings?.resolution ?? selectedResolutions.video)) : replaySettings?.resolution ?? selectedResolutions[generationMode];
     const replayRatio = generationMode === "video" ? ((replaySettings?.ratio ?? selectedRatios.video) === "智能比例" ? "智能比例" : normalizeVideoRatioForModel(replayModel, replaySettings?.ratio ?? selectedRatios.video, replayResolution)) : replaySettings?.ratio ?? selectedRatios[generationMode];
     const pendingRequest: PendingGeneration = {
-      id: crypto.randomUUID(),
+      id: createClientId(),
       model: replayModel,
       promptModel: replayMeta?.agentGenerated ? (agentModelTier === "advanced" ? ADVANCED_CHAT_MODEL : DEFAULT_CHAT_MODEL) : undefined,
       mode: generationMode,
@@ -8864,7 +9534,7 @@ export function ChatWorkbench() {
     if (!prompt) return;
 
     const sessionId = activeSession.id;
-    const requestId = crypto.randomUUID();
+    const requestId = createClientId();
     const retryStartedAt = Date.now();
     const pendingRequest: PendingGeneration = {
       id: requestId,
@@ -8901,15 +9571,18 @@ export function ChatWorkbench() {
                       statusText: meta.mode === "video" ? videoStatusLabels.creating : imageStatusLabels.creating,
                       imageResultSlots: meta.mode === "image" ? (() => {
                         let failedOrdinal = -1;
+                        const requestedCount = getRequestedImageDisplayCount(item) ?? Math.max(1, (item.images?.length ?? 0) + (item.failedImageCount ?? 0) + (item.pendingImageCount ?? 0));
                         const currentSlots = item.imageResultSlots ?? [
                           ...(item.images ?? []).map((url) => ({ type: "image" as const, url })),
                           ...Array.from({ length: item.failedImageCount ?? 0 }).map(() => ({ type: "failed" as const })),
+                          ...Array.from({ length: item.pendingImageCount ?? 0 }).map(() => ({ type: "pending" as const, startedAt: item.createdAt })),
                         ];
+                        while (currentSlots.length < requestedCount) currentSlots.push({ type: "pending" as const, startedAt: item.createdAt });
                         return currentSlots.map((slot) => {
                           if (slot.type !== "failed") return slot;
                           failedOrdinal += 1;
                           return failedOrdinal === failedIndex ? { type: "failed" as const, retryingStartedAt: retryStartedAt } : slot;
-                        });
+                        }).slice(0, requestedCount);
                       })() : item.imageResultSlots,
                       retryingFailedImageIndexes: meta.mode === "image" ? Array.from(new Set([...(item.retryingFailedImageIndexes ?? []), failedIndex])) : item.retryingFailedImageIndexes,
                       retryingFailedImageStartedAt: meta.mode === "image" ? { ...(item.retryingFailedImageStartedAt ?? {}), [failedIndex]: retryStartedAt } : item.retryingFailedImageStartedAt,
@@ -9018,25 +9691,66 @@ export function ChatWorkbench() {
   }, [submitFeedback]);
 
   const addFilesToInput = useCallback(async (files: File[]) => {
-    const allowedImageCount = MAX_UPLOADED_IMAGES - activeUploadedImages.length;
-    const allowedDocumentCount = MAX_UPLOADED_DOCUMENTS - activeUploadedFiles.length;
-    const allImageFiles = files.filter((file) => file.type.startsWith("image/"));
-    const allDocumentFiles = files.filter((file) => !file.type.startsWith("image/") && isSupportedDocumentFile(file));
-    const unsupportedFiles = files.filter((file) => !file.type.startsWith("image/") && !isSupportedDocumentFile(file));
-    const imageFiles = allImageFiles.slice(0, Math.max(0, allowedImageCount));
-    const documentFiles = allDocumentFiles.slice(0, Math.max(0, allowedDocumentCount));
+    const tips = new Set<string>();
+    const imageFiles: File[] = [];
+    const documentFiles: File[] = [];
+    let acceptedImageCount = 0;
+    let acceptedDocumentCount = 0;
+    const maxImages = currentUploadRule.image.maxCount;
+    const maxDocuments = currentUploadRule.document.maxCount;
+    const remainingImages = Math.max(0, maxImages - activeUploadedImages.length);
+    const remainingDocuments = Math.max(0, maxDocuments - activeUploadedFiles.length);
 
-    if (allImageFiles.length > allowedImageCount) {
-      showInputTip("@或上传最多支持10张图片");
+    for (const file of files) {
+      const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : getUploadKindFromFileName(file.name || file.type);
+      const extension = getFileExtension(file.name) || file.type.split("/")[1]?.toLowerCase() || "";
+
+      if (kind === "image") {
+        if (!currentUploadRule.image.enabled) {
+          tips.add("当前模型不支持上传图片");
+        } else if (!currentUploadRule.image.formats.includes(extension)) {
+          tips.add("当前模型不支持该图片格式");
+        } else if (file.size > currentUploadRule.image.maxSizeMb * 1024 * 1024) {
+          tips.add(`当前模型支持的单张图片最大为 ${currentUploadRule.image.maxSizeMb}MB`);
+        } else if (acceptedImageCount >= remainingImages) {
+          tips.add(`当前模型最多支持 ${maxImages} 张参考图，不能上传更多图片`);
+        } else {
+          imageFiles.push(file);
+          acceptedImageCount += 1;
+        }
+        continue;
+      }
+
+      if (kind === "document") {
+        if (!currentUploadRule.document.enabled) {
+          tips.add("当前模型不支持上传文件");
+        } else if (!currentUploadRule.document.formats.includes(extension)) {
+          tips.add("当前模型不支持该文件格式");
+        } else if (file.size > currentUploadRule.document.maxSizeMb * 1024 * 1024) {
+          tips.add(`当前模型支持的单个文件最大为 ${currentUploadRule.document.maxSizeMb}MB`);
+        } else if (acceptedDocumentCount >= remainingDocuments) {
+          tips.add(`当前模型最多支持 ${maxDocuments} 个文件`);
+        } else {
+          documentFiles.push(file);
+          acceptedDocumentCount += 1;
+        }
+        continue;
+      }
+
+      if (kind === "video") {
+        tips.add(currentUploadRule.video.enabled ? "参考视频需要服务器公网链接，当前本地环境暂不支持" : "当前模型不支持上传视频");
+        continue;
+      }
+
+      if (kind === "audio") {
+        tips.add(currentUploadRule.audio.enabled ? "参考音频需要服务器公网链接，当前本地环境暂不支持" : "当前模型不支持上传音频");
+        continue;
+      }
+
+      tips.add("暂不支持该文件类型");
     }
 
-    if (allDocumentFiles.length > allowedDocumentCount) {
-      showInputTip("文件数量最多8个");
-    }
-
-    if (unsupportedFiles.length > 0) {
-      showInputTip("暂不支持该文件类型");
-    }
+    Array.from(tips).slice(0, 3).forEach((tip) => showInputTip(tip));
 
     if (documentFiles.length > 0) {
       const documentEntries = documentFiles.map(createUploadedDocumentEntry);
@@ -9045,7 +9759,7 @@ export function ChatWorkbench() {
           if (session.id !== activeSessionId) return session;
           const existingFiles = session.uploadedFiles ?? [];
           const existingKeys = new Set(existingFiles.map(getUploadedFileStorageValue));
-          const nextFiles = [...existingFiles, ...documentEntries.filter((file) => !existingKeys.has(file.storageName))].slice(0, MAX_UPLOADED_DOCUMENTS);
+          const nextFiles = [...existingFiles, ...documentEntries.filter((file) => !existingKeys.has(file.storageName))].slice(0, maxDocuments);
           return { ...session, uploadedFiles: nextFiles };
         }),
       );
@@ -9070,7 +9784,7 @@ export function ChatWorkbench() {
 
     const images = await Promise.all(imageFiles.map(readFileAsUploadedImage));
     addActiveUploadedImages(images);
-  }, [activeSessionId, activeUploadedFiles.length, activeUploadedImages.length, addActiveUploadedImages, showInputTip]);
+  }, [activeSessionId, activeUploadedFiles.length, activeUploadedImages.length, addActiveUploadedImages, currentUploadRule, showInputTip]);
 
   const hasDraggedFiles = (event: DragEvent) => Array.from(event.dataTransfer.types).includes("Files");
   const handleChatDragEnter = (event: DragEvent) => {
@@ -9169,8 +9883,8 @@ export function ChatWorkbench() {
   const hasAtAssetOptions = atAssetGroups.some((group) => group.assets.length > 0) && isAtAssetMenuOpen;
   const activeAtAssetGroup = atAssetGroups.find((group) => group.type === atAssetFilter && group.assets.length > 0) ?? atAssetGroups.find((group) => group.assets.length > 0);
   const insertAssetReference = (asset: AssetItem) => {
-    if (activeUploadedImages.length >= MAX_UPLOADED_IMAGES && !activeUploadedImages.some((image) => image.url === asset.url)) {
-      showInputTip("@或上传最多支持10张图片");
+    if (activeUploadedImages.length >= currentMaxReferenceImages && !activeUploadedImages.some((image) => image.url === asset.url)) {
+      showInputTip(`当前模型最多支持 ${currentMaxReferenceImages} 张参考图，不能上传更多图片`);
       setIsAtAssetMenuOpen(false);
       return;
     }
@@ -9183,6 +9897,12 @@ export function ChatWorkbench() {
     focusEditorAt(Math.min(MAX_DRAFT_INPUT_LENGTH, insertBase.length + referenceText.length));
   };
   const insertCharacterAssetReference = (asset: AssetItem) => {
+    if (assetGenerateReferenceImages.length >= assetGenerateMaxReferenceImages && !assetGenerateReferenceImages.some((image) => image.url === asset.url)) {
+      showInputTip(`当前模型最多支持 ${assetGenerateMaxReferenceImages} 张参考图，不能上传更多图片`);
+      setIsCharacterAtAssetMenuOpen(false);
+      return;
+    }
+
     const currentCursor = getCurrentCharacterPromptCursor();
     const currentAtQuery = getAtQueryAtCursor(characterGeneratePrompt, currentCursor);
     const insertBase = currentAtQuery ? characterGeneratePrompt.slice(0, currentAtQuery.index) : characterGeneratePrompt.slice(0, currentCursor);
@@ -9280,7 +10000,7 @@ export function ChatWorkbench() {
               originalPrompt: rawPrompt,
               conversationId: activeSessionIdValue,
               conversationTitle: activeSession?.title,
-              requestId: crypto.randomUUID(),
+              requestId: createClientId(),
               metadata: { creditSource: "prompt_optimization", originalPrompt: rawPrompt, recordFailure: true },
             }),
           });
@@ -9314,7 +10034,7 @@ export function ChatWorkbench() {
 
       return [
         {
-          id: crypto.randomUUID(),
+          id: createClientId(),
           type,
           name,
           systemName: name,
@@ -9342,10 +10062,14 @@ export function ChatWorkbench() {
       return;
     }
 
-    const requestId = crypto.randomUUID();
+    const requestId = createClientId();
     const jobId = activeAssetGenerateJobId && characterGenerateResult.status === "failed" ? activeAssetGenerateJobId : requestId;
     const startedAt = Date.now();
     const references = getCharacterPromptReferences();
+    if (references.length > assetGenerateMaxReferenceImages) {
+      showInputTip(`当前模型最多支持 ${assetGenerateMaxReferenceImages} 张参考图，不能上传更多图片`);
+      return;
+    }
     const referenceHint = getReferenceHint(references);
     const ruleText = isShotGeneration ? getShotGenerationRuleText(characterGenerateStyle, characterGenerateRatio, characterGenerateModel) : isSceneGeneration ? getSceneGenerationRuleText(characterGenerateStyle, characterGenerateRatio, characterGenerateModel) : getCharacterGenerationRuleText(characterGenerateRatio, characterGenerateStyle, characterGenerateModel);
     const styledPrompt = enforceAssetGenerateStylePrompt(rawPrompt, characterGenerateStyle);
@@ -9405,7 +10129,7 @@ export function ChatWorkbench() {
       });
       const data = await readJson<{ images?: string[]; imageDimensions?: Record<string, ImageDimensions>; usage?: UsageMeta; credit?: CreditMeta; billableImageCount?: number }>(response);
       const url = data.images?.[0];
-      if (!url) throw new Error("图片平台没有返回图片，请稍后再试。");
+      if (!url) throw new Error(GENERIC_MEDIA_ERROR_MESSAGE);
 
       const dimensions = data.imageDimensions?.[url];
       addSessionUsage(activeSessionIdValue, data.usage);
@@ -9419,7 +10143,7 @@ export function ChatWorkbench() {
       addCharacterGeneratedAsset(url, rawPrompt, dimensions, jobSnapshot.type, previewMetaSnapshot);
       notifyGenerationCompleteOnce(requestId, "图片生成已完成");
     } catch (error) {
-      const message = normalizeMediaErrorText(toUserErrorMessage(error, "图片生成失败，请稍后再试。"), "image") ?? "图片生成失败，请稍后再试。";
+        const message = normalizeMediaErrorText(toUserErrorMessage(error, GENERIC_MEDIA_ERROR_MESSAGE), "image") ?? GENERIC_MEDIA_ERROR_MESSAGE;
       const failedResult: CharacterGenerationResult = { status: "failed", error: message };
       console.error("[asset-generation] image request failed", {
         jobId,
@@ -9486,7 +10210,7 @@ export function ChatWorkbench() {
               originalPrompt: rawPrompt,
               conversationId: activeSessionIdValue,
               conversationTitle: activeSession?.title,
-              requestId: crypto.randomUUID(),
+              requestId: createClientId(),
               metadata: { creditSource: "prompt_optimization", originalPrompt: rawPrompt, recordFailure: true },
             }),
           });
@@ -9563,7 +10287,7 @@ export function ChatWorkbench() {
               messages: [
                 ...session.messages,
                 {
-                  id: crypto.randomUUID(),
+                  id: createClientId(),
                   role: "system",
                   content: `当前已切换至${tier === "advanced" ? "高级" : "普通"}模式`,
                   createdAt: Date.now(),
@@ -9576,8 +10300,8 @@ export function ChatWorkbench() {
   };
 
   return (
-    <section className={isSidebarCollapsed ? "grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white" : "grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[262px_minmax(0,1fr)]"}>
-      <aside className={isSidebarCollapsed ? "hidden" : "hidden h-screen min-h-0 flex-col overflow-hidden border-r border-[#e5e5e5] bg-[#f9f9f9] px-3 pb-1 pt-4 lg:flex"}>
+    <section className={isSidebarCollapsed ? "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white" : "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[262px_minmax(0,1fr)]"}>
+      <aside className={isSidebarCollapsed ? "hidden" : "flashmuse-sidebar relative z-10 hidden h-screen min-h-0 flex-col overflow-visible border-r border-[#e5e5e5] bg-[#f9f9f9] px-3 pb-1 pt-4 lg:flex"}>
           <div className="mb-5 flex items-center gap-3 px-2">
           <div className="flex h-[50px] w-[50px] items-center justify-center">
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -9585,17 +10309,17 @@ export function ChatWorkbench() {
           </div>
           <div className="flex min-w-0 flex-col justify-center">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/home-assets/logo-text.png" alt="闪念" className="w-auto object-contain" style={{ height: 26 }} />
+            <img src="/home-assets/logo-text.png" alt="闪念" className="flashmuse-logo-text w-auto object-contain" style={{ height: 26 }} />
             <div className="mt-1 whitespace-nowrap text-xs leading-4 text-[#8a8a8a]">AI影片助手</div>
           </div>
         </div>
         <div className="mb-[22px] space-y-[5px]">
-          <button type="button" onClick={() => setActivePanel("chat")} className={activePanel === "chat" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#555555] transition hover:bg-[#ececec]"}>
+          <button type="button" onClick={() => { setStoredWorkspaceUiState({ activePanel: "chat" }); setActivePanel("chat"); }} className={activePanel === "chat" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#555555] transition hover:bg-[#ececec]"}>
             {activePanel === "chat" ? <RiChatSmileAiLine className="h-5 w-5 shrink-0 text-[#111111]" aria-hidden="true" /> : <RiChat3Line className="h-5 w-5 shrink-0 text-[#555555]" aria-hidden="true" />}
             <span className="text-[13px] leading-[1.2]">对话模式</span>
             {activePanel !== "chat" && hasAnyConversationRunning ? <span className="ml-auto flex w-7 shrink-0 justify-end"><HaloPulseIndicator /></span> : null}
           </button>
-          <button type="button" onClick={() => setActivePanel("workflow")} className={activePanel === "workflow" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#8a8a8a] transition hover:bg-[#ececec]"}>
+          <button type="button" onClick={() => { setStoredWorkspaceUiState({ activePanel: "workflow" }); setActivePanel("workflow"); }} className={activePanel === "workflow" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#8a8a8a] transition hover:bg-[#ececec]"}>
             {activePanel === "workflow" ? <RiGitMergeLine className="h-5 w-5 shrink-0 text-[#111111]" aria-hidden="true" /> : <RiGitPullRequestLine className="h-5 w-5 shrink-0 text-[#8a8a8a]" aria-hidden="true" />}
             <span className="text-[13px] leading-[1.2]">工作流模式</span>
             <span className="ml-auto rounded-full bg-white px-2 py-0.5 text-[11px] text-[#8a8a8a] ring-1 ring-[#e3e3e3]">未开放</span>
@@ -9603,9 +10327,9 @@ export function ChatWorkbench() {
           <button type="button" onClick={() => {
             setAssetRenderLimit(ASSET_RENDER_PAGE_SIZE);
             setShowScrollToBottom(false);
-            setAssetFilter("character_image");
+            setPreviewDocumentFile(null);
+            setStoredWorkspaceUiState({ activePanel: "assets", assetFilter });
             setActivePanel("assets");
-            requestAnimationFrame(() => chatScrollRef.current?.scrollTo({ top: 0, behavior: "auto" }));
           }} className={activePanel === "assets" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#555555] transition hover:bg-[#ececec]"}>
             {activePanel === "assets" ? <RiFolderOpenLine className="h-5 w-5 shrink-0 text-[#111111]" aria-hidden="true" /> : <RiFolderLine className="h-5 w-5 shrink-0 text-[#555555]" aria-hidden="true" />}
             <span className="text-[13px] leading-[1.2]">资产库</span>
@@ -9631,6 +10355,8 @@ export function ChatWorkbench() {
                     type="button"
                     onClick={() => {
                       setAssetRenderLimit(ASSET_RENDER_PAGE_SIZE);
+                      setPreviewDocumentFile(null);
+                      setStoredWorkspaceUiState({ activePanel: "assets", assetFilter: item.value, assetScrollTopByFilter: { ...assetScrollTopByFilter, [item.value]: 0 } });
                       setAssetFilter(item.value);
                       requestAnimationFrame(() => chatScrollRef.current?.scrollTo({ top: 0, behavior: "auto" }));
                     }}
@@ -9647,8 +10373,9 @@ export function ChatWorkbench() {
                 <span className="w-10 shrink-0 text-right">{assets.filter(isConversationAsset).length}</span>
               </div>
               {[
-                { label: "对话流图片", value: "conversation_images" as const, count: assets.filter((asset) => isConversationAsset(asset) && !isVideoAsset(asset)).length, icon: RiImageLine },
-                { label: "对话流视频", value: "conversation_videos" as const, count: assets.filter((asset) => isConversationAsset(asset) && isVideoAsset(asset)).length, icon: RiFilmLine },
+                { label: "上传图片", value: "conversation_uploads" as const, count: assets.filter(isConversationUploadedAsset).length, icon: ImageUploadLineIcon },
+                { label: "生成图片", value: "conversation_images" as const, count: assets.filter((asset) => isConversationAsset(asset) && !isVideoAsset(asset) && !isUploadedAssetUrl(asset.url)).length, icon: RiImageAiLine },
+                { label: "生成视频", value: "conversation_videos" as const, count: assets.filter((asset) => isConversationAsset(asset) && isVideoAsset(asset)).length, icon: RiFilmAiLine },
               ].map((item) => {
                 const isActive = assetFilter === item.value;
                 const AssetIcon = item.icon;
@@ -9659,6 +10386,8 @@ export function ChatWorkbench() {
                     type="button"
                     onClick={() => {
                       setAssetRenderLimit(ASSET_RENDER_PAGE_SIZE);
+                      setPreviewDocumentFile(null);
+                      setStoredWorkspaceUiState({ activePanel: "assets", assetFilter: item.value, assetScrollTopByFilter: { ...assetScrollTopByFilter, [item.value]: 0 } });
                       setAssetFilter(item.value);
                       requestAnimationFrame(() => chatScrollRef.current?.scrollTo({ top: 0, behavior: "auto" }));
                     }}
@@ -9684,6 +10413,8 @@ export function ChatWorkbench() {
                     type="button"
                     onClick={() => {
                       setAssetRenderLimit(ASSET_RENDER_PAGE_SIZE);
+                      setPreviewDocumentFile(null);
+                      setStoredWorkspaceUiState({ activePanel: "assets", assetFilter: item.value, assetScrollTopByFilter: { ...assetScrollTopByFilter, [item.value]: 0 } });
                       setAssetFilter(item.value);
                       requestAnimationFrame(() => chatScrollRef.current?.scrollTo({ top: 0, behavior: "auto" }));
                     }}
@@ -9837,7 +10568,7 @@ export function ChatWorkbench() {
           <div aria-hidden="true" className="absolute bottom-0 left-[-12px] right-[-12px] top-[-6px] bg-[#f9f9f9]" />
           <div aria-hidden="true" style={{ position: "absolute", left: -12, right: -12, top: -6, height: 1, background: "#e5e5e5", zIndex: 1 }} />
           {isUserMenuOpen ? (
-            <div onClick={(event) => event.stopPropagation()} className="absolute bottom-[60px] left-[calc(50%-1px)] z-40 w-[222px] -translate-x-1/2 overflow-hidden rounded-[12px] border border-[#e0e0e0] bg-white pt-2 shadow-[0_10px_28px_rgba(0,0,0,0.12)]">
+            <div onClick={(event) => event.stopPropagation()} className="absolute bottom-[60px] left-[calc(50%-1px)] z-[9999] w-[222px] -translate-x-1/2 overflow-visible rounded-[12px] border border-[#e0e0e0] bg-white pt-2 shadow-[0_10px_28px_rgba(0,0,0,0.12)]">
               <button type="button" onClick={() => openUserDialog("profile")} className="mx-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-[6px] px-2 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#e9e9e9]">
                 <RiAccountCircleLine className="h-[18px] w-[18px] text-[#777777]" aria-hidden="true" />
                 <span style={{ fontSize: 13 }}>用户信息</span>
@@ -9850,11 +10581,38 @@ export function ChatWorkbench() {
                 <RiShieldUserLine className="h-[18px] w-[18px] text-[#777777]" aria-hidden="true" />
                 <span style={{ fontSize: 13 }}>帐号安全</span>
               </button>
+              <div className="relative mx-2" onMouseEnter={() => setIsThemeMenuOpen(false)} onMouseLeave={() => setIsThemeMenuOpen(false)}>
+                <button type="button" disabled aria-disabled="true" onClick={(event) => { event.stopPropagation(); setIsThemeMenuOpen(false); }} className="flex h-11 w-full cursor-not-allowed items-center gap-3 rounded-[6px] px-2 text-left text-[12px] font-medium text-[#aaaaaa] opacity-70">
+                  <ThemeModeIcon className="h-[18px] w-[18px] text-[#b0b0b0]" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13 }}>{themeModeLabel}</span>
+                  <RiArrowRightSLine className="h-[18px] w-[18px] shrink-0 text-[#b0b0b0]" aria-hidden="true" />
+                </button>
+                {isThemeMenuOpen ? (
+                  <div className="absolute bottom-0 left-[calc(100%+8px)] z-[10000] w-[220px] rounded-[12px] border border-[#e0e0e0] bg-white p-2 shadow-[0_10px_28px_rgba(0,0,0,0.12)]">
+                    {([
+                      { value: "light" as const, label: "浅色模式", icon: RiSunLine },
+                      { value: "dark" as const, label: "深色模式", icon: RiMoonLine },
+                      { value: "system" as const, label: `跟随系统 · ${resolvedTheme === "dark" ? "深色" : "浅色"}`, icon: RiComputerLine },
+                    ]).map((item) => {
+                      const ItemIcon = item.icon;
+                      const selected = themeMode === item.value;
+
+                      return (
+                        <button key={item.value} type="button" onClick={(event) => { event.stopPropagation(); setThemeMode(item.value); setIsThemeMenuOpen(false); setIsUserMenuOpen(false); }} className="flex h-10 w-full items-center gap-3 rounded-[8px] px-2 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#e9e9e9]">
+                          <ItemIcon className="h-[18px] w-[18px] shrink-0 text-[#333333]" aria-hidden="true" />
+                          <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13 }}>{item.label}</span>
+                          {selected ? <RiCheckLine className="h-[18px] w-[18px] shrink-0 text-[#111111]" aria-hidden="true" /> : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
               <button type="button" onClick={() => openUserDialog("settings")} className="mx-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-[6px] px-2 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#e9e9e9]">
                 <RiSettingsLine className="h-[18px] w-[18px] text-[#777777]" aria-hidden="true" />
                 <span style={{ fontSize: 13 }}>设置</span>
               </button>
-              <div className="mt-2 border-t border-[#e7e7e7] bg-[#f4f4f4]">
+              <div className="mt-2 overflow-hidden rounded-b-[12px] border-t border-[#e7e7e7] bg-[#f4f4f4]">
                 <button type="button" onClick={() => void logoutUser()} className="flex h-14 w-full items-center gap-3 px-3 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#eeeeee]">
                   <RiLogoutBoxRLine className="h-[18px] w-[18px] text-[#777777]" aria-hidden="true" />
                   <span style={{ fontSize: 13 }}>退出登录</span>
@@ -9891,7 +10649,7 @@ export function ChatWorkbench() {
       </aside>
 
       <section
-        className="relative flex h-screen min-h-screen flex-col bg-white"
+        className="flashmuse-main relative flex h-screen min-h-screen flex-col bg-white"
         style={{ marginRight: previewDocumentFile ? (previewDocumentWidth || getDefaultDocumentPreviewWidth()) : 0 }}
         onDragEnter={handleChatDragEnter}
         onDragOver={handleChatDragOver}
@@ -9922,7 +10680,7 @@ export function ChatWorkbench() {
             ) : null}
           </div>
 
-          {activePanel === "chat" ? <div className="absolute right-4 top-1/2 flex -translate-y-1/2 items-center justify-end"><UsageSummaryButton summary={activeSession?.usageSummary} /></div> : null}
+          {activePanel === "chat" ? <div className="absolute right-4 top-1/2 flex -translate-y-1/2 items-center justify-end"><UsageSummaryButton summary={activeSession?.usageSummary} mediaCounts={getSessionMediaCounts(activeSession)} /></div> : null}
 
         </div>
 
@@ -9942,9 +10700,9 @@ export function ChatWorkbench() {
           ) : null}
           <div ref={chatScrollRef} onScroll={updateScrollToBottomButton} className="yinzao-chat-scroll h-full overflow-y-auto bg-white px-4 py-8 pb-6 sm:px-6 lg:px-8">
           {activePanel === "assets" ? (
-            <AssetManagementPanel assets={assets} assetFilter={assetFilter} renderLimit={assetRenderLimit} openAssetActionMenuId={openAssetActionMenuId} now={timerNow} pendingAssetGenerateJobs={assetGenerateJobs} onOpenPendingGenerate={openAssetGenerateJob} onDismissGenerateJob={(jobId) => setAssetGenerateJobs((current) => current.filter((job) => job.id !== jobId))} onOpenUpload={openAssetUploadDialog} onPreview={(asset) => setPreviewAsset(enrichAssetPreviewMeta(asset))} onUseAsset={(asset) => {
-              if (activeUploadedImages.length >= MAX_UPLOADED_IMAGES && !activeUploadedImages.some((image) => image.url === asset.url)) {
-                showInputTip("@或上传最多支持10张图片");
+            <AssetManagementPanel assets={assets} assetFilter={assetFilter} renderLimit={assetRenderLimit} openAssetActionMenuId={openAssetActionMenuId} now={timerNow} pendingAssetGenerateJobs={assetGenerateJobs} onOpenPendingGenerate={openAssetGenerateJob} onDismissGenerateJob={(jobId) => setAssetGenerateJobs((current) => current.filter((job) => job.id !== jobId))} onOpenUpload={openAssetUploadDialog} onPreview={(asset) => { setPreviewDocumentFile(null); setPreviewAsset(enrichAssetPreviewMeta(asset)); }} onUseAsset={(asset) => {
+              if (activeUploadedImages.length >= currentMaxReferenceImages && !activeUploadedImages.some((image) => image.url === asset.url)) {
+                showInputTip(`当前模型最多支持 ${currentMaxReferenceImages} 张参考图，不能上传更多图片`);
                 return;
               }
 
@@ -10053,20 +10811,25 @@ export function ChatWorkbench() {
                   );
                 }
 
-                const lastAssistantMessage = [...messages].reverse().find((item) => item.role === "assistant");
-                const activeSuggestionMessageId = lastAssistantMessage && (lastAssistantMessage.mode === "agent" || isAgentGeneratedMedia(lastAssistantMessage)) ? lastAssistantMessage.id : "";
+                const lastMessage = messages[messages.length - 1];
+                const activeSuggestionMessageId = lastMessage?.role === "assistant" && (lastMessage.mode === "agent" || isAgentGeneratedMedia(lastMessage)) ? lastMessage.id : "";
                 const isAssistantMessageComplete = message.role !== "assistant" || message.mode === "image" || message.mode === "video" || completedTypingMessageIds.has(message.id);
                 const messageType = getMessageType(message);
                 const reaction = messageReactions[message.id];
                 const issueFeedback = messageIssueFeedback[message.id];
                 const activeMessagePendingRequest = activePendingRequests.find((request) => request.id === message.requestId);
                 const imagePendingCount = message.mode === "image" ? Math.max(0, message.pendingImageCount ?? 0) : 0;
-                const imageFailedCount = message.mode === "image" ? Math.max(0, message.failedImageCount ?? 0) : 0;
+                const slotFailedImageCount = message.imageResultSlots?.filter((slot) => slot.type === "failed").length ?? 0;
+                const imageFailedCount = message.mode === "image" ? Math.max(0, message.failedImageCount ?? 0, slotFailedImageCount) : 0;
                 const videoPendingCount = message.mode === "video" ? Math.max(0, message.pendingVideoCount ?? 0) : 0;
                 const videoFailedCount = message.mode === "video" ? Math.max(0, message.failedVideoCount ?? 0) : 0;
                 const allImageFailuresRetrying = message.mode === "image" && imageFailedCount > 0 && (message.retryingFailedImageIndexes?.length ?? 0) >= imageFailedCount;
                 const allVideoFailuresRetrying = message.mode === "video" && videoFailedCount > 0 && (message.retryingFailedVideoIndexes?.length ?? 0) >= videoFailedCount;
-                const mediaErrorText = allImageFailuresRetrying || allVideoFailuresRetrying ? undefined : normalizeMediaErrorText(message.error, message.mode) ?? (message.mode === "image" && imagePendingCount === 0 && imageFailedCount > 0 ? "图片生成失败，请稍后再试。" : message.mode === "video" && videoPendingCount === 0 && videoFailedCount > 0 ? "视频生成失败，请稍后再试。" : undefined);
+                const normalizedMediaErrorReasons = (message.mediaErrorReasons ?? []).map((reason) => normalizeMediaErrorText(reason, message.mode)).filter((reason): reason is string => Boolean(reason));
+                const mediaErrorReasonCount = normalizedMediaErrorReasons.length;
+                const preferredMediaErrorIndex = Math.max(0, normalizedMediaErrorReasons.findIndex((reason) => !isGenericMediaReason(reason)));
+                const selectedMediaErrorIndex = mediaErrorReasonCount > 0 ? Math.min(mediaErrorPageIndexes[message.id] ?? preferredMediaErrorIndex, mediaErrorReasonCount - 1) : 0;
+                const mediaErrorText = allImageFailuresRetrying || allVideoFailuresRetrying ? undefined : normalizedMediaErrorReasons[selectedMediaErrorIndex] ?? normalizeMediaErrorText(message.error, message.mode) ?? (message.mode === "image" && imagePendingCount === 0 && imageFailedCount > 0 ? GENERIC_MEDIA_ERROR_MESSAGE : message.mode === "video" && videoPendingCount === 0 && videoFailedCount > 0 ? GENERIC_MEDIA_ERROR_MESSAGE : undefined);
                 const isActiveVideoPending = activeMessagePendingRequest?.mode === "video" && videoPendingCount > 0 && !message.error;
                 const isActiveImagePending = activeMessagePendingRequest?.mode === "image" && imagePendingCount > 0;
                 const isActiveMediaPending = isActiveVideoPending || isActiveImagePending;
@@ -10077,10 +10840,12 @@ export function ChatWorkbench() {
                 const imageVariantCount = imageVariantGroups.length;
                 const selectedImageVariantIndex = imageVariantCount > 0 ? Math.min(imageVariantIndexes[message.id] ?? 0, imageVariantCount - 1) : 0;
                 const selectedImageVariant = imageVariantGroups[selectedImageVariantIndex];
-                const displayedMessageImages = isAgentMediaMessage ? message.images ?? [] : selectedImageVariant?.images ?? message.images ?? [];
-                const displayedImageResultSlots = message.imageResultSlots && selectedImageVariant?.slotIndexes ? selectedImageVariant.slotIndexes.map((slotIndex) => message.imageResultSlots?.[slotIndex]).filter((slot): slot is ImageResultSlot => Boolean(slot)) : message.imageResultSlots;
+                const displayImageResultSlots = getDisplayImageResultSlotsForMessage(message);
+                const hasDisplayedImageResultSlots = (displayImageResultSlots?.length ?? 0) > 0;
+                const displayedMessageImages = isAgentMediaMessage ? getDisplayImagesForMessage(message) : selectedImageVariant?.images ?? getDisplayImagesForMessage(message);
+                const displayedImageResultSlots = displayImageResultSlots;
                 const showImageStatusOnCurrentPage = selectedImageVariantIndex === 0 || imageVariantCount === 0;
-                const displayedPendingImageCount = showImageStatusOnCurrentPage ? imagePendingCount : 0;
+                const displayedPendingImageCount = showImageStatusOnCurrentPage && !displayedImageResultSlots ? imagePendingCount : 0;
                 const displayedFailedImageCount = showImageStatusOnCurrentPage ? imageFailedCount : 0;
                 const displayedMessageVideos = getMessageVideos(message);
                 const agentPromptItems = isAgentMediaMessage ? getAgentMediaPromptItems(message) : [];
@@ -10095,6 +10860,10 @@ export function ChatWorkbench() {
                 const setAgentPromptPageIndex = (nextIndex: number) => {
                   if (agentPromptItems.length <= 1) return;
                   setAgentPromptPageIndexes((current) => ({ ...current, [message.id]: (nextIndex + agentPromptItems.length) % agentPromptItems.length }));
+                };
+                const setMediaErrorPageIndex = (nextIndex: number) => {
+                  if (mediaErrorReasonCount <= 1) return;
+                  setMediaErrorPageIndexes((current) => ({ ...current, [message.id]: (nextIndex + mediaErrorReasonCount) % mediaErrorReasonCount }));
                 };
 
                 return (
@@ -10130,13 +10899,13 @@ export function ChatWorkbench() {
                       <>
                         <UploadedDocumentStrip files={message.uploadedFiles} onPreview={setPreviewDocumentFile} />
                         <ReferenceThumbnailStrip references={userImageReferences} onUseReference={(reference) => {
-                          if (activeUploadedImages.length >= MAX_UPLOADED_IMAGES && !activeUploadedImages.some((image) => image.url === reference.url)) {
-                            showInputTip("@或上传最多支持10张图片");
+                          if (activeUploadedImages.length >= currentMaxReferenceImages && !activeUploadedImages.some((image) => image.url === reference.url)) {
+                            showInputTip(`当前模型最多支持 ${currentMaxReferenceImages} 张参考图，不能上传更多图片`);
                             return;
                           }
 
                           const cursor = Math.min(Math.max(0, draftCursorOffset), activeInput.length);
-                          addActiveUploadedImages([{ id: crypto.randomUUID(), name: reference.name, referenceName: reference.name, url: reference.url, source: "asset" }], { draftBase: activeInput.slice(0, cursor), draftSuffix: activeInput.slice(cursor), insertReferenceText: true });
+                          addActiveUploadedImages([{ id: createClientId(), name: reference.name, referenceName: reference.name, url: reference.url, source: "asset" }], { draftBase: activeInput.slice(0, cursor), draftSuffix: activeInput.slice(cursor), insertReferenceText: true });
                           focusEditorAt(cursor + reference.name.length + 2);
                         }} />
                       </>
@@ -10157,20 +10926,20 @@ export function ChatWorkbench() {
                       />
                     ) : null}
 
-                     {message.role === "assistant" && message.mode === "image" && isAssistantMessageComplete && ((message.images?.length ?? 0) > 0 || imagePendingCount > 0 || imageFailedCount > 0) ? (
-                        <div className="mt-2">
-                            {displayedImageResultSlots ? (
-                              <ImageResultSlotStrip slots={displayedImageResultSlots} imageIndexes={selectedImageVariant?.imageIndexes} pendingCount={displayedPendingImageCount} createdAt={message.createdAt} now={timerNow} rounded={isAgentMediaMessage} isRetrying={activeMessagePendingRequest?.mode === "image"} onRetryFailed={(failedIndex) => retryFailedMedia(message, failedIndex)} onLoadedDimensions={(url, dimensions) => updateMessageImageDimensions(activeSession?.id ?? "", message.id, url, dimensions)} onPreview={(url, imageIndex) => setPreviewAsset({ id: `${message.id}-${imageIndex}`, type: "other", name: getCanonicalMediaName(message, url, `生成图片${imageIndex + 1}`), url, sourcePrompt: getImageSourcePrompt(message, url), previewMeta: getPreviewMediaMeta(message, url), sessionId: activeSession?.id ?? "", messageId: message.id, createdAt: message.createdAt ?? Date.now() })} />
-                            ) : (
-                              <ImageResultStrip images={displayedMessageImages} imageIndexes={selectedImageVariant?.imageIndexes} pendingCount={displayedPendingImageCount} failedCount={displayedFailedImageCount} retryingFailedIndexes={message.retryingFailedImageIndexes} retryingFailedStartedAt={message.retryingFailedImageStartedAt} createdAt={message.createdAt} now={timerNow} rounded={isAgentMediaMessage} onRetryFailed={(failedIndex) => retryFailedMedia(message, failedIndex)} onLoadedDimensions={(url, dimensions) => updateMessageImageDimensions(activeSession?.id ?? "", message.id, url, dimensions)} onPreview={(url, imageIndex) => setPreviewAsset({ id: `${message.id}-${imageIndex}`, type: "other", name: getCanonicalMediaName(message, url, `生成图片${imageIndex + 1}`), url, sourcePrompt: getImageSourcePrompt(message, url), previewMeta: getPreviewMediaMeta(message, url), sessionId: activeSession?.id ?? "", messageId: message.id, createdAt: message.createdAt ?? Date.now() })} />
-                            )}
-                         </div>
-                       ) : null}
+                      {message.role === "assistant" && message.mode === "image" && isAssistantMessageComplete && ((message.images?.length ?? 0) > 0 || hasDisplayedImageResultSlots || imagePendingCount > 0 || imageFailedCount > 0) ? (
+                         <LazyMediaMount height={250} className="mt-2">
+                             {displayedImageResultSlots ? (
+                               <ImageResultSlotStrip slots={displayedImageResultSlots} imageIndexes={selectedImageVariant?.imageIndexes} pendingCount={displayedPendingImageCount} createdAt={message.createdAt} now={timerNow} rounded={isAgentMediaMessage} isRetrying={activeMessagePendingRequest?.mode === "image"} onRetryFailed={(failedIndex) => retryFailedMedia(message, failedIndex)} onLoadedDimensions={(url, dimensions) => updateMessageImageDimensions(activeSession?.id ?? "", message.id, url, dimensions)} onPreview={(url, imageIndex) => setPreviewAsset({ id: `${message.id}-${imageIndex}`, type: "other", name: getCanonicalMediaName(message, url, `生成图片${imageIndex + 1}`), url, sourcePrompt: getImageSourcePrompt(message, url), previewMeta: getPreviewMediaMeta(message, url), sessionId: activeSession?.id ?? "", messageId: message.id, createdAt: message.createdAt ?? Date.now() })} />
+                             ) : (
+                               <ImageResultStrip images={displayedMessageImages} imageIndexes={selectedImageVariant?.imageIndexes} pendingCount={displayedPendingImageCount} failedCount={displayedFailedImageCount} retryingFailedIndexes={message.retryingFailedImageIndexes} retryingFailedStartedAt={message.retryingFailedImageStartedAt} createdAt={message.createdAt} now={timerNow} rounded={isAgentMediaMessage} onRetryFailed={(failedIndex) => retryFailedMedia(message, failedIndex)} onLoadedDimensions={(url, dimensions) => updateMessageImageDimensions(activeSession?.id ?? "", message.id, url, dimensions)} onPreview={(url, imageIndex) => setPreviewAsset({ id: `${message.id}-${imageIndex}`, type: "other", name: getCanonicalMediaName(message, url, `生成图片${imageIndex + 1}`), url, sourcePrompt: getImageSourcePrompt(message, url), previewMeta: getPreviewMediaMeta(message, url), sessionId: activeSession?.id ?? "", messageId: message.id, createdAt: message.createdAt ?? Date.now() })} />
+                             )}
+                          </LazyMediaMount>
+                        ) : null}
 
                      {message.role === "assistant" && message.mode === "video" && isAssistantMessageComplete && (displayedMessageVideos.length > 0 || videoFailedCount > 0 || (isActiveVideoPending && videoPendingCount > 0)) ? (
-                       <div className={isAgentMediaMessage ? "mt-2 grid max-w-[1006px] grid-cols-2 gap-0.5" : "mt-2 flex max-w-full flex-wrap gap-0.5"}>
+                       <LazyMediaMount height={360} className={isAgentMediaMessage ? "mt-2 grid max-w-[1006px] grid-cols-2 gap-0.5" : "mt-2 flex max-w-full flex-wrap gap-0.5"}>
                           {displayedMessageVideos.map((url, videoIndex) => (
-                             <InlineVideoResult key={`${url}-${videoIndex}`} url={url} rounded={isAgentMediaMessage} compact={isAgentMediaMessage} onLoadedDimensions={(dimensions) => updateMessageVideoDimensions(activeSession?.id ?? "", message.id, dimensions)} onPreview={() => setPreviewAsset({ id: `${message.id}-video-${videoIndex}`, type: "shot_video", name: getCanonicalMediaName(message, url, `生成视频${videoIndex + 1}`), url, sourcePrompt: message.videoPrompts?.[url] ?? message.generationMeta?.itemPrompts?.[videoIndex] ?? message.generationMeta?.originalPrompt ?? message.content, previewMeta: getPreviewMediaMeta(message), sessionId: activeSession?.id ?? "", messageId: message.id, createdAt: message.createdAt ?? Date.now() })} />
+                             <InlineVideoResult key={`${url}-${videoIndex}`} url={url} posterUrl={getVideoPosterForMessage(message, url)} rounded={isAgentMediaMessage} compact={isAgentMediaMessage} onLoadedDimensions={(dimensions) => updateMessageVideoDimensions(activeSession?.id ?? "", message.id, dimensions)} onPreview={() => setPreviewAsset({ id: `${message.id}-video-${videoIndex}`, type: "shot_video", name: getCanonicalMediaName(message, url, `生成视频${videoIndex + 1}`), url, posterUrl: getVideoPosterForMessage(message, url), sourcePrompt: message.videoPrompts?.[url] ?? message.generationMeta?.itemPrompts?.[videoIndex] ?? message.generationMeta?.originalPrompt ?? message.content, previewMeta: getPreviewMediaMeta(message), sessionId: activeSession?.id ?? "", messageId: message.id, createdAt: message.createdAt ?? Date.now() })} />
                           ))}
                           {Array.from({ length: isActiveVideoPending ? videoPendingCount : 0 }).map((_, pendingIndex) => (
                             <MediaWaitingCard key={`video-pending-${pendingIndex}`} createdAt={message.createdAt} now={timerNow} isImage={false} index={videoPendingCount > 1 ? displayedMessageVideos.length + pendingIndex + 1 : undefined} rounded={isAgentMediaMessage} compactVideo={isAgentMediaMessage} />
@@ -10182,8 +10951,8 @@ export function ChatWorkbench() {
                               <VideoFailedCard key={`video-failed-${failedIndex}`} rounded={isAgentMediaMessage} compact={isAgentMediaMessage} onRetry={() => retryFailedMedia(message, failedIndex)} />
                             )
                           ))}
-                       </div>
-                     ) : null}
+                        </LazyMediaMount>
+                      ) : null}
 
                     {message.statusText && message.mode !== "video" && message.mode !== "image" && isAssistantMessageComplete ? (
                       isActiveMediaPending ? (
@@ -10219,7 +10988,18 @@ export function ChatWorkbench() {
                       )
                     ) : null}
 
-                    {mediaErrorText && isAssistantMessageComplete ? <div className="mt-3 text-sm text-rose-500">{mediaErrorText}</div> : null}
+                    {mediaErrorText && isAssistantMessageComplete ? (
+                      <div className="mt-3 text-sm text-rose-500">
+                        {mediaErrorReasonCount > 1 ? (
+                          <div className="mb-1 flex items-center gap-1 text-[12px] leading-5 text-rose-400">
+                            <button type="button" onClick={() => setMediaErrorPageIndex(selectedMediaErrorIndex - 1)} className="rounded px-1 leading-5 transition hover:bg-rose-50 hover:text-rose-500" aria-label="上一条失败原因">&lt;</button>
+                            <span>{selectedMediaErrorIndex + 1}/{mediaErrorReasonCount}</span>
+                            <button type="button" onClick={() => setMediaErrorPageIndex(selectedMediaErrorIndex + 1)} className="rounded px-1 leading-5 transition hover:bg-rose-50 hover:text-rose-500" aria-label="下一条失败原因">&gt;</button>
+                          </div>
+                        ) : null}
+                        <div>{mediaErrorText}</div>
+                      </div>
+                    ) : null}
                     {message.role === "assistant" && isAssistantMessageComplete ? (
                       <>
                         <div className={message.mode === "image" || message.mode === "video" ? "mt-2 flex flex-wrap items-center gap-1.5" : "mt-3 flex flex-wrap items-center gap-1.5"}>
@@ -10269,7 +11049,7 @@ export function ChatWorkbench() {
                               </div>
                             ) : null}
                           </div>
-                          <span className="ml-[10px] text-[12px] leading-8 text-[#b0b0b0]">感谢反馈 {formatMessageTime(message.createdAt)}</span>
+                          <span className="flashmuse-feedback-meta ml-[10px] text-[12px] leading-8 text-[#b0b0b0]">感谢反馈 {formatMessageTime(message.createdAt)}</span>
                         </div>
                         {message.id === activeSuggestionMessageId ? <SuggestionButtons suggestions={message.suggestions} onSelect={(suggestion) => void sendMessage(suggestion, "agent")} /> : null}
                       </>
@@ -10398,7 +11178,9 @@ export function ChatWorkbench() {
                   <div ref={uploadedImagesRowRef} onScroll={updateUploadedRowScrollState} className="yinzao-upload-row-scroll flex flex-nowrap gap-2 overflow-x-auto overflow-y-hidden scroll-smooth px-0.5">
                     {activeUploadedImages.map((image) => (
                       <div key={image.id} className="group relative h-[80px] w-[80px] shrink-0 overflow-hidden rounded-xl border border-[#e5e5e5] bg-[#f7f7f7]">
-                          <Image src={image.url} alt={image.name} width={100} height={100} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+                          <HoverImagePreview src={image.url} alt={image.name} wrapperClassName="block h-full w-full">
+                            <Image src={getMediaThumbnailUrl(image.url)} alt={image.name} width={100} height={100} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+                          </HoverImagePreview>
                         <button
                           type="button"
                           disabled={isMainInputDisabled}
@@ -10479,7 +11261,9 @@ export function ChatWorkbench() {
                   {activeAtAssetGroup?.assets.map((asset) => (
                     <button key={asset.id} type="button" onClick={() => insertAssetReference(asset)} className="flex h-12 w-full items-center gap-3 rounded-[8px] px-2 text-left transition hover:bg-[#f5f5f5]">
                       <div className="h-8 w-8 overflow-hidden rounded-[8px] bg-[#eeeeee]">
-                        <Image src={asset.url} alt={asset.name} width={32} height={32} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+                        <HoverImagePreview src={asset.url} alt={asset.name} wrapperClassName="block h-full w-full">
+                          <Image src={getMediaThumbnailUrl(asset.url)} alt={asset.name} width={32} height={32} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+                        </HoverImagePreview>
                       </div>
                       <div className="min-w-0">
                         <div className="truncate text-[13px] font-medium text-[#222222]">@{asset.name}</div>
@@ -10568,7 +11352,7 @@ export function ChatWorkbench() {
                                       messages: [
                                         ...session.messages,
                                         {
-                                          id: crypto.randomUUID(),
+                                          id: createClientId(),
                                           role: "system",
                                           content: `${modeNoticeText[option.value].title}，${modeNoticeText[option.value].description}`,
                                           mode: option.value,
@@ -10683,23 +11467,23 @@ export function ChatWorkbench() {
         />
       ) : null}
       {isCharacterGenerateOpen ? (
-        <div className="fixed inset-0 z-50 overscroll-contain bg-black/58" onMouseDown={() => setIsCharacterGenerateOpen(false)}>
+        <div className="flashmuse-asset-generate-modal fixed inset-0 z-50 overscroll-contain bg-black/58" onMouseDown={() => setIsCharacterGenerateOpen(false)}>
           <div className="flex h-full w-full flex-col">
             <div className="flex min-h-0 min-w-[920px] flex-1 overflow-hidden bg-transparent shadow-[0_20px_80px_rgba(0,0,0,0.18)] ring-1 ring-black/5" onMouseDown={(event) => event.stopPropagation()}>
-              <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[rgba(245,245,242,0.58)] backdrop-blur-[56px] backdrop-saturate-[190%] before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[linear-gradient(135deg,rgba(255,255,255,0.64)_0%,rgba(255,255,255,0.22)_42%,rgba(255,255,255,0.38)_100%)] after:pointer-events-none after:absolute after:inset-0 after:z-0 after:bg-[radial-gradient(circle_at_18%_12%,rgba(255,255,255,0.72),transparent_28%),radial-gradient(circle_at_82%_88%,rgba(255,255,255,0.36),transparent_34%)]">
+              <div className="flashmuse-preview-stage relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[rgba(245,245,242,0.58)] backdrop-blur-[56px] backdrop-saturate-[190%] before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[linear-gradient(135deg,rgba(255,255,255,0.64)_0%,rgba(255,255,255,0.22)_42%,rgba(255,255,255,0.38)_100%)] after:pointer-events-none after:absolute after:inset-0 after:z-0 after:bg-[radial-gradient(circle_at_18%_12%,rgba(255,255,255,0.72),transparent_28%),radial-gradient(circle_at_82%_88%,rgba(255,255,255,0.36),transparent_34%)]">
                 <div className="relative z-10 flex items-center justify-between gap-4 px-5 pb-4 pt-5 sm:px-6 sm:pt-6">
-                  <div className="flex items-center gap-2.5">
-                    <button type="button" disabled={!hasCharacterGeneratedImage || isCharacterGenerating} onClick={() => { setCharacterImageFitMode("actual"); applyCharacterImageScale(visibleCharacterImageScale - 0.1); }} className="yinzao-tool-button flex h-9 w-9 items-center justify-center text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" aria-label={hasCharacterGeneratedImage ? "缩小图片" : "缩小图片不可用"}>
+                  <div className="flashmuse-preview-toolbar flex items-center gap-2.5">
+                    <button type="button" disabled={!hasCharacterGeneratedImage || isCharacterGenerating} onClick={() => { setCharacterImageFitMode("actual"); applyCharacterImageScale(visibleCharacterImageScale - 0.1); }} className="yinzao-tool-button flex h-9 w-9 items-center justify-center text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" style={previewLightToolButtonStyle} aria-label={hasCharacterGeneratedImage ? "缩小图片" : "缩小图片不可用"}>
                       <span className="text-[18px] leading-none">-</span>
                     </button>
                     <div className={`flex h-9 min-w-[64px] items-center justify-center text-[13px] font-medium text-[#666666] ${hasCharacterGeneratedImage ? "" : "opacity-30"}`}>{characterImageScalePercent}</div>
-                    <button type="button" disabled={!hasCharacterGeneratedImage || isCharacterGenerating} onClick={() => { setCharacterImageFitMode("actual"); applyCharacterImageScale(visibleCharacterImageScale + 0.1); }} className="yinzao-tool-button flex h-9 w-9 items-center justify-center text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" aria-label={hasCharacterGeneratedImage ? "放大图片" : "放大图片不可用"}>
+                    <button type="button" disabled={!hasCharacterGeneratedImage || isCharacterGenerating} onClick={() => { setCharacterImageFitMode("actual"); applyCharacterImageScale(visibleCharacterImageScale + 0.1); }} className="yinzao-tool-button flex h-9 w-9 items-center justify-center text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" style={previewLightToolButtonStyle} aria-label={hasCharacterGeneratedImage ? "放大图片" : "放大图片不可用"}>
                       <span className="text-[18px] leading-none">+</span>
                     </button>
-                    <button type="button" disabled={!hasCharacterGeneratedImage || isCharacterGenerating} onClick={() => { setCharacterImageFitMode("actual"); setCharacterImageScale(1); setCharacterImagePan({ x: 0, y: 0 }); }} className="yinzao-tool-button inline-flex h-9 items-center px-3.5 text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30">
+                    <button type="button" disabled={!hasCharacterGeneratedImage || isCharacterGenerating} onClick={() => { setCharacterImageFitMode("actual"); setCharacterImageScale(1); setCharacterImagePan({ x: 0, y: 0 }); }} className="yinzao-tool-button inline-flex h-9 items-center px-3.5 text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" style={previewLightToolButtonStyle}>
                       <span className="text-[13px] font-medium leading-none">实际尺寸</span>
                     </button>
-                    <button type="button" disabled={!hasCharacterGeneratedImage || isCharacterGenerating} onClick={() => { setCharacterImageFitMode("fit"); updateCharacterImageFitScale(); setCharacterImagePan({ x: 0, y: 0 }); }} className="yinzao-tool-button inline-flex h-9 items-center px-3.5 text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30">
+                    <button type="button" disabled={!hasCharacterGeneratedImage || isCharacterGenerating} onClick={() => { setCharacterImageFitMode("fit"); updateCharacterImageFitScale(); setCharacterImagePan({ x: 0, y: 0 }); }} className="yinzao-tool-button inline-flex h-9 items-center px-3.5 text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" style={previewLightToolButtonStyle}>
                       <span className="text-[13px] font-medium leading-none">适合尺寸</span>
                     </button>
                   </div>
@@ -10715,7 +11499,7 @@ export function ChatWorkbench() {
                         <span>下载</span>
                       </button>
                     )}
-                    <button type="button" onClick={() => setIsCharacterGenerateOpen(false)} className="yinzao-tool-button flex h-9 w-9 translate-x-2 items-center justify-center text-[#777777] transition" aria-label={`关闭${assetGenerateTitle}`}>
+                    <button type="button" onClick={() => setIsCharacterGenerateOpen(false)} className="yinzao-tool-button flex h-9 w-9 translate-x-2 items-center justify-center text-[#777777] transition" style={previewLightToolButtonStyle} aria-label={`关闭${assetGenerateTitle}`}>
                       <RiCloseLine className="h-5 w-5" aria-hidden="true" />
                     </button>
                   </div>
@@ -10761,7 +11545,7 @@ export function ChatWorkbench() {
                           <RiResetLeftLine className="h-3.5 w-3.5" aria-hidden="true" />
                           <span className="text-[14px] leading-none">重新生成</span>
                         </button>
-                        {characterGenerateResult.error ? <div className="absolute bottom-4 left-5 right-5 text-left text-[12px] leading-5 text-red-500">{normalizeMediaErrorText(characterGenerateResult.error, "image") ?? "图片生成失败，请稍后再试。"}</div> : null}
+                        {characterGenerateResult.error ? <div className="absolute bottom-4 left-5 right-5 text-left text-[12px] leading-5 text-red-500">{normalizeMediaErrorText(characterGenerateResult.error, "image") ?? GENERIC_MEDIA_ERROR_MESSAGE}</div> : null}
                       </div>
                     ) : characterGenerateResult.status === "succeeded" && characterGenerateResult.url ? (
                       <>
@@ -10775,7 +11559,7 @@ export function ChatWorkbench() {
                         }} className="max-w-none shrink-0 select-none object-contain shadow-[0_8px_30px_rgba(0,0,0,0.08)]" style={{ width: `${(characterImageNaturalSize.width || characterGenerateDisplayDimensions.width) * visibleCharacterImageScale}px`, height: "auto", transform: `translate3d(${characterImagePan.x}px, ${characterImagePan.y}px, 0)`, transition: isCharacterImageDragging ? "none" : "transform 120ms ease-out" }} />
                       </>
                     ) : (
-                      <div>
+                      <div className="flashmuse-asset-generate-empty">
                         <RiImageAddLine className="mx-auto h-8 w-8" aria-hidden="true" />
                         <div className="mt-3 text-[14px] font-medium text-[#777777]">{assetGenerateAreaTitle}</div>
                         <div className="mt-1 text-[12px] text-[#9a9a9a]">生成后的图片会显示在这里</div>
@@ -10784,7 +11568,7 @@ export function ChatWorkbench() {
                   </div>
                 </div>
               </div>
-              <aside className="flex h-full w-[360px] shrink-0 flex-col border-l border-[#eceae6] bg-[#f8f7f4]">
+              <aside className="flashmuse-preview-aside flex h-full w-[360px] shrink-0 flex-col border-l border-[#eceae6] bg-[#f8f7f4]" style={resolvedTheme === "dark" ? { backgroundColor: "#2a303c", borderColor: "var(--fm-border-subtle)" } : undefined}>
                 <div className="flex min-h-0 flex-1 flex-col px-[10px] pb-[10px] pt-7">
                   <div className="flex shrink-0 items-center gap-2 px-1 text-left text-[16px] font-medium leading-none text-[#111111]">
                     <AssetGenerateIcon className="h-5 w-5 shrink-0" aria-hidden="true" />
@@ -10816,7 +11600,7 @@ export function ChatWorkbench() {
                     <span className="text-[#d0d0d0]">|</span>
                     <span>{characterGenerateStyleLabel}</span>
                   </div>
-                  <div className="relative mt-3 flex min-h-0 flex-1 flex-col rounded-[8px] border border-[#f1f2f2] bg-white/78 py-3 pl-[10px] pr-0 shadow-none backdrop-blur-[18px] transition focus-within:border-[#c8dbff]">
+                  <div className="flashmuse-asset-generate-input relative mt-3 flex min-h-0 flex-1 flex-col rounded-[8px] border border-[#f1f2f2] bg-white/78 py-3 pl-[10px] pr-0 shadow-none backdrop-blur-[18px] transition focus-within:border-[#c8dbff]" style={resolvedTheme === "dark" ? { backgroundColor: "color-mix(in srgb, var(--fm-panel) 88%, transparent)", borderColor: "var(--fm-border)", boxShadow: "0 16px 42px var(--fm-shadow)" } : undefined}>
                     <div className="flex shrink-0 items-center gap-4 pl-[10px] pr-[10px] text-[13px] font-medium text-[#367cee]">
                       <button type="button" disabled={isCharacterGenerateInputDisabled} onClick={(event) => { event.stopPropagation(); openCharacterMentionAssetMenu(); }} className="inline-flex h-5 items-center gap-1.5 bg-transparent p-0 text-[#367cee] transition hover:text-[#1f63d4] disabled:cursor-not-allowed disabled:opacity-35" aria-label="引用资产">
                         <RiAtLine className="h-3.5 w-3.5" aria-hidden="true" />
@@ -10849,7 +11633,9 @@ export function ChatWorkbench() {
                         {activeCharacterAtAssetGroup?.assets.map((asset) => (
                           <button key={asset.id} type="button" onClick={() => insertCharacterAssetReference(asset)} className="flex h-12 w-full items-center gap-3 rounded-[8px] px-2 text-left transition hover:bg-[#f5f5f5]">
                             <div className="h-8 w-8 overflow-hidden rounded-[8px] bg-[#eeeeee]">
-                              <Image src={asset.url} alt={asset.name} width={32} height={32} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+                              <HoverImagePreview src={asset.url} alt={asset.name} wrapperClassName="block h-full w-full">
+                                <Image src={getMediaThumbnailUrl(asset.url)} alt={asset.name} width={32} height={32} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+                              </HoverImagePreview>
                             </div>
                             <div className="min-w-0">
                               <div className="truncate text-[13px] font-medium text-[#222222]">@{asset.name}</div>
@@ -10870,7 +11656,9 @@ export function ChatWorkbench() {
                         <div ref={assetGenerateReferencesRowRef} onScroll={updateAssetGenerateReferenceScrollState} className="yinzao-upload-row-scroll flex flex-nowrap gap-2 overflow-x-auto overflow-y-hidden scroll-smooth px-0.5">
                           {assetGenerateReferenceImages.map((image) => (
                             <div key={`${image.name}-${image.url}`} className="group relative h-[80px] w-[80px] shrink-0 overflow-hidden rounded-xl border border-[#e5e5e5] bg-[#f7f7f7]">
-                              <Image src={image.url} alt={image.name} width={100} height={100} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+                              <HoverImagePreview src={image.url} alt={image.name} wrapperClassName="block h-full w-full">
+                                <Image src={getMediaThumbnailUrl(image.url)} alt={image.name} width={100} height={100} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
+                              </HoverImagePreview>
                               <button type="button" disabled={isCharacterGenerateInputDisabled} onClick={() => removeAssetGenerateReference(image.name)} className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/55 text-white transition hover:bg-black/70 disabled:pointer-events-none disabled:opacity-40" aria-label="移除图片">
                                 <RiCloseLine className="h-3 w-3" aria-hidden="true" />
                               </button>
@@ -10889,7 +11677,7 @@ export function ChatWorkbench() {
                       </div>
                     ) : null}
                     <div className="relative mt-2 min-h-0 flex-1 pr-0">
-                      {!characterGeneratePrompt ? <div className="pointer-events-none absolute left-[10px] top-1 z-20 text-[13px] leading-[22px] text-[#b3b3b3]">{assetGeneratePlaceholder}</div> : null}
+                      {!characterGeneratePrompt ? <div className="flashmuse-asset-generate-placeholder pointer-events-none absolute left-[10px] top-1 z-20 text-[13px] leading-[22px] text-[#b3b3b3]">{assetGeneratePlaceholder}</div> : null}
                       <PlainMentionEditor
                         value={characterGeneratePrompt}
                         validReferences={characterValidReferenceNames}
@@ -10909,7 +11697,7 @@ export function ChatWorkbench() {
                     </div>
                     {isCharacterPromptOptimizing ? <PromptOptimizingOverlay /> : null}
                   </div>
-                  <button type="button" disabled={!characterGeneratePrompt.trim() || isCharacterGenerateInputDisabled} onClick={() => void generateCharacterImage()} className="mt-[10px] h-12 shrink-0 rounded-[8px] bg-[#111111] px-4 text-[13px] font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-30">{characterGenerateResult.status === "generating" ? "生成中" : "生成图片"}</button>
+                  <button type="button" disabled={!characterGeneratePrompt.trim() || isCharacterGenerateInputDisabled} onClick={() => void generateCharacterImage()} className="flashmuse-asset-generate-submit mt-[10px] h-12 shrink-0 rounded-[8px] bg-[#111111] px-4 text-[13px] font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-30">{characterGenerateResult.status === "generating" ? "生成中" : "生成图片"}</button>
                 </div>
               </aside>
             </div>
@@ -11353,25 +12141,25 @@ export function ChatWorkbench() {
       <DocumentPreviewPanel file={previewDocumentFile} width={previewDocumentWidth || getDefaultDocumentPreviewWidth()} onResizeStart={startDocumentPreviewResize} onClose={() => setPreviewDocumentFile(null)} />
 
       {previewAsset ? (
-        <div className="fixed inset-0 z-50 overscroll-contain bg-black/58" onClick={() => setPreviewAsset(null)}>
+        <div className="flashmuse-preview-modal fixed inset-0 z-50 overscroll-contain bg-black/58" onClick={() => setPreviewAsset(null)}>
           <div className="flex h-full w-full flex-col pt-8 sm:pt-10 lg:pt-12">
             <div className="flex min-h-0 min-w-[920px] flex-1 overflow-hidden rounded-t-[20px] bg-transparent shadow-[0_20px_80px_rgba(0,0,0,0.18)] ring-1 ring-black/5" onClick={(event) => event.stopPropagation()}>
-              <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[rgba(245,245,242,0.58)] backdrop-blur-[56px] backdrop-saturate-[190%] before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[linear-gradient(135deg,rgba(255,255,255,0.64)_0%,rgba(255,255,255,0.22)_42%,rgba(255,255,255,0.38)_100%)] after:pointer-events-none after:absolute after:inset-0 after:z-0 after:bg-[radial-gradient(circle_at_18%_12%,rgba(255,255,255,0.72),transparent_28%),radial-gradient(circle_at_82%_88%,rgba(255,255,255,0.36),transparent_34%)]">
+              <div className="flashmuse-preview-stage relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[rgba(245,245,242,0.58)] backdrop-blur-[56px] backdrop-saturate-[190%] before:pointer-events-none before:absolute before:inset-0 before:z-0 before:bg-[linear-gradient(135deg,rgba(255,255,255,0.64)_0%,rgba(255,255,255,0.22)_42%,rgba(255,255,255,0.38)_100%)] after:pointer-events-none after:absolute after:inset-0 after:z-0 after:bg-[radial-gradient(circle_at_18%_12%,rgba(255,255,255,0.72),transparent_28%),radial-gradient(circle_at_82%_88%,rgba(255,255,255,0.36),transparent_34%)]">
                 <div className="relative z-10 flex items-center justify-between gap-4 px-5 pb-4 pt-5 sm:px-6 sm:pt-6">
-                  <div className="flex items-center gap-2.5">
+                  <div className="flashmuse-preview-toolbar flex items-center gap-2.5">
                     {!isVideoAsset(previewAsset) ? (
                       <>
                         <button type="button" onClick={() => {
                           setPreviewFitMode("actual");
                           applyPreviewScale(visiblePreviewScale - 0.1);
-                        }} className="yinzao-tool-button flex h-9 w-9 items-center justify-center text-[#777777] transition" aria-label="缩小图片">
+                        }} className="yinzao-tool-button flex h-9 w-9 items-center justify-center text-[#777777] transition" style={previewLightToolButtonStyle} aria-label="缩小图片">
                           <span className="text-[18px] leading-none">-</span>
                         </button>
                         <div className="flex h-9 min-w-[64px] items-center justify-center text-[13px] font-medium text-[#666666]">{previewScalePercent}</div>
                         <button type="button" onClick={() => {
                           setPreviewFitMode("actual");
                           applyPreviewScale(visiblePreviewScale + 0.1);
-                        }} className="yinzao-tool-button flex h-9 w-9 items-center justify-center text-[#777777] transition" aria-label="放大图片">
+                        }} className="yinzao-tool-button flex h-9 w-9 items-center justify-center text-[#777777] transition" style={previewLightToolButtonStyle} aria-label="放大图片">
                           <span className="text-[18px] leading-none">+</span>
                         </button>
                         <BlackHoverTooltip label="显示图片的实际尺寸" side="bottom">
@@ -11379,7 +12167,7 @@ export function ChatWorkbench() {
                             setPreviewFitMode("actual");
                             setPreviewScale(1);
                             setPreviewPan({ x: 0, y: 0 });
-                          }} className="yinzao-tool-button inline-flex h-9 items-center px-3.5 text-[#777777] transition">
+                          }} className="yinzao-tool-button inline-flex h-9 items-center px-3.5 text-[#777777] transition" style={previewLightToolButtonStyle}>
                             <span className="text-[13px] font-medium leading-none">实际尺寸</span>
                           </button>
                         </BlackHoverTooltip>
@@ -11392,24 +12180,24 @@ export function ChatWorkbench() {
                             if (viewport) {
                               viewport.scrollTo({ left: 0, top: 0, behavior: "smooth" });
                             }
-                          }} className="yinzao-tool-button inline-flex h-9 items-center px-3.5 text-[#777777] transition">
+                          }} className="yinzao-tool-button inline-flex h-9 items-center px-3.5 text-[#777777] transition" style={previewLightToolButtonStyle}>
                             <span className="text-[13px] font-medium leading-none">适合尺寸</span>
                           </button>
                         </BlackHoverTooltip>
                       </>
                     ) : (
                       <>
-                        <button type="button" disabled className="yinzao-tool-button flex h-9 w-9 cursor-not-allowed items-center justify-center text-[#777777] opacity-30" aria-label="缩小图片不可用">
+                        <button type="button" disabled className="yinzao-tool-button flex h-9 w-9 cursor-not-allowed items-center justify-center text-[#777777] opacity-30" style={previewLightToolButtonStyle} aria-label="缩小图片不可用">
                           <span className="text-[18px] leading-none">-</span>
                         </button>
                         <div className="flex h-9 min-w-[64px] items-center justify-center text-[13px] font-medium text-[#666666] opacity-30">适合</div>
-                        <button type="button" disabled className="yinzao-tool-button flex h-9 w-9 cursor-not-allowed items-center justify-center text-[#777777] opacity-30" aria-label="放大图片不可用">
+                        <button type="button" disabled className="yinzao-tool-button flex h-9 w-9 cursor-not-allowed items-center justify-center text-[#777777] opacity-30" style={previewLightToolButtonStyle} aria-label="放大图片不可用">
                           <span className="text-[18px] leading-none">+</span>
                         </button>
-                        <button type="button" disabled className="yinzao-tool-button inline-flex h-9 cursor-not-allowed items-center px-3.5 text-[#777777] opacity-30">
+                        <button type="button" disabled className="yinzao-tool-button inline-flex h-9 cursor-not-allowed items-center px-3.5 text-[#777777] opacity-30" style={previewLightToolButtonStyle}>
                           <span className="text-[13px] font-medium leading-none">实际尺寸</span>
                         </button>
-                        <button type="button" disabled className="yinzao-tool-button inline-flex h-9 cursor-not-allowed items-center px-3.5 text-[#777777] opacity-30">
+                        <button type="button" disabled className="yinzao-tool-button inline-flex h-9 cursor-not-allowed items-center px-3.5 text-[#777777] opacity-30" style={previewLightToolButtonStyle}>
                           <span className="text-[13px] font-medium leading-none">适合尺寸</span>
                         </button>
                       </>
@@ -11420,7 +12208,7 @@ export function ChatWorkbench() {
                       <RiDownloadLine className="h-4 w-4" aria-hidden="true" />
                       <span>下载</span>
                     </a>
-                    <button type="button" onClick={() => setPreviewAsset(null)} className="yinzao-tool-button flex h-9 w-9 translate-x-2 items-center justify-center text-[#777777] transition" aria-label="关闭预览">
+                    <button type="button" onClick={() => setPreviewAsset(null)} className="yinzao-tool-button flex h-9 w-9 translate-x-2 items-center justify-center text-[#777777] transition" style={previewLightToolButtonStyle} aria-label="关闭预览">
                       <RiCloseLine className="h-5 w-5" aria-hidden="true" />
                     </button>
                   </div>
@@ -11436,27 +12224,27 @@ export function ChatWorkbench() {
                       <button type="button" disabled={!canPagePreviewThumbsUp} onClick={(event) => {
                         event.stopPropagation();
                         pagePreviewThumbsByButton(-1);
-                      }} className="yinzao-tool-button flex h-[50px] w-[50px] shrink-0 items-center justify-center text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" aria-label="上一页缩略图">
+                      }} className="yinzao-tool-button flex h-[50px] w-[50px] shrink-0 items-center justify-center text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" style={previewLightToolButtonStyle} aria-label="上一页缩略图">
                         <RiArrowUpSLine className="h-6 w-6" aria-hidden="true" />
                       </button>
                     ) : null}
-                    <div className="relative h-[calc(100vh-320px)] min-h-[166px] overflow-hidden">
-                      <div ref={previewThumbListRef} className="yinzao-hidden-scrollbar flex h-full flex-col gap-2 overflow-hidden">
+                    <div className="relative overflow-hidden" style={{ height: pagePreviewThumbListHeight }}>
+                      <div ref={previewThumbListRef} className="yinzao-hidden-scrollbar flex flex-col gap-2 overflow-hidden">
                         {pagePreviewThumbs.map((image) => {
                           const isSelected = previewAsset.id === image.id || previewAsset.url === image.url;
                           const isVideoThumb = isVideoAsset(image);
 
                           return (
-                            <button key={image.id} type="button" data-preview-thumb-id={image.id} data-preview-thumb-url={image.url} onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={() => { if (isSelected) return; resetPreviewTransform(); setPreviewAsset(image); }} className={`relative h-[50px] w-[50px] shrink-0 overflow-hidden rounded-[5px] border-2 bg-[#f1f1f1] transition ${isSelected ? "border-[#367cee]" : "border-[#d8d8d8] hover:border-[#bdbdbd]"}`} aria-label={`查看${image.name}`}>
+                            <button key={image.id} type="button" data-preview-thumb-id={image.id} data-preview-thumb-url={image.url} onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={() => { if (isSelected) return; resetPreviewTransform(); setPreviewAsset(image); }} className={`flashmuse-preview-thumb relative h-[50px] w-[50px] shrink-0 overflow-hidden rounded-[5px] border-2 bg-[#f1f1f1] transition ${isSelected ? "flashmuse-preview-thumb-selected" : "flashmuse-preview-thumb-rest"}`} aria-label={`查看${image.name}`}>
                               {isVideoThumb ? (
                                 <>
-                                  <video src={image.url} className="h-full w-full object-cover" muted playsInline preload="metadata" />
+                                  {image.posterUrl ? <Image src={getMediaThumbnailUrl(image.posterUrl)} alt={image.name} fill sizes="50px" unoptimized className="object-cover" /> : <video src={image.url} className="h-full w-full object-cover" muted playsInline preload="metadata" />}
                                   <span className="absolute left-1 top-1 flex h-4 w-4 items-center justify-center rounded-[3px] bg-black/56 text-white backdrop-blur-[4px]">
                                     <RiFilmLine className="h-3 w-3" aria-hidden="true" />
                                   </span>
                                 </>
                               ) : (
-                                <Image src={image.url} alt={image.name} fill sizes="50px" unoptimized className="object-cover" />
+                                <Image src={getMediaThumbnailUrl(image.url)} alt={image.name} fill sizes="50px" unoptimized className="object-cover" />
                               )}
                             </button>
                           );
@@ -11467,7 +12255,7 @@ export function ChatWorkbench() {
                       <button type="button" disabled={!canPagePreviewThumbsDown} onClick={(event) => {
                         event.stopPropagation();
                         pagePreviewThumbsByButton(1);
-                      }} className="yinzao-tool-button flex h-[50px] w-[50px] shrink-0 items-center justify-center text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" aria-label="下一页缩略图">
+                      }} className="yinzao-tool-button flex h-[50px] w-[50px] shrink-0 items-center justify-center text-[#777777] transition disabled:cursor-not-allowed disabled:opacity-30" style={previewLightToolButtonStyle} aria-label="下一页缩略图">
                         <RiArrowDownSLine className="h-6 w-6" aria-hidden="true" />
                       </button>
                     ) : null}
@@ -11491,7 +12279,7 @@ export function ChatWorkbench() {
                 }} onMouseUp={() => setIsPreviewDragging(false)} onMouseLeave={() => setIsPreviewDragging(false)}>
                   <div className="flex h-full w-full items-center justify-center bg-transparent">
                     {isVideoAsset(previewAsset) ? (
-                      <video src={previewAsset.url} className="max-h-full max-w-full object-contain shadow-[0_8px_30px_rgba(0,0,0,0.08)]" controls playsInline onLoadedMetadata={(event) => {
+                      <video src={previewAsset.url} poster={previewAsset.posterUrl} preload={previewAsset.posterUrl ? "none" : "metadata"} className="max-h-full max-w-full object-contain shadow-[0_8px_30px_rgba(0,0,0,0.08)]" controls playsInline onLoadedMetadata={(event) => {
                         const video = event.currentTarget;
                         if (!video.videoWidth || !video.videoHeight) return;
                         const dimensions = { width: video.videoWidth, height: video.videoHeight };
@@ -11506,7 +12294,7 @@ export function ChatWorkbench() {
                         const currentPreviewAsset = previewAssetRef.current;
                         if (!currentPreviewAsset || (currentPreviewAsset.id !== previewAsset.id && normalizeMediaUrlForMatch(currentPreviewAsset.url) !== normalizeMediaUrlForMatch(previewAsset.url))) return;
                         const dimensions = { width: image.naturalWidth, height: image.naturalHeight };
-                        setPreviewNaturalSize(dimensions);
+                        setPreviewNaturalSize((current) => current.width === dimensions.width && current.height === dimensions.height ? current : dimensions);
                         requestAnimationFrame(() => updatePreviewFitScale(dimensions));
                         setPreviewAsset((current) => current && current.id === previewAsset.id ? { ...current, previewMeta: getPreviewMetaWithDimensions(current.previewMeta, dimensions, "image") } : current);
                         if (previewAsset.sessionId && previewAsset.messageId) updateMessageImageDimensions(previewAsset.sessionId, previewAsset.messageId, previewAsset.url, dimensions);
@@ -11516,7 +12304,7 @@ export function ChatWorkbench() {
                   </div>
                 </div>
               </div>
-              <aside className="relative flex h-full w-[360px] shrink-0 flex-col border-l border-[#eceae6] bg-[#f8f7f4]">
+              <aside className="flashmuse-preview-aside relative flex h-full w-[360px] shrink-0 flex-col border-l border-[#eceae6] bg-[#f8f7f4]" style={resolvedTheme === "dark" ? { backgroundColor: "#2a303c", borderColor: "var(--fm-border-subtle)" } : undefined}>
                 {isReversePromptingPreview ? <PromptOptimizingOverlay /> : null}
                 <div className="mx-9 shrink-0 border-b border-[#e4e2dd] pb-3 pt-7">
                   <div className="min-w-0">

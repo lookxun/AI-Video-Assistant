@@ -14,6 +14,24 @@
 
 所以当前项目没有使用 MiniMax。
 
+## 2026-06-05 线上部署和环境变量
+
+- 第一版线上部署已完成，服务器资料目录：`E:\project\【2】server\马来西亚服务器`，IP：`101.47.19.109`，线上项目目录：`/var/www/flashmuse`。
+- 当前访问地址为 HTTP：前台 `http://101.47.19.109`，工作台 `http://101.47.19.109/workspace`，后台 `http://101.47.19.109/admin`。
+- 线上基础服务：Nginx 反代 `127.0.0.1:3000`，PM2 进程名 `flashmuse`，PostgreSQL 本地库 `flashmuse`。PM2 已设置开机自启。
+- Nginx 直接映射 `/generated/` 到 `/var/www/flashmuse/public/generated/`，因此新生成或上传到服务器的文件能形成公网 HTTP URL。注意：BytePlus 素材审核最终需要 HTTPS，HTTP 只能用于功能测试。
+- Nginx 也映射 `/home-assets/` 到 `/var/www/flashmuse/public/home-assets/`。当前线上首页视频为占位小 mp4，完整首页视频尚未补传。
+- 线上 `.env.local` 是由本地 `.env` 的 OpenRouter/BytePlus/SMTP/Admin 配置合并后，再覆盖服务器 PostgreSQL `DATABASE_URL` 得到。不要把 `.env` 或 `.env.local` 提交 GitHub。
+- 当前 HTTP 测试期开了 `FORCE_INSECURE_AUTH_COOKIE=true`。`src/lib/auth.ts` 和 `src/lib/admin-auth.ts` 都会在该开关开启时去掉生产 Cookie 的 `Secure`，否则浏览器在 HTTP IP 地址下无法保存登录态。配置 HTTPS 后必须关闭该开关。
+- 管理员邮箱白名单当前为 `lookxun@163.com`，由 `ADMIN_EMAILS` 控制。后台没有独立账号表，登录仍用邮箱验证码/密码。
+
+## 2026-06-05 线上故障排查结论
+
+- 前台验证码能收到但进不了工作台的根因不是验证码接口。验证码验证成功、用户和 Session 都已写入数据库；真实前端错误是 `crypto.randomUUID is not a function`，因为当前是 HTTP 非安全上下文。已通过 `createClientId()` fallback 修复。
+- 后台验证码能收到但进不了后台的根因同样是 HTTP 下 `Secure Cookie` 不保存。已让 `admin-auth.ts` 也支持 `FORCE_INSECURE_AUTH_COOKIE=true`。
+- `/api/client-error` 是本轮临时/辅助前端错误采集接口，layout 中也有 `window.onerror` 和 `unhandledrejection` 上报。后续如果进入正式生产且已有更完整监控，可考虑移除或换成正式前端监控。
+- `B_8` 生图失败不是部署或保存问题。OpenRouter Gemini 图片模型返回了纯文本场景描述，没有返回图片，因此 `/api/image` 报 `图片平台没有返回图片`。这类失败也见于 `B_5/B_6/B_7`。建议后台先关闭不稳定 Gemini 图片模型，或引导用户使用 `Seedream 4.5 / Seedream 5.0 Lite`。
+
 ## BytePlus ModelArk
 
 用途：
@@ -59,6 +77,19 @@
 - BytePlus 官方多图 `sequential_image_generation: "auto"` 和 `sequential_image_generation_options.max_images` 只表示最多返回几张，实测不保证返回用户选的张数，因此当前普通 `2/3/4张` 不走官方批量。流式 `stream: true` 暂未接入，只记录了 SSE 格式。
 - BytePlus 视频已支持创建和查询任务。创建响应只有 `id`；查询成功响应 `status=succeeded`，视频 URL 在 `content.video_url`，usage 在 `usage.completion_tokens / usage.total_tokens`。
 - BytePlus 视频参考图片使用 `{ type: "image_url", image_url: { url }, role: "reference_image" }`。当前未接参考视频、参考音频、严格首尾帧模式、取消任务和删除任务。
+- 2026-06-04 最新确认：Seedance 2.0 直接上传含真人脸/像真人的 AI 写实角色参考图，可能触发 `InputImageSensitiveContentDetected.PrivacyInformation`。官方 API 参考明确写 `seedance 2.0` 系列不支持直接上传含有真人人脸的参考图/视频；但 `content.image_url.url` 支持素材 ID，格式 `asset://<ASSET_ID>`，用于视频生成的预置素材及虚拟人像，可从 `素材&虚拟人像库` 获取。
+- 2026-06-04 最新确认：BytePlus 底层存在素材审核/创建机制。第三方 SeeDance 文档 `E:\project\【1】Api key\三方提供：seedance 2.0\SeeDance接入说明\AI聚合三方素材接口接入文档.pdf` 暴露了类似流程：提交 `originalUrl`、`type=1`、`fileType=1`、`thirdChannel=1` 创建素材，返回 `materialId=asset-xxxx`，轮询 `status=1/2/3`。错误响应中出现官方 `Action=CreateAsset`、`Service=ark`、`Region=cn-beijing`。用户明确不接第三方，只用 BytePlus 第一方；下一个 AI 需要找 BytePlus 获取第一方 `CreateAsset / 查询素材状态` 文档或控制台开通方式。
+- 2026-06-04 后续实现要求：先部署公网服务器，因为素材创建接口需要 BytePlus 能下载的 `originalUrl`。部署后把上传图/资产图/生成图保存为公网 HTTPS URL，再提交 BytePlus 素材&虚拟人像库审核；审核完成后保存 `assetId`，视频生成时将审核通过图片改传 `asset://assetId`。这才是处理 AI 写实真人角色图被直接上传拦截的正式方案。
+- 2026-06-05 最新补充：下一个 AI 接手后优先做公网部署。部署目标必须包括静态访问 `public/generated/...` 或等效生成文件目录，确保上传图、资产图、生成图能形成 BytePlus 可下载的公网 HTTPS URL。素材审核接口不能使用 `localhost`、内网地址或仅浏览器本地可访问路径。
+- 2026-06-05 最新补充：部署后继续接 BytePlus 第一方 `素材&虚拟人像库 / CreateAsset` 机制。第三方 SeeDance 素材文档只用于证明底层流程，不接第三方接口。正式要从 BytePlus 控制台、客服或销售拿第一方创建素材、查询素材状态、素材类型、虚拟人像库权限、IP 白名单和错误码文档。
+- 2026-06-05 最新补充：模型开关链路已分入口处理。`/api/model-availability` 返回 `imageModels / assetImageModels / videoModels / agentImageModels / agentVideoModels`；`/api/image` 会按 `metadata.creditSource` 判断是否为 `agent_image_generation`、资产库生成或普通对话流图片；`/api/video` 会按 `agent_video_generation` 判断是否为 Agent 自动视频。BytePlus 请求 key 分别走 `agent-image.* / agent-video.* / conversation-image.* / asset-image.* / video.*`。后续新增模型或部署后切供应商时必须保持这五组入口隔离。
+- 2026-06-02 最新确认：BytePlus 视频输出尺寸不传 px `size`，由 `resolution + ratio` 控制。`resolution` 支持 `480p / 720p / 1080p`，其中 `Seedance 2.0 Fast` 不支持 `1080p`；`ratio` 支持 `16:9 / 4:3 / 1:1 / 3:4 / 9:16 / 21:9 / adaptive`。文档给出像素表：Seedance 2.0 系列 `720p 16:9=1280x720`、`720p 1:1=960x960`、`720p 9:16=720x1280`、`1080p 21:9=2206x946` 等，但请求体只传档位和比例。
+- 2026-06-02 最新确认：BytePlus `Seedance 2.0 Fast / Seedance 2.0` 时长支持 `4-15秒` 的任意整数秒，代码已让前端每秒可选，服务端会把异常值 clamp 到 `4-15`。OpenRouter 视频时长规则不受影响。
+- 2026-06-02 最新补充：`/api/video` 已增加 BytePlus 视频 timing 日志。创建日志记录 `createMs`，轮询日志记录 `queryMs`，完成日志记录 `queryMs / saveMs / totalMs / savedLocal / saveFailed`。日志不打印完整远程签名 URL。d28 慢视频排查显示一条 15 秒 BytePlus Fast 视频主要慢在远程 mp4 下载保存，非模型生成。
+- 2026-06-03 最新补充：远程媒体保存改为 provider 通用异步队列。OpenRouter 图片/视频、BytePlus 图片/视频以及后续其它供应商，只要返回 `http/https` 远程 URL，服务端先返回远程 URL 给前端展示，再由 `src/lib/media-save-queue.ts` 后台下载到 `public/generated/images` 或 `public/generated/videos`。base64 返回继续同步保存，不进入队列。
+- 2026-06-03 最新补充：新增 `/api/media-save-status`，前端每 12 秒轮询当前工作区远程媒体保存状态；保存成功后替换为本地 URL。队列状态文件 `.runtime/media-save-jobs.json` 不进 Git。后续正式多实例部署应改成数据库表或队列服务。
+- 2026-06-03 最新补充：远程媒体日志统一为 `[media-save] queued / downloading / saved / failed`，包含 `requestId / model / attempts / queuedMs / downloadMs / localUrl / dimensions / host / pathTail`，不输出完整签名 URL。图片生成 timing 也带 `requestId / providerMs / saveQueueMs / totalMs`。
+- 2026-06-03 最新补充：视频封面接入 `ffmpeg-static`。远程视频保存成本地后，`src/lib/video-poster.ts` 会从本地 mp4/mov/webm 抽第一帧保存到 `public/generated/video-posters`，`media-save-queue` 会把 `posterUrl` 写入 job 和 `video-manifest.json`，`/api/media-save-status` 会返回 `posterUrl`。注意 `ffmpeg-static` 在 Next/Turbopack build 中会产生一个 NFT tracing warning，但当前 build 通过。
 
 BytePlus 图片尺寸实测：
 
@@ -71,6 +102,7 @@ BytePlus 图片尺寸实测：
 - `4K` 稳定尺寸：`16:9 5504x3040`、`9:16 3040x5504`、`1:1 4096x4096`、`4:3 4704x3520`、`3:4 3520x4704`、`21:9 6240x2656`。
 - 本轮 `Seedream 5.0` 的部分 4K 非宽高比请求超过 10 分钟超时，详见测试表。前台 BytePlus 图片分辨率应保持只显示 `2K / 4K`，不要显示 `1K`。
 - 正式请求时，BytePlus 已知成功尺寸会把 `比例 + K数` 转成具体 `WIDTHxHEIGHT` 写入 `size`，例如 `21:9 / 2K -> 3136x1344`。未知组合回退传 `2K / 4K`，前端显示 `未知`。OpenRouter 仍走自己的 `image_config.aspect_ratio + image_config.image_size`。
+- 2026-06-02 最新复测：`Seedream 5.0 Lite` 使用 `output_format=jpeg` 与具体 px `size`，12 个 `2K/4K` 组合全部成功，输出为 `.jpg`。新增脚本 `scripts/test-byteplus-seedream-5-lite-px-matrix.mjs`，测试结果和图片保存在 `AI-Video-Assistant_Project Planning/test`。
 
 ## OpenRouter
 

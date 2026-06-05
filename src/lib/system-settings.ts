@@ -17,6 +17,15 @@ export const BYTEPLUS_CONVERSATION_VIDEO_MODEL_KEYS: Record<string, string> = {
   "byteplus:video.seedance-2-0": "video.seedance-2-0",
 };
 
+export const BYTEPLUS_AGENT_IMAGE_MODEL_KEYS: Record<string, string> = {
+  "byteplus:conversation-image.seedream-4-5": "agent-image.seedream-4-5",
+};
+
+export const BYTEPLUS_AGENT_VIDEO_MODEL_KEYS: Record<string, string> = {
+  "byteplus:video.seedance-2-0-fast": "agent-video.seedance-2-0-fast",
+  "byteplus:video.seedance-2-0": "agent-video.seedance-2-0",
+};
+
 const ENV_PATH = join(process.cwd(), ".env.local");
 
 export type AdminSystemSettings = {
@@ -201,6 +210,24 @@ export function isConversationVideoModelEnabled(modelId: string) {
   if (modelId === "bytedance/seedance-2.0-fast") return isOpenRouterPreferenceEnabled("video.seedance-2-0-fast");
   if (modelId === "bytedance/seedance-2.0") return isOpenRouterPreferenceEnabled("video.seedance-2-0");
   return !isOpenRouterOnlyDisabled("对话流视频生成", "", modelId);
+}
+
+export function isAgentImageModelEnabled(modelId: string) {
+  const bytePlusKey = BYTEPLUS_AGENT_IMAGE_MODEL_KEYS[modelId];
+  if (bytePlusKey) return isBytePlusPreferenceEnabled(bytePlusKey);
+  if (modelId === "bytedance-seed/seedream-4.5") return isOpenRouterPreferenceEnabled("agent-image.seedream-4-5");
+  if (modelId === "openai/gpt-5.4-image-2") return !isOpenRouterOnlyDisabled("Agent 自动生成策略", "高质图片", modelId);
+  if (modelId === "google/gemini-3.1-flash-image-preview") return !isOpenRouterOnlyDisabled("Agent 自动生成策略", "快速图片", modelId);
+  return false;
+}
+
+export function isAgentVideoModelEnabled(modelId: string) {
+  const bytePlusKey = BYTEPLUS_AGENT_VIDEO_MODEL_KEYS[modelId];
+  if (bytePlusKey) return isBytePlusPreferenceEnabled(bytePlusKey);
+  if (modelId === "bytedance/seedance-2.0-fast") return isOpenRouterPreferenceEnabled("agent-video.seedance-2-0-fast");
+  if (modelId === "bytedance/seedance-2.0") return isOpenRouterPreferenceEnabled("agent-video.seedance-2-0");
+  if (modelId === "google/veo-3.1") return !isOpenRouterOnlyDisabled("Agent 自动生成策略", "4K视频", modelId);
+  return false;
 }
 
 export function isTextModelEnabled(modelId: string, source: "chat" | "prompt" = "chat") {

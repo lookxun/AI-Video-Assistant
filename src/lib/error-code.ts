@@ -27,8 +27,8 @@ function nextErrorCode() {
 }
 
 export async function createCodedApiError(error: unknown, fallback: string, scope: string) {
-  const errorCode = await nextErrorCode();
   const message = toUserErrorMessage(error, fallback);
+  const errorCode = await nextErrorCode();
   console.error(`[${errorCode}] ${scope}`, sanitizeErrorForLog(error));
   return { error: `(${errorCode}) ${message}`, errorCode };
 }

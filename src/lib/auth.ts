@@ -9,6 +9,7 @@ const scrypt = promisify(scryptCallback);
 export const authCookieName = "flashmuse-session";
 const sessionMaxAgeSeconds = 60 * 60 * 24 * 30;
 const authSecret = process.env.AUTH_SECRET || "flashmuse-local-dev-secret-change-me";
+const forceInsecureAuthCookie = process.env.FORCE_INSECURE_AUTH_COOKIE === "true";
 
 export function normalizeEmail(value: unknown) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -95,7 +96,7 @@ export async function createUserSession(userId: string) {
   cookieStore.set(authCookieName, token, {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
     path: "/",
     maxAge: sessionMaxAgeSeconds,
   });

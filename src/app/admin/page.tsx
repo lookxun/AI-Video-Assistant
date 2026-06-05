@@ -116,6 +116,13 @@ function getStringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
 }
 
+function formatAdminMediaName(systemName: string | undefined, userName: string | undefined, fallback: string) {
+  const system = (systemName ?? "").trim();
+  const user = (userName ?? "").trim();
+  if (system && user && user !== system) return `${system} / ${user}`;
+  return system || user || fallback;
+}
+
 function normalizeMediaUrlForAdmin(value: string) {
   return value.split("?")[0].split("#")[0].replace(/^https?:\/\/[^/]+/, "");
 }
@@ -198,37 +205,111 @@ function getMessageRole(value: unknown): AdminConversationMessage["role"] {
   return value === "user" || value === "assistant" || value === "system" ? value : "assistant";
 }
 
+function getConversationActivityTime(session: Record<string, unknown>, messages: Record<string, unknown>[]) {
+  const messageTimes = messages.map((message) => finiteNumber(message.createdAt)).filter((time) => time > 0);
+  if (messageTimes.length > 0) return Math.max(...messageTimes);
+  return finiteNumber(session.createdAt) || finiteNumber(session.updatedAt);
+}
+
 function getWorkspaceConversations(state: unknown): AdminConversation[] {
   if (!isRecord(state) || !Array.isArray(state.sessions)) return [];
+  const assetDisplayNameMap = getWorkspaceAssetDisplayNameMap(state);
 
   return state.sessions
     .filter(isRecord)
     .map((session, index) => {
       const id = getString(session.id, `conversation-${index}`);
       const messages = Array.isArray(session.messages) ? session.messages.filter(isRecord) : [];
+      const activityTime = getConversationActivityTime(session, messages);
 
       return {
         id,
         title: getString(session.title, "新对话") || "新对话",
         conversationCode: getString(session.conversationCode),
-        updatedAtLabel: formatTimestamp(session.updatedAt),
-        updatedAtTs: finiteNumber(session.updatedAt),
+        updatedAtLabel: formatTimestamp(activityTime),
+        updatedAtTs: activityTime,
         messages: messages.map((message, messageIndex): AdminConversationMessage => {
           const videos = getStringArray(message.videos);
           const videoUrl = getString(message.videoUrl);
+          const images = getStringArray(message.images);
+          const allVideos = videoUrl ? [...videos, videoUrl].filter((url, urlIndex, array) => array.indexOf(url) === urlIndex) : videos;
+          const mediaSystemNames = isRecord(message.mediaSystemNames) ? message.mediaSystemNames : undefined;
+          const mediaNames = new Map<string, string>();
+          images.forEach((url, mediaIndex) => mediaNames.set(url, assetDisplayNameMap.get(url) ?? assetDisplayNameMap.get(normalizeMediaUrlForAdmin(url)) ?? formatAdminMediaName(getString(mediaSystemNames?.[url]), undefined, `图片${mediaIndex + 1}`)));
+          allVideos.forEach((url, mediaIndex) => mediaNames.set(url, assetDisplayNameMap.get(url) ?? assetDisplayNameMap.get(normalizeMediaUrlForAdmin(url)) ?? formatAdminMediaName(getString(mediaSystemNames?.[url]), undefined, `视频${mediaIndex + 1}`)));
 
           return {
             id: getString(message.id, `${id}-message-${messageIndex}`),
             role: getMessageRole(message.role),
             content: getString(message.content),
             createdAtLabel: formatTimestamp(message.createdAt),
-            images: getStringArray(message.images),
-            videos: videoUrl ? [...videos, videoUrl].filter((url, urlIndex, array) => array.indexOf(url) === urlIndex) : videos,
+            images,
+            videos: allVideos,
+            mediaNames: Object.fromEntries(mediaNames),
             error: getString(message.error),
           };
         }),
       };
     });
+}
+
+function getDeletedConversationMessages(detail: AdminCreditConversationDetail): AdminConversationMessage[] {
+  const messages = detail.mediaItems
+    .filter((item) => item.url || item.promptText || item.displayName)
+    .sort((left, right) => left.createdAtTs - right.createdAtTs)
+    .map((item, index): AdminConversationMessage => ({
+      id: `${detail.id}-deleted-media-${index}`,
+      role: "assistant",
+      content: [item.displayName, item.promptText].filter(Boolean).join("\n"),
+      createdAtLabel: item.createdAtLabel,
+      images: item.kind === "image" && item.url ? [item.url] : [],
+      videos: item.kind === "video" && item.url ? [item.url] : [],
+      mediaNames: item.url ? { [item.url]: item.displayName } : undefined,
+    }));
+
+  if (messages.length > 0) return messages;
+
+  return [{
+    id: `${detail.id}-deleted-empty`,
+    role: "system",
+    content: "该对话暂无可恢复消息",
+    createdAtLabel: detail.updatedAtLabel,
+    images: [],
+    videos: [],
+  }];
+}
+
+function getDeletedConversationMediaItems(details: AdminCreditConversationDetail[] | undefined, existingMediaItems: AdminMediaItem[]) {
+  const seenUrls = new Set(existingMediaItems.map((item) => normalizeMediaUrlForAdmin(item.url)).filter(Boolean));
+  const items: AdminMediaItem[] = [];
+
+  for (const detail of details ?? []) {
+    const operationTs = detail.updatedAtTs ?? 0;
+    for (const media of [...detail.mediaItems].sort((left, right) => left.createdAtTs - right.createdAtTs)) {
+      if (!media.url || media.kind === "file") continue;
+      const normalizedUrl = normalizeMediaUrlForAdmin(media.url);
+      if (seenUrls.has(normalizedUrl)) continue;
+      seenUrls.add(normalizedUrl);
+      items.push({
+        id: `${detail.id}-deleted-media-${media.id}`,
+        type: media.kind,
+        isDeleted: true,
+        deletedAtLabel: detail.updatedAtLabel,
+        name: media.displayName,
+        url: media.url,
+        prompt: media.promptText || media.displayName || "",
+        model: media.model || "-",
+        ratio: "-",
+        resolution: "-",
+        duration: media.kind === "video" ? "-" : "-",
+        size: "-",
+        style: "-",
+        createdAtTs: operationTs || media.createdAtTs,
+      });
+    }
+  }
+
+  return items;
 }
 
 function getWorkspaceImageFailureCounts(state: unknown) {
@@ -271,6 +352,7 @@ function getWorkspaceMediaItems(state: unknown): AdminMediaItem[] {
 
   const items: AdminMediaItem[] = [];
   const deletedAssetInfoMap = getDeletedAssetInfoMap(state);
+  const assetDisplayNameMap = getWorkspaceAssetDisplayNameMap(state);
 
   for (const session of state.sessions.filter(isRecord)) {
     const messages = Array.isArray(session.messages) ? session.messages.filter(isRecord) : [];
@@ -278,17 +360,20 @@ function getWorkspaceMediaItems(state: unknown): AdminMediaItem[] {
     for (const message of messages) {
       if (message.role !== "assistant") continue;
 
+      const baseRequestId = getString(message.requestId, getString(message.id, "message"));
       const meta = isRecord(message.generationMeta) ? message.generationMeta : undefined;
       const settings = isRecord(meta?.settings) ? meta.settings : undefined;
       const modelId = getString(meta?.model, "-");
       const ratio = getString(settings?.ratio, "-");
       const resolution = getString(settings?.resolution, "-");
       const duration = getString(settings?.duration, "-");
+      const style = getString(settings?.style, "-");
       const originalPrompt = getString(meta?.originalPrompt, getString(message.content));
       const imagePrompts = getMediaPrompt(message, "imagePrompts");
       const videoPrompts = getMediaPrompt(message, "videoPrompts");
       const imageDimensions = isRecord(message.imageDimensions) ? message.imageDimensions : undefined;
       const videoDimensionsMap = isRecord(message.videoDimensionsMap) ? message.videoDimensionsMap : undefined;
+      const mediaSystemNames = isRecord(message.mediaSystemNames) ? message.mediaSystemNames : undefined;
 
       const imageSlotUrls = Array.isArray(message.imageResultSlots)
         ? message.imageResultSlots.filter(isRecord).filter((slot) => slot.type === "image").map((slot) => getString(slot.url)).filter(Boolean)
@@ -297,11 +382,16 @@ function getWorkspaceMediaItems(state: unknown): AdminMediaItem[] {
 
       imageUrls.forEach((url, index) => {
         const deletedInfo = deletedAssetInfoMap.get(url) ?? deletedAssetInfoMap.get(normalizeMediaUrlForAdmin(url));
+        const systemName = getString(mediaSystemNames?.[url]);
+        const displayName = assetDisplayNameMap.get(url) ?? assetDisplayNameMap.get(normalizeMediaUrlForAdmin(url)) ?? formatAdminMediaName(systemName, undefined, `图片${index + 1}`);
         items.push({
           id: `${getString(message.id, "message")}-image-${index}`,
+          requestId: `${baseRequestId}:image:${index}`,
           type: "image",
+          systemName,
           isDeleted: Boolean(deletedInfo),
           deletedAtLabel: deletedInfo?.deletedAtLabel,
+          name: displayName,
           url,
           prompt: getString(imagePrompts?.[url], originalPrompt),
           model: getModelLabel("image", modelId),
@@ -309,6 +399,7 @@ function getWorkspaceMediaItems(state: unknown): AdminMediaItem[] {
           resolution,
           duration: "-",
           size: getDimensionsLabel(imageDimensions?.[url]),
+          style,
           createdAtTs: finiteNumber(message.createdAt),
         });
       });
@@ -318,11 +409,16 @@ function getWorkspaceMediaItems(state: unknown): AdminMediaItem[] {
 
       videoUrls.forEach((url, index) => {
         const deletedInfo = deletedAssetInfoMap.get(url) ?? deletedAssetInfoMap.get(normalizeMediaUrlForAdmin(url));
+        const systemName = getString(mediaSystemNames?.[url]);
+        const displayName = assetDisplayNameMap.get(url) ?? assetDisplayNameMap.get(normalizeMediaUrlForAdmin(url)) ?? formatAdminMediaName(systemName, undefined, `视频${index + 1}`);
         items.push({
           id: `${getString(message.id, "message")}-video-${index}`,
+          requestId: `${baseRequestId}:video:${index}`,
           type: "video",
+          systemName,
           isDeleted: Boolean(deletedInfo),
           deletedAtLabel: deletedInfo?.deletedAtLabel,
+          name: displayName,
           url,
           prompt: getString(videoPrompts?.[url], originalPrompt),
           model: getModelLabel("video", modelId),
@@ -330,6 +426,7 @@ function getWorkspaceMediaItems(state: unknown): AdminMediaItem[] {
           resolution,
           duration,
           size: getDimensionsLabel(videoDimensionsMap?.[url] ?? message.videoDimensions),
+          style: "-",
           createdAtTs: finiteNumber(message.createdAt),
         });
       });
@@ -410,6 +507,23 @@ function getWorkspaceMediaSystemNameMap(state: unknown) {
         }
       }
     }
+  }
+
+  return map;
+}
+
+function getWorkspaceAssetDisplayNameMap(state: unknown) {
+  const map = new Map<string, string>();
+  if (!isRecord(state) || !Array.isArray(state.assets)) return map;
+
+  for (const asset of state.assets.filter(isRecord)) {
+    const url = getString(asset.url);
+    if (!url) continue;
+    const systemName = getString(asset.systemName) || getString(asset.name);
+    const userName = getString(asset.userName) || (getString(asset.name) && getString(asset.name) !== systemName ? getString(asset.name) : "");
+    const displayName = formatAdminMediaName(systemName, userName, userName || systemName || "媒体");
+    map.set(url, displayName);
+    map.set(normalizeMediaUrlForAdmin(url), displayName);
   }
 
   return map;
@@ -629,7 +743,7 @@ function enrichUploadCreditItem(item: AdminCreditFlowItem, assetMediaMap: Map<st
   if (!asset) return item;
   return {
     ...item,
-    status: asset.isDeleted ? "failed" as const : item.status,
+    status: item.status,
     errorText: asset.isDeleted ? "用户已删除" : item.errorText,
     deletedAtLabel: asset.deletedAtLabel ?? item.deletedAtLabel,
     isReversePrompt: asset.isReversePrompt,
@@ -640,36 +754,6 @@ function enrichUploadCreditItem(item: AdminCreditFlowItem, assetMediaMap: Map<st
 function getPromptToolCategory(source: string) {
   if (source === "image_prompt_reverse") return { id: "reverse", title: "反推提示词" };
   return { id: "optimization", title: "优化提示词" };
-}
-
-function getDeletedLedgerMediaItems(userId: string, ledgers: Array<{ id: string; userId: string; direction: string; kind: string; model: string | null; metadata: unknown; createdAt: Date }>, mediaDetailMap: Map<string, AdminMediaItem> | undefined, assetMediaMap: Map<string, AdminMediaItem> | undefined, target: "conversation" | "asset_generation") {
-  return ledgers.flatMap((ledger): AdminMediaItem[] => {
-    if (ledger.userId !== userId || ledger.direction !== "consume" || (ledger.kind !== "image" && ledger.kind !== "video")) return [];
-    const creditSource = getCreditSource(ledger.metadata);
-    const isAssetGeneration = creditSource === "character_image_generation" || creditSource === "scene_image_generation" || creditSource === "shot_image_generation";
-    if ((target === "asset_generation") !== isAssetGeneration) return [];
-    const url = getLedgerMediaUrls(ledger.metadata)[0] ?? "";
-    if (!url) return [];
-    const normalizedUrl = normalizeMediaUrlForAdmin(url);
-    const existing = target === "asset_generation" ? assetMediaMap?.get(url) ?? assetMediaMap?.get(normalizedUrl) : mediaDetailMap?.get(url) ?? mediaDetailMap?.get(normalizedUrl);
-    if (existing && !existing.isDeleted) return [];
-    const assetCategory = isAssetGeneration ? getAssetGenerationCategory(creditSource).id : "";
-
-    return [{
-      id: `${ledger.id}-deleted-media`,
-      type: ledger.kind,
-      assetType: assetCategory === "character" ? "character_image" : assetCategory === "scene" ? "scene_image" : assetCategory === "shot" ? "shot_image" : undefined,
-      isDeleted: true,
-      url,
-      prompt: "用户已删除",
-      model: getModelLabel(ledger.kind, ledger.model || "-"),
-      ratio: "-",
-      resolution: "-",
-      duration: "-",
-      size: "-",
-      createdAtTs: ledger.createdAt.getTime(),
-    }];
-  });
 }
 
 function getWorkspaceAssetMediaItems(state: unknown): AdminMediaItem[] {
@@ -685,6 +769,8 @@ function getWorkspaceAssetMediaItems(state: unknown): AdminMediaItem[] {
     const previewMeta = isRecord(asset.previewMeta) ? asset.previewMeta : undefined;
     const prompt = getString(asset.sourcePrompt);
     const isUploadedAsset = !previewMeta;
+    const systemName = getString(asset.systemName) || getString(asset.name);
+    const userName = getString(asset.userName) || (getString(asset.name) && getString(asset.name) !== systemName ? getString(asset.name) : "");
 
     return [{
       id: getString(asset.id, `asset-image-${index}`),
@@ -694,7 +780,9 @@ function getWorkspaceAssetMediaItems(state: unknown): AdminMediaItem[] {
       deletedAtLabel: finiteNumber(asset.deletedAt) > 0 ? formatTimestamp(asset.deletedAt) : undefined,
       isUploadedAsset,
       isReversePrompt: isUploadedAsset && Boolean(prompt.trim()) && prompt !== "资产库上传",
-      name: getString(asset.name) || getString(asset.systemName),
+      systemName,
+      userName,
+      name: formatAdminMediaName(systemName, userName, `资产${index + 1}`),
       url,
       prompt: prompt === "资产库上传" ? "" : prompt,
       model: getString(previewMeta?.modelLabel, "-"),
@@ -702,6 +790,7 @@ function getWorkspaceAssetMediaItems(state: unknown): AdminMediaItem[] {
       resolution: getString(previewMeta?.resolution, "-"),
       duration: "-",
       size: getString(previewMeta?.sizeText, "-"),
+      style: getString(previewMeta?.styleLabel, "-"),
       createdAtTs: finiteNumber(asset.createdAt),
     }];
   });
@@ -1010,12 +1099,12 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
       const assetLedgerUrl = getLedgerMediaUrls(item.metadata)[0] ?? "";
       const exactAssetMedia = assetLedgerUrl ? assetMediaMap?.get(assetLedgerUrl) ?? assetMediaMap?.get(normalizeMediaUrlForAdmin(assetLedgerUrl)) : undefined;
       const assetMedia = assetLedgerUrl ? exactAssetMedia : findClosestAssetMedia(assetMediaMap, category.id, item.createdAt);
-      const isDeletedAssetMedia = Boolean(assetLedgerUrl && !assetMedia);
+      const isDeletedAssetMedia = Boolean(assetMedia?.isDeleted);
       const detail = userDetails.get(category.id) ?? { id: category.id, title: category.title, totalCredits: 0, totalUsd: 0, totalCny: 0, items: [] };
       detail.totalCredits += item.credits;
       detail.totalUsd += item.usd;
       detail.totalCny += item.cny;
-      detail.items.push({ id: item.id, requestId: item.requestId ?? item.id, kind: "image", systemName: "", displayName: assetMedia?.name || item.label || category.title, url: assetMedia?.url || assetLedgerUrl, status: isDeletedAssetMedia || assetMedia?.isDeleted ? "failed" : "success", errorText: isDeletedAssetMedia || assetMedia?.isDeleted ? "用户已删除" : undefined, deletedAtLabel: assetMedia?.deletedAtLabel, credits: item.credits, totalTokens: item.totalTokens, usd: item.usd, cny: item.cny, count: item.imageCount, model: item.model || "-", parameters: formatAdminMediaParameterLine(assetMedia, "image", item.model || "-", item.label || category.title), isChargeDisabled: getMetadataBoolean(item.metadata, "creditChargeDisabled"), promptText: assetMedia?.prompt, createdAtLabel: formatShortDate(item.createdAt), createdAtTs: item.createdAt.getTime() });
+      detail.items.push({ id: item.id, requestId: item.requestId ?? item.id, kind: "image", systemName: "", displayName: assetMedia?.name || item.label || category.title, url: assetMedia?.url || assetLedgerUrl, status: "success", errorText: isDeletedAssetMedia || assetMedia?.isDeleted ? "用户已删除" : undefined, deletedAtLabel: assetMedia?.deletedAtLabel, credits: item.credits, totalTokens: item.totalTokens, usd: item.usd, cny: item.cny, count: item.imageCount, model: item.model || "-", parameters: formatAdminMediaParameterLine(assetMedia, "image", item.model || "-", item.label || category.title), isChargeDisabled: getMetadataBoolean(item.metadata, "creditChargeDisabled"), promptText: assetMedia?.prompt, createdAtLabel: formatShortDate(item.createdAt), createdAtTs: item.createdAt.getTime() });
       userDetails.set(category.id, detail);
       userAssetGenerationCreditDetailMap.set(item.userId, userDetails);
     } else if (creditSource === "image_prompt_reverse" || creditSource === "prompt_optimization") {
@@ -1046,6 +1135,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
           id: conversationId,
           title: item.conversationTitle || "未命名对话",
           updatedAtLabel: formatShortDate(item.createdAt),
+          updatedAtTs: item.createdAt.getTime(),
           chatCredits: 0,
           chatUsd: 0,
           chatCny: 0,
@@ -1058,6 +1148,10 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         };
 
       if (item.conversationTitle) detail.title = item.conversationTitle;
+      if (item.createdAt.getTime() >= (detail.updatedAtTs ?? 0)) {
+        detail.updatedAtLabel = formatShortDate(item.createdAt);
+        detail.updatedAtTs = item.createdAt.getTime();
+      }
 
         if (item.kind === "text") {
           if (item.label === "Agent 规划" || item.requestId?.endsWith(":plan")) {
@@ -1080,15 +1174,17 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         const baseRequestId = requestId.replace(/:(image|video):\d+$/, "");
         const hasIndexedMediaRequestId = /:(image|video):\d+$/.test(requestId);
         const ledgerMediaUrls = getLedgerMediaUrls(item.metadata);
-        const resolvedUrl = ledgerMediaUrls[0] ?? mediaUrlMap?.get(requestId) ?? (!hasIndexedMediaRequestId ? mediaUrlMap?.get(baseRequestId) ?? mediaUrlMap?.get(`${baseRequestId}:${item.kind}`) : "") ?? "";
-        const deletedAssetInfo = ledgerMediaUrls[0] ? deletedAssetInfoMap?.get(ledgerMediaUrls[0]) ?? deletedAssetInfoMap?.get(normalizeMediaUrlForAdmin(ledgerMediaUrls[0])) : undefined;
-        const isDeletedMedia = Boolean(deletedAssetInfo || (ledgerMediaUrls[0] && !mediaDetailMap?.get(ledgerMediaUrls[0]) && !mediaDetailMap?.get(normalizeMediaUrlForAdmin(ledgerMediaUrls[0]))));
+        const workspaceUrl = mediaUrlMap?.get(requestId) ?? (!hasIndexedMediaRequestId ? mediaUrlMap?.get(baseRequestId) ?? mediaUrlMap?.get(`${baseRequestId}:${item.kind}`) : "") ?? "";
+        const resolvedUrl = workspaceUrl || ledgerMediaUrls[0] || "";
+        const deletedAssetInfoUrl = ledgerMediaUrls[0] || resolvedUrl;
+        const deletedAssetInfo = deletedAssetInfoUrl ? deletedAssetInfoMap?.get(deletedAssetInfoUrl) ?? deletedAssetInfoMap?.get(normalizeMediaUrlForAdmin(deletedAssetInfoUrl)) : undefined;
+        const isDeletedMedia = Boolean(deletedAssetInfo);
         if (!resolvedUrl) continue;
         const mediaDetail = mediaDetailMap?.get(resolvedUrl) ?? mediaDetailMap?.get(normalizeMediaUrlForAdmin(resolvedUrl));
         const workspaceMediaSystemNameMap = userWorkspaceMediaSystemNameMaps.get(item.userId);
-        const rawSystemName = typeof item.metadata === "object" && item.metadata && "systemName" in item.metadata ? String(item.metadata.systemName || "") : (workspaceMediaSystemNameMap?.get(resolvedUrl) || "");
+        const rawSystemName = typeof item.metadata === "object" && item.metadata && "systemName" in item.metadata ? String(item.metadata.systemName || "") : (mediaDetail?.systemName || workspaceMediaSystemNameMap?.get(resolvedUrl) || "");
         const rawUserName = typeof item.metadata === "object" && item.metadata && "assetName" in item.metadata ? String(item.metadata.assetName || "") : "";
-        const displayName = rawSystemName ? (rawUserName && rawUserName !== rawSystemName ? `${rawSystemName} / ${rawUserName}` : rawSystemName) : (resolvedUrl === "__FAILED__" ? "生成失败" : (rawUserName || (item.kind === "video" ? "video" : "image")));
+        const displayName = mediaDetail?.name || formatAdminMediaName(rawSystemName, rawUserName, resolvedUrl === "__FAILED__" ? "生成失败" : item.kind === "video" ? "video" : "image");
         const parameterLine = formatAdminMediaParameterLine(mediaDetail, item.kind, item.model || "-", item.label || "-");
         const mediaItem: AdminCreditFlowItem = {
           id: item.id,
@@ -1097,7 +1193,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
           systemName: rawSystemName,
           displayName,
           url: resolvedUrl === "__FAILED__" ? "" : resolvedUrl,
-          status: resolvedUrl === "__FAILED__" || isDeletedMedia ? "failed" : "success",
+          status: resolvedUrl === "__FAILED__" ? "failed" : "success",
           errorText: isDeletedMedia ? "用户已删除" : undefined,
           deletedAtLabel: isDeletedMedia ? deletedAssetInfo?.deletedAtLabel ?? formatShortDate(item.createdAt) : undefined,
           credits: item.credits,
@@ -1138,7 +1234,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         const uploadItems = (conversationUploadItemMap?.get(conversation.id) ?? []).map((item) => enrichUploadCreditItem(item, assetMediaMapForUploads));
         if (!detail && uploadItems.length === 0) return undefined;
 
-        const nextDetail: AdminCreditConversationDetail = detail ? { ...detail, title: conversation.title, conversationCode: conversation.conversationCode, updatedAtLabel: conversation.updatedAtLabel, mediaItems: [...detail.mediaItems] } : { id: conversation.id, title: conversation.title, conversationCode: conversation.conversationCode, updatedAtLabel: conversation.updatedAtLabel, chatCredits: 0, chatUsd: 0, chatCny: 0, planCredits: 0, planUsd: 0, planCny: 0, mediaItems: [] };
+        const nextDetail: AdminCreditConversationDetail = detail ? { ...detail, title: conversation.title, conversationCode: conversation.conversationCode, updatedAtLabel: conversation.updatedAtLabel, updatedAtTs: conversation.updatedAtTs, mediaItems: [...detail.mediaItems] } : { id: conversation.id, title: conversation.title, conversationCode: conversation.conversationCode, updatedAtLabel: conversation.updatedAtLabel, updatedAtTs: conversation.updatedAtTs, chatCredits: 0, chatUsd: 0, chatCny: 0, planCredits: 0, planUsd: 0, planCny: 0, mediaItems: [] };
 
         for (const [baseRequestId, failedCount] of imageFailureMap ?? []) {
           const hasMatchingMedia = nextDetail.mediaItems.some((item) => item.kind === "image" && item.requestId.startsWith(baseRequestId));
@@ -1159,7 +1255,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
               count: 0,
               model: "-",
               parameters: "-",
-              errorText: failureErrorMap?.get(baseRequestId) || "图片生成失败，请稍后再试。",
+              errorText: failureErrorMap?.get(baseRequestId) || "服务器繁忙，请稍候再试.....",
               createdAtLabel: conversation.updatedAtLabel,
               createdAtTs: new Date(conversation.updatedAtLabel).getTime() || 0,
             });
@@ -1194,8 +1290,10 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
       .filter((detail) => !workspaceConversationIds.has(detail.id))
       .map((detail) => ({
         ...detail,
-        title: `${detail.title || "已删除对话"}（用户已删除）`,
-        mediaItems: detail.mediaItems.map((media) => ({ ...media, status: "failed" as const, errorText: "用户已删除" })),
+        title: detail.title || "已删除对话",
+        isDeleted: true,
+        deletedAtLabel: detail.updatedAtLabel,
+        mediaItems: detail.mediaItems.map((media) => ({ ...media, errorText: "用户已删除" })),
       }));
     const assetGenerationDetailMap = new Map<string, AdminCreditCategoryDetail>(Array.from(userAssetGenerationCreditDetailMap.get(user.id)?.entries() ?? []).map(([id, detail]) => [id, { ...detail, items: [...detail.items] }]));
     const uploadedAssetUrls = new Set(Array.from(assetGenerationDetailMap.values()).flatMap((detail) => detail.items.map((item) => normalizeMediaUrlForAdmin(item.url)).filter(Boolean)));
@@ -1213,7 +1311,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         systemName: asset.name || "",
         displayName: asset.name || "上传图片",
         url: asset.url,
-        status: asset.isDeleted ? "failed" : "success",
+        status: "success",
         errorText: asset.isDeleted ? "用户已删除" : undefined,
         deletedAtLabel: asset.deletedAtLabel,
         credits: 0,
@@ -1272,13 +1370,14 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
       .filter((detail) => !workspaceConversationIdsForUser.has(detail.id))
       .map((detail): AdminConversation => ({
         id: `${detail.id}-deleted`,
-        title: `${detail.title || "已删除对话"}（用户已删除）`,
+        title: detail.title || "已删除对话",
+        isDeleted: true,
+        deletedAtLabel: detail.updatedAtLabel,
         updatedAtLabel: detail.updatedAtLabel,
-        updatedAtTs: 0,
-        messages: [{ id: `${detail.id}-deleted-message`, role: "system", content: "", error: "用户已删除", createdAtLabel: detail.updatedAtLabel, images: [], videos: [] }],
+        updatedAtTs: detail.updatedAtTs ?? 0,
+        messages: getDeletedConversationMessages(detail),
       }));
     const conversations = [...workspaceConversationsForUser, ...deletedConversations];
-    const mediaDetailMapForUser = userWorkspaceMediaDetailMaps.get(user.id);
     const assetMediaMapForUser = userWorkspaceAssetMediaMaps.get(user.id);
     const conversationUploadedImageMediaItems = Array.from(userWorkspaceConversationUploadItemMaps.get(user.id)?.values() ?? []).flatMap((items) => items.filter((item) => item.kind === "image" && item.url).map((item): AdminMediaItem => {
       const asset = assetMediaMapForUser?.get(item.url) ?? assetMediaMapForUser?.get(normalizeMediaUrlForAdmin(item.url));
@@ -1297,11 +1396,14 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         resolution: "-",
         duration: "-",
         size: "-",
+        style: "-",
         createdAtTs: item.createdAtTs,
       };
     }));
-    const mediaItems = [...getWorkspaceMediaItems(user.workspace?.state), ...conversationUploadedImageMediaItems, ...getDeletedLedgerMediaItems(user.id, creditLedgers, mediaDetailMapForUser, assetMediaMapForUser, "conversation")];
-    const assetMediaItems = [...getWorkspaceAssetMediaItems(user.workspace?.state), ...getDeletedLedgerMediaItems(user.id, creditLedgers, mediaDetailMapForUser, assetMediaMapForUser, "asset_generation")];
+    const baseMediaItems = [...getWorkspaceMediaItems(user.workspace?.state), ...conversationUploadedImageMediaItems];
+    const deletedConversationDetailsForUser = Array.from(ledgerConversationDetailsForUser?.values() ?? []).filter((detail) => !workspaceConversationIdsForUser.has(detail.id));
+    const mediaItems = [...getDeletedConversationMediaItems(deletedConversationDetailsForUser, baseMediaItems), ...baseMediaItems];
+    const assetMediaItems = getWorkspaceAssetMediaItems(user.workspace?.state);
     const creditSummary = userConsumeMap.get(user.id) ?? { credits: 0, totalTokens: 0, usd: 0, cny: 0 };
 
     return {

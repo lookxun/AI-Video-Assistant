@@ -3,6 +3,7 @@
 :root {
   --background: #f5f7fb;
   --foreground: #0f172a;
+  --flashmuse-media-surface: #f4f4f4;
 }
 
 @theme inline {
@@ -29,6 +30,239 @@ body {
 
 body {
   margin: 0;
+}
+
+html[data-flashmuse-theme="dark"] {
+  color-scheme: dark;
+  --background: #0f1014;
+  --foreground: #f4f6fb;
+  --fm-bg: #0f1014;
+  --fm-sidebar: #151820;
+  --fm-panel: #1a1d25;
+  --fm-control: #20242d;
+  --fm-hover: #272c37;
+  --fm-selected: #303642;
+  --fm-border-subtle: #262b35;
+  --fm-border: #343b48;
+  --fm-border-strong: #465063;
+  --fm-text: #f4f6fb;
+  --fm-text-muted: #a8b0bf;
+  --fm-text-subtle: #7d8798;
+  --fm-brand: #367cee;
+  --fm-brand-hover: #4b8cff;
+  --fm-shadow: rgba(0, 0, 0, 0.42);
+  --flashmuse-media-surface: var(--fm-control);
+}
+
+html[data-flashmuse-theme="dark"] body,
+html[data-flashmuse-theme="dark"] .flashmuse-workspace-root,
+html[data-flashmuse-theme="dark"] .flashmuse-main,
+html[data-flashmuse-theme="dark"] .flashmuse-main .yinzao-chat-scroll {
+  background: var(--fm-bg) !important;
+  color: var(--fm-text);
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar {
+  border-color: var(--fm-border-subtle) !important;
+  background: var(--fm-sidebar) !important;
+}
+
+html[data-flashmuse-theme="dark"] .bg-white,
+html[data-flashmuse-theme="dark"] [class*="bg-[#f"],
+html[data-flashmuse-theme="dark"] [class*="bg-[#e"],
+html[data-flashmuse-theme="dark"] [class*="bg-[#d"] {
+  background-color: var(--fm-panel) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="bg-[#f9f9f9]"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="bg-white"] {
+  background-color: var(--fm-sidebar) !important;
+}
+
+html[data-flashmuse-theme="dark"] [class*="bg-[#ececec]"],
+html[data-flashmuse-theme="dark"] [class*="bg-[#eeeeee]"],
+html[data-flashmuse-theme="dark"] [class*="bg-[#f1f1f1]"],
+html[data-flashmuse-theme="dark"] [class*="bg-[#f2f2f2]"],
+html[data-flashmuse-theme="dark"] [class*="bg-[#f3f3f3]"],
+html[data-flashmuse-theme="dark"] [class*="bg-[#f4f4f4]"],
+html[data-flashmuse-theme="dark"] [class*="bg-[#f7f7f7]"],
+html[data-flashmuse-theme="dark"] [class*="bg-[#f9f9f9]"] {
+  background-color: var(--fm-control) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="bg-[#ececec]"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="bg-[#f1f1f1]"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="bg-[#f2f2f2]"] {
+  background-color: var(--fm-selected) !important;
+}
+
+html[data-flashmuse-theme="dark"] [class*="hover:bg-[#e"]:hover,
+html[data-flashmuse-theme="dark"] [class*="hover:bg-[#f"]:hover,
+html[data-flashmuse-theme="dark"] [class*="hover:bg-slate-50"]:hover,
+html[data-flashmuse-theme="dark"] [class*="hover:bg-[#ececec]"]:hover {
+  background-color: var(--fm-hover) !important;
+}
+
+html[data-flashmuse-theme="dark"] [class*="border-[#e"],
+html[data-flashmuse-theme="dark"] [class*="border-[#d"],
+html[data-flashmuse-theme="dark"] [class*="border-slate"] {
+  border-color: var(--fm-border) !important;
+}
+
+html[data-flashmuse-theme="dark"] [class*="text-[#111"],
+html[data-flashmuse-theme="dark"] [class*="text-[#222"],
+html[data-flashmuse-theme="dark"] [class*="text-[#333"],
+html[data-flashmuse-theme="dark"] [class*="text-slate-900"] {
+  color: var(--fm-text) !important;
+}
+
+html[data-flashmuse-theme="dark"] [class*="text-[#555"],
+html[data-flashmuse-theme="dark"] [class*="text-[#666"],
+html[data-flashmuse-theme="dark"] [class*="text-[#777"],
+html[data-flashmuse-theme="dark"] [class*="text-[#8"],
+html[data-flashmuse-theme="dark"] [class*="text-[#9"] {
+  color: var(--fm-text-muted) !important;
+}
+
+html[data-flashmuse-theme="dark"] input,
+html[data-flashmuse-theme="dark"] textarea,
+html[data-flashmuse-theme="dark"] [contenteditable="true"] {
+  color: var(--fm-text);
+  caret-color: var(--fm-brand-hover);
+}
+
+html[data-flashmuse-theme="dark"] .yinzao-input-shell {
+  border-color: color-mix(in srgb, var(--fm-border) 86%, transparent);
+  background: color-mix(in srgb, var(--fm-panel) 88%, transparent);
+  box-shadow: 0 16px 42px var(--fm-shadow);
+}
+
+html[data-flashmuse-theme="dark"] .yinzao-input-shell:focus-within {
+  border-color: var(--fm-border-strong);
+  box-shadow: 0 18px 48px var(--fm-shadow);
+}
+
+html[data-flashmuse-theme="dark"] .yinzao-tool-button {
+  border-color: var(--fm-border) !important;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--fm-control) 94%, white 6%), var(--fm-panel)) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.2) !important;
+}
+
+html[data-flashmuse-theme="dark"] .yinzao-tool-button:hover,
+html[data-flashmuse-theme="dark"] .yinzao-tool-button-active {
+  background: linear-gradient(135deg, var(--fm-selected), var(--fm-control)) !important;
+}
+
+html[data-flashmuse-theme="dark"] img,
+html[data-flashmuse-theme="dark"] video {
+  color-scheme: normal;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="hover:bg-[#ececec]"]:hover,
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="hover:bg-[#e9e9e9]"]:hover,
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="hover:bg-[#f7f7f7]"]:hover {
+  background-color: var(--fm-hover) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar button {
+  background-color: transparent !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="bg-[#ececec]"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="bg-[#f1f1f1]"] {
+  background-color: var(--fm-selected) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="hover:bg-[#ececec]"]:hover,
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="hover:bg-[#e9e9e9]"]:hover,
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="hover:bg-[#f7f7f7]"]:hover {
+  background-color: var(--fm-hover) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-logo-text {
+  filter: invert(1) brightness(1.12) contrast(1.08);
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="border-[#eeeeee]"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="border-[#e5e5e5]"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="border-[#e7e7e7]"] {
+  border-color: var(--fm-border-subtle) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [style*="background: #e5e5e5"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [style*="background:#e5e5e5"] {
+  background: var(--fm-border-subtle) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="bg-[#faf8f2]"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class~="hover:bg-[#f5f1e8]"]:hover {
+  background-color: var(--fm-control) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main [class*="bg-[#f4f4f4]"],
+html[data-flashmuse-theme="dark"] .flashmuse-main [class*="bg-[#f3f3f3]"],
+html[data-flashmuse-theme="dark"] .flashmuse-main [class*="bg-[#f2f2f2]"] {
+  background-color: var(--fm-control) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main [class~="bg-[#f4f4f4]"]:not(.flashmuse-failed-media-card):not(.flashmuse-success-media-card),
+html[data-flashmuse-theme="dark"] .flashmuse-main [class~="bg-[#f3f3f3]"]:not(.flashmuse-failed-media-card):not(.flashmuse-success-media-card),
+html[data-flashmuse-theme="dark"] .flashmuse-main [class~="bg-[#f2f2f2]"]:not(.flashmuse-failed-media-card):not(.flashmuse-success-media-card) {
+  background-color: transparent !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main button[class~="bg-[#f4f4f4]"]:not(.flashmuse-success-media-card),
+html[data-flashmuse-theme="dark"] .flashmuse-main button[class~="bg-[#f3f3f3]"]:not(.flashmuse-success-media-card),
+html[data-flashmuse-theme="dark"] .flashmuse-main button[class~="bg-[#f2f2f2]"]:not(.flashmuse-success-media-card) {
+  background-color: var(--fm-control) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main .flashmuse-success-media-card {
+  background-color: var(--fm-control) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main button[class*="hover:bg-[#e"]:hover,
+html[data-flashmuse-theme="dark"] .flashmuse-main button[class*="hover:bg-[#f"]:hover {
+  background-color: var(--fm-hover) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main [class*="border-[#eeeeee]"],
+html[data-flashmuse-theme="dark"] .flashmuse-main [class*="border-[#e5e5e5]"] {
+  border-color: var(--fm-border-subtle) !important;
+}
+
+html[data-flashmuse-theme="dark"] [class*="border-white"],
+html[data-flashmuse-theme="dark"] [class*="ring-white"],
+html[data-flashmuse-theme="dark"] [class*="border-dashed"] {
+  border-color: var(--fm-border) !important;
+  --tw-ring-color: var(--fm-border) !important;
+}
+
+html[data-flashmuse-theme="dark"] [class*="border-[#dddddd]"],
+html[data-flashmuse-theme="dark"] [class*="border-[#cccccc]"],
+html[data-flashmuse-theme="dark"] [class*="border-[#d9d9d9]"],
+html[data-flashmuse-theme="dark"] [class*="border-[#c8c8c8]"] {
+  border-color: var(--fm-border) !important;
+}
+
+html[data-flashmuse-theme="dark"] [class*="ring-[#e"],
+html[data-flashmuse-theme="dark"] [class*="ring-[#d"],
+html[data-flashmuse-theme="dark"] [class*="ring-white"] {
+  --tw-ring-color: var(--fm-border) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="ring-[#e"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="ring-white"],
+html[data-flashmuse-theme="dark"] .flashmuse-sidebar [class*="border-dashed"] {
+  border-color: var(--fm-border) !important;
+  --tw-ring-color: var(--fm-border) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main [class*="ring-[#e"],
+html[data-flashmuse-theme="dark"] .flashmuse-main [class*="ring-white"],
+html[data-flashmuse-theme="dark"] .flashmuse-main [class*="border-dashed"] {
+  border-color: var(--fm-border) !important;
+  --tw-ring-color: var(--fm-border) !important;
 }
 
 textarea,
@@ -75,6 +309,120 @@ select {
   border-color: rgba(204, 204, 204, 0.9) !important;
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.78), rgba(245, 246, 248, 0.72)) !important;
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.88) !important;
+}
+
+html[data-flashmuse-theme="dark"] .yinzao-input-shell {
+  border-color: var(--fm-border) !important;
+  background: color-mix(in srgb, var(--fm-panel) 88%, transparent) !important;
+  box-shadow: 0 16px 42px var(--fm-shadow) !important;
+}
+
+html[data-flashmuse-theme="dark"] .yinzao-input-shell:focus-within {
+  border-color: var(--fm-border-strong) !important;
+  box-shadow: 0 18px 48px var(--fm-shadow) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main [class~="bg-white/78"],
+html[data-flashmuse-theme="dark"] .flashmuse-main [class~="bg-white/54"] {
+  background-color: color-mix(in srgb, var(--fm-panel) 88%, transparent) !important;
+  border-color: var(--fm-border) !important;
+  box-shadow: 0 16px 42px var(--fm-shadow) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main [class~="focus-within:border-white/70"]:focus-within {
+  border-color: var(--fm-border-strong) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-media-card {
+  background-color: var(--fm-panel) !important;
+  border: 1px solid var(--fm-border-subtle);
+  color: var(--fm-text-muted) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-media-card [class*="text-[#777"],
+html[data-flashmuse-theme="dark"] .flashmuse-media-card [class*="text-[#6"],
+html[data-flashmuse-theme="dark"] .flashmuse-media-card [class*="text-[#4"] {
+  color: var(--fm-text-muted) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main .flashmuse-failed-media-card {
+  background-color: var(--fm-control) !important;
+  border-color: var(--fm-border-subtle) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-feedback-button {
+  background-color: transparent !important;
+  color: var(--fm-text-subtle) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-feedback-button:hover {
+  background-color: var(--fm-control) !important;
+  color: var(--fm-text-muted) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-feedback-meta {
+  color: color-mix(in srgb, var(--fm-text-subtle) 68%, transparent) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main .flashmuse-feedback-button,
+html[data-flashmuse-theme="dark"] .flashmuse-main button.flashmuse-feedback-button {
+  background: transparent !important;
+  color: var(--fm-text-subtle) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main .flashmuse-feedback-button:hover,
+html[data-flashmuse-theme="dark"] .flashmuse-main button.flashmuse-feedback-button:hover {
+  background: var(--fm-control) !important;
+  color: var(--fm-text-muted) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-main .flashmuse-feedback-meta {
+  color: color-mix(in srgb, var(--fm-text-subtle) 58%, transparent) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-input {
+  background-color: color-mix(in srgb, var(--fm-panel) 88%, transparent) !important;
+  border-color: var(--fm-border) !important;
+  box-shadow: 0 16px 42px var(--fm-shadow) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-input:focus-within {
+  border-color: var(--fm-border-strong) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-input [class*="text-[#111"],
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-input [contenteditable="true"] {
+  color: var(--fm-text) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-submit:not(:disabled) {
+  background-color: var(--fm-brand) !important;
+  color: #ffffff !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-submit:not(:disabled):hover {
+  background-color: var(--fm-brand-hover) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-submit:disabled {
+  background-color: #1f3454 !important;
+  color: #6f9fe8 !important;
+  opacity: 1 !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-input[class~="bg-white/78"] {
+  background-color: color-mix(in srgb, var(--fm-panel) 88%, transparent) !important;
+}
+
+html[data-flashmuse-theme="dark"] button.flashmuse-asset-generate-submit:not(:disabled) {
+  background-color: var(--fm-brand) !important;
+  color: #ffffff !important;
+}
+
+html[data-flashmuse-theme="dark"] button.flashmuse-asset-generate-submit:disabled {
+  background-color: #1f3454 !important;
+  color: #6f9fe8 !important;
+  opacity: 1 !important;
 }
 
 .yinzao-character-option-active {
@@ -499,4 +847,78 @@ body.yinzao-scrollbar-active::-webkit-scrollbar-thumb:hover,
 
 button:hover > .home-login-close-mark {
   transform: rotate(360deg);
+}
+
+html[data-flashmuse-theme="dark"] button.flashmuse-asset-generate-submit:not(:disabled) {
+  background: var(--fm-brand) !important;
+  color: #ffffff !important;
+  opacity: 1 !important;
+}
+
+html[data-flashmuse-theme="dark"] button.flashmuse-asset-generate-submit:not(:disabled):hover {
+  background: var(--fm-brand-hover) !important;
+}
+
+html[data-flashmuse-theme="dark"] button.flashmuse-asset-generate-submit:disabled {
+  background: #1f3454 !important;
+  color: #6f9fe8 !important;
+  opacity: 1 !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-placeholder {
+  color: color-mix(in srgb, var(--fm-text-subtle) 42%, transparent) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-empty,
+html[data-flashmuse-theme="dark"] .flashmuse-asset-generate-empty [class*="text-[#"] {
+  color: #9a9a9a !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-preview-toolbar .yinzao-tool-button {
+  border-color: rgba(210, 210, 210, 0.72) !important;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.34), rgba(232, 234, 238, 0.42)) !important;
+  color: #777777 !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), inset 0 -1px 0 rgba(255, 255, 255, 0.2) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-preview-toolbar .yinzao-tool-button:hover {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.5), rgba(236, 238, 242, 0.58)) !important;
+  color: #111111 !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-preview-aside {
+  background-color: #2a303c !important;
+  border-color: var(--fm-border-subtle) !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-preview-stage {
+  background-color: rgba(245, 245, 242, 0.58) !important;
+}
+
+.flashmuse-preview-thumb {
+  background-color: #f1f1f1 !important;
+  border-color: #d8d8d8 !important;
+}
+
+.flashmuse-preview-thumb:hover,
+.flashmuse-preview-thumb-rest:hover {
+  border-color: #bdbdbd !important;
+}
+
+.flashmuse-preview-thumb-selected {
+  border-color: #367cee !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-preview-modal .flashmuse-preview-thumb {
+  background-color: #f1f1f1 !important;
+  border-color: #d8d8d8 !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-preview-modal .flashmuse-preview-thumb:hover,
+html[data-flashmuse-theme="dark"] .flashmuse-preview-modal .flashmuse-preview-thumb-rest:hover {
+  border-color: #bdbdbd !important;
+}
+
+html[data-flashmuse-theme="dark"] .flashmuse-preview-modal .flashmuse-preview-thumb-selected {
+  border-color: #367cee !important;
 }

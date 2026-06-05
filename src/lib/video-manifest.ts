@@ -9,6 +9,7 @@ export type VideoManifestEntry = {
   settings?: { ratio?: string; resolution?: string; duration?: string };
   localVideoUrl?: string;
   remoteVideoUrl?: string;
+  posterUrl?: string;
   createdAt: number;
   updatedAt: number;
 };

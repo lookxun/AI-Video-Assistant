@@ -63,6 +63,10 @@ function getDefaultUserAvatar(email: string) {
   };
 }
 
+function openWorkspaceFresh() {
+  window.location.assign(`/workspace?fresh=${Date.now()}`);
+}
+
 export default function Home() {
   const router = useRouter();
   const [isLoginOpen, setIsLoginOpen] = useState(false);
@@ -155,7 +159,7 @@ export default function Home() {
 
   const openWorkspaceUserDialog = (tab: HomeUserDialogTab) => {
     window.sessionStorage.setItem(WORKSPACE_USER_DIALOG_STORAGE_KEY, tab);
-    router.push("/workspace");
+    openWorkspaceFresh();
   };
 
   const logoutUser = async () => {
@@ -169,7 +173,7 @@ export default function Home() {
 
     if (!prompt) {
       if (currentUser) {
-        router.push("/workspace");
+        openWorkspaceFresh();
         return;
       }
 
@@ -182,7 +186,7 @@ export default function Home() {
     window.sessionStorage.setItem(HOME_PROMPT_STORAGE_KEY, prompt);
 
     if (currentUser) {
-      router.push("/workspace");
+      openWorkspaceFresh();
       return;
     }
 
@@ -279,7 +283,7 @@ export default function Home() {
     try {
       await postJson("/api/auth/login-password", { email: loginEmail, password: loginPassword });
       rememberLoginEmail(loginEmail);
-      router.push("/workspace");
+      openWorkspaceFresh();
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "登录失败");
     } finally {
@@ -296,7 +300,7 @@ export default function Home() {
     try {
       await postJson("/api/auth/verify-code", { email: loginEmail, code });
       rememberLoginEmail(loginEmail);
-      router.push("/workspace");
+      openWorkspaceFresh();
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "验证码登录失败");
       setLoginCode(["", "", "", "", "", ""]);
@@ -372,7 +376,7 @@ export default function Home() {
         <div className="flex items-center gap-3">
           {isAuthLoaded && currentUser ? (
             <>
-            <Link href="/workspace" className="flex h-9 items-center rounded-full border border-white/18 bg-white/10 px-5 font-medium text-white shadow-[0_10px_30px_rgba(0,0,0,0.16)] backdrop-blur-md transition hover:bg-white/18">
+            <Link href="/workspace" className="flex h-9 items-center rounded-full bg-white/10 px-5 font-medium text-white shadow-[0_10px_30px_rgba(0,0,0,0.16)] backdrop-blur-md transition hover:bg-white/18">
               <span style={{ fontSize: 13 }}>进入工作台</span>
             </Link>
             <div ref={userMenuRef} className="relative">
@@ -428,7 +432,7 @@ export default function Home() {
                 resetLoginForm();
                 setIsLoginOpen(true);
               }}
-              className="flex h-9 items-center rounded-full border border-white/18 bg-white/10 px-5 font-medium text-white shadow-[0_10px_30px_rgba(0,0,0,0.16)] backdrop-blur-md transition hover:bg-white/18"
+              className="flex h-9 items-center rounded-full bg-white/10 px-5 font-medium text-white shadow-[0_10px_30px_rgba(0,0,0,0.16)] backdrop-blur-md transition hover:bg-white/18"
             >
               <span style={{ fontSize: 13 }}>登录</span>
             </button>
@@ -479,8 +483,8 @@ export default function Home() {
             width: "min(700px, calc(100% - 48px))",
             borderRadius: 16,
             border: "1px solid rgba(255, 255, 255, 0.22)",
-            background: "linear-gradient(180deg, rgba(255,255,255,0.22), rgba(255,255,255,0.08) 42%, rgba(8,10,18,0.38))",
-            boxShadow: "0 24px 88px rgba(0,0,0,0.42), 0 8px 28px rgba(255,255,255,0.08), inset 0 1px 0 rgba(255,255,255,0.55), inset 0 -22px 42px rgba(255,255,255,0.08)",
+            background: "rgba(18, 22, 36, 0.34)",
+            boxShadow: "0 24px 88px rgba(0,0,0,0.42), 0 8px 28px rgba(255,255,255,0.08), inset 0 1px 0 rgba(255,255,255,0.26)",
             backdropFilter: "blur(42px) saturate(210%) brightness(1.08)",
             WebkitBackdropFilter: "blur(42px) saturate(210%) brightness(1.08)",
           }}
@@ -494,7 +498,7 @@ export default function Home() {
             />
             <button
               type="submit"
-              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#111111] text-white transition hover:bg-[#000000]"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-white/10 text-white transition hover:bg-white/18"
               aria-label="发送"
             >
               <RiArrowUpLine className="h-4 w-4" aria-hidden="true" />
