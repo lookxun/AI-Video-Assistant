@@ -10891,7 +10891,7 @@ export function ChatWorkbench() {
               <img src="/home-assets/logo-text.png" alt="闪念" className="flashmuse-logo-text w-auto object-contain" style={{ height: 26 }} />
               {showWorkspaceIntlBadge ? <span className="pb-[1px] text-[12px] font-medium leading-none text-[#8a8a8a]">Intl.</span> : null}
             </span>
-            <div className="mt-1 whitespace-nowrap text-xs leading-4 text-[#8a8a8a]">AI影片助手</div>
+            <div className="mt-1 whitespace-nowrap text-xs leading-4 text-[#8a8a8a]">AI视频助手</div>
           </div>
         </button>
         <div className="mb-[22px] space-y-[5px]">
