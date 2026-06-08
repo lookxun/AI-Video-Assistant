@@ -8,6 +8,8 @@ import { useBodyScrollLock } from "@/components/use-body-scroll-lock";
 
 const homeAssetVersion = "home-lite-carousel-20260605";
 const HOME_VIDEO_CACHE_KEY = `flashmuse-home-videos-ready-${homeAssetVersion}`;
+const MALAYSIA_HOME_URL = "https://main.venusface.com/";
+const ALI_HOME_URL = "https://ali.venusface.com/";
 const heroSlides = [
   { image: "/home-assets/hero-poster-lite.jpg", video: "/home-assets/hero-background-lite.mp4" },
   { image: "/home-assets/hero-dragon-reference-lite.jpg", video: "/home-assets/hero-dragon-lite.mp4" },
@@ -25,6 +27,7 @@ function staticAssetUrl(path: string) {
 type LoginMode = "password" | "code";
 type LoginStep = "email" | "password" | "code";
 type CodeSendSource = "manual" | "auto";
+type HomeSite = "malaysia" | "ali" | "other";
 type HomeUserDialogTab = "profile" | "credits" | "security" | "settings";
 type HomeUserProfile = {
   email: string;
@@ -74,6 +77,12 @@ function openWorkspaceFresh() {
   window.location.assign(`/workspace?fresh=${Date.now()}`);
 }
 
+function getCurrentHomeSite(hostname: string): HomeSite {
+  if (hostname === "main.venusface.com" || hostname === "api.venusface.com" || hostname === "101.47.19.109") return "malaysia";
+  if (hostname === "ali.venusface.com" || hostname === "static.venusface.com" || hostname === "101.37.129.164") return "ali";
+  return "other";
+}
+
 export default function Home() {
   const router = useRouter();
   const [isLoginOpen, setIsLoginOpen] = useState(false);
@@ -103,6 +112,7 @@ export default function Home() {
   const [currentUser, setCurrentUser] = useState<HomeUserProfile | null>(null);
   const [isAuthLoaded, setIsAuthLoaded] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const [homeSite, setHomeSite] = useState<HomeSite>("other");
   const codeInputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const loginHistoryMenuRef = useRef<HTMLDivElement | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
@@ -110,6 +120,9 @@ export default function Home() {
   const activeHeroSlide = heroSlides[activeHeroIndex];
   const canSubmitEmail = loginEmail.trim().length > 0 && !isLoginSubmitting;
   const defaultUserAvatar = getDefaultUserAvatar(currentUser?.email ?? "");
+  const logoTargetUrl = homeSite === "malaysia" ? ALI_HOME_URL : MALAYSIA_HOME_URL;
+  const logoTargetLabel = homeSite === "malaysia" ? "切换到阿里首页" : "切换到马来首页";
+  const showInternationalBadge = homeSite === "malaysia";
 
   useBodyScrollLock(isLoginOpen);
 
@@ -204,6 +217,7 @@ export default function Home() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => void refreshCurrentUser(), 0);
+    setHomeSite(getCurrentHomeSite(window.location.hostname));
     return () => window.clearTimeout(timer);
   }, []);
 
@@ -449,12 +463,15 @@ export default function Home() {
         style={{ transform: isLoginOpen ? "translateX(-8vw)" : "translateX(0)", filter: isLoginOpen ? "blur(8px)" : undefined, transition: "transform 300ms ease-out, filter 300ms ease-out" }}
       >
       <header className="flex items-center justify-between px-6 py-5 sm:px-10 lg:px-14">
-        <div className="flex items-center gap-2.5">
+        <button type="button" onClick={() => window.location.assign(logoTargetUrl)} className="flex items-center gap-2.5 text-left" aria-label={logoTargetLabel} title={logoTargetLabel}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={staticAssetUrl("/home-assets/logo.png")} alt="闪念 FlashMuse" className="h-[50px] w-[50px] object-contain drop-shadow-[0_0_18px_rgba(116,166,255,0.38)]" />
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={staticAssetUrl("/home-assets/logo-text.png")} alt="闪念" className="w-auto object-contain drop-shadow-[0_0_18px_rgba(255,255,255,0.2)]" style={{ height: 30, filter: "brightness(0) invert(1)" }} />
-        </div>
+          <span className="flex items-end gap-2">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={staticAssetUrl("/home-assets/logo-text.png")} alt="闪念" className="w-auto object-contain drop-shadow-[0_0_18px_rgba(255,255,255,0.2)]" style={{ height: 30, filter: "brightness(0) invert(1)" }} />
+            {showInternationalBadge ? <span className="pb-[1px] text-[11px] font-medium leading-none tracking-[0.02em] text-white/68">International</span> : null}
+          </span>
+        </button>
         <div className="flex items-center gap-3">
           {isAuthLoaded && currentUser ? (
             <>
