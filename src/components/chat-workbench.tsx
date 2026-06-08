@@ -185,6 +185,7 @@ type AssetItem = {
   posterUrl?: string;
   librarySource?: "asset_generation" | "conversation";
   sourcePrompt: string;
+  promptSource?: "generated" | "upload" | "reverse";
   previewMeta?: PreviewMediaMeta;
   sessionId: string;
   messageId?: string;
@@ -6449,7 +6450,7 @@ export function ChatWorkbench() {
   const previewDisplayMeta = previewAsset ? enrichAssetPreviewMeta(previewAsset).previewMeta : undefined;
   const previewIsUploadedAsset = previewAsset ? isUploadedAsset(previewAsset) : false;
   const previewSourceLabel = previewAsset && !previewDisplayMeta ? previewAsset.sourcePrompt === "资产库上传" || previewAsset.librarySource === "asset_generation" ? "资产库上传" : isConversationAsset(previewAsset) ? "对话流上传" : "" : "";
-  const previewHasReversedUploadPrompt = Boolean(previewAsset?.sourcePrompt.trim()) && previewAsset?.sourcePrompt !== "资产库上传" && previewIsUploadedAsset;
+  const previewHasReversedUploadPrompt = Boolean(previewAsset?.sourcePrompt.trim()) && previewAsset?.promptSource === "reverse" && previewIsUploadedAsset;
   const previewHasUsablePrompt = Boolean(previewAsset?.sourcePrompt.trim()) && previewAsset?.sourcePrompt !== "资产库上传" && (!previewIsUploadedAsset || previewHasReversedUploadPrompt);
   const previewPromptText = previewHasUsablePrompt ? previewAsset?.sourcePrompt.trim() ?? "" : "";
   const canReversePreviewPrompt = Boolean(previewAsset && !isVideoAsset(previewAsset) && previewIsUploadedAsset && !previewHasUsablePrompt);
@@ -7107,9 +7108,10 @@ export function ChatWorkbench() {
             name,
             systemName: name,
             url: item.url,
-                librarySource: "asset_generation",
-                sourcePrompt: "资产库上传",
-                sessionId: activeSessionIdValue,
+            librarySource: "asset_generation",
+            sourcePrompt: "资产库上传",
+            promptSource: "upload",
+            sessionId: activeSessionIdValue,
                 lockedType: true,
                 createdAt: Date.now(),
               },
@@ -7205,8 +7207,8 @@ export function ChatWorkbench() {
       if (!data || !nextPrompt) throw new Error("服务器繁忙，请稍候再试！");
       addSessionUsage(activeSessionIdValue, data.usage);
       applyCreditResult(activeSessionIdValue, data.credit);
-      setPreviewAsset((current) => current && current.id === previewAsset.id ? { ...current, sourcePrompt: nextPrompt } : current);
-      setAssets((current) => current.map((asset) => asset.id === previewAsset.id || normalizeMediaUrlForMatch(asset.url) === normalizeMediaUrlForMatch(previewAsset.url) ? { ...asset, sourcePrompt: nextPrompt } : asset));
+      setPreviewAsset((current) => current && current.id === previewAsset.id ? { ...current, sourcePrompt: nextPrompt, promptSource: "reverse" } : current);
+      setAssets((current) => current.map((asset) => asset.id === previewAsset.id || normalizeMediaUrlForMatch(asset.url) === normalizeMediaUrlForMatch(previewAsset.url) ? { ...asset, sourcePrompt: nextPrompt, promptSource: "reverse" } : asset));
     } catch (error) {
       setPreviewPromptError({ assetId: previewAsset.id, message: toUserErrorMessage(error, "服务器繁忙，请稍候再试！") });
     } finally {
@@ -8894,6 +8896,7 @@ export function ChatWorkbench() {
             posterUrl: mediaPosterUrls[url],
             librarySource: "conversation",
             sourcePrompt: namingText || sourcePrompt,
+            promptSource: "generated",
             sessionId,
             messageId,
             createdAt: Date.now(),
@@ -8927,7 +8930,8 @@ export function ChatWorkbench() {
             systemName: name,
             url: image.url,
             librarySource: "conversation",
-            sourcePrompt: contextText || baseName,
+            sourcePrompt: "资产库上传",
+            promptSource: "upload",
             sessionId,
             createdAt: Date.now(),
           },

@@ -393,7 +393,7 @@ function getWorkspaceMediaItems(state: unknown): AdminMediaItem[] {
           deletedAtLabel: deletedInfo?.deletedAtLabel,
           name: displayName,
           url,
-          prompt: getString(imagePrompts?.[url], originalPrompt),
+          prompt: /\/generated\/(?:users\/[^/]+\/)?upload_image\//.test(normalizeMediaUrlForAdmin(url)) ? getString(imagePrompts?.[url]) : getString(imagePrompts?.[url], originalPrompt),
           model: getModelLabel("image", modelId),
           ratio,
           resolution,
