@@ -227,7 +227,6 @@ export async function GET() {
     const workspaceUsage = workspaceSessionUsageMap.get(item.conversationId);
     if (!workspaceUsage) continue;
     if (workspaceUsage.totalTokens > item.totalTokens) item.totalTokens = workspaceUsage.totalTokens;
-    if (workspaceUsage.credits > item.credits) item.credits = workspaceUsage.credits;
     item.imageCount = workspaceUsage.imageCount;
     item.videoCount = workspaceUsage.videoCount;
   }

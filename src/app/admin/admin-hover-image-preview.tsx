@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { getAdminMediaSourceUrl } from "./admin-media-url";
 
 type PreviewPosition = {
   left: number;
@@ -22,6 +23,7 @@ function getPreviewPosition(clientX: number, clientY: number): PreviewPosition {
 
 export function AdminHoverImagePreview({ src, alt, wrapperClassName, children }: { src: string; alt: string; wrapperClassName?: string; children: ReactNode }) {
   const [position, setPosition] = useState<PreviewPosition | null>(null);
+  const previewSrc = getAdminMediaSourceUrl(src);
 
   return (
     <span
@@ -34,7 +36,7 @@ export function AdminHoverImagePreview({ src, alt, wrapperClassName, children }:
       {position ? (
         <span className="pointer-events-none fixed z-[9999] flex items-center justify-center rounded-[10px] border border-white/70 bg-white p-1 shadow-[0_18px_60px_rgba(0,0,0,0.32)]" style={{ left: position.left, top: position.top, maxWidth: position.maxWidth, maxHeight: position.maxHeight }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={src} alt={alt} className="block max-h-[calc(100vh-40px)] max-w-[calc(100vw-40px)] object-contain" style={{ maxWidth: position.maxWidth - 8, maxHeight: position.maxHeight - 8 }} />
+          <img src={previewSrc} alt={alt} className="block max-h-[calc(100vh-40px)] max-w-[calc(100vw-40px)] object-contain" style={{ maxWidth: position.maxWidth - 8, maxHeight: position.maxHeight - 8 }} />
         </span>
       ) : null}
     </span>

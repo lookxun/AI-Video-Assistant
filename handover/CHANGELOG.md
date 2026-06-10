@@ -2,6 +2,78 @@
 
 ## Current Snapshot
 
+### 2026-06-10 本轮追加：本地通用模式、通用对话模型后台开关和 DeepSeek 历史图片处理
+
+- 本轮只做本地，未部署、未提交、未推送。先修本地登录失败：本地数据库缺 `User.lastLoginIp`，应用迁移 `20260610000000_user_login_audit` 后恢复；`scripts/start-project.ps1` 已新增启动前 `docker compose up -d` 和 `npx prisma migrate deploy`，避免本地迁移落后导致登录接口 500。
+- 新增工作台 `通用模式`，位于 `Agent 模式` 上方。通用模式不是剧作 Agent，普通聊天走 `/api/chat mode=general`；明确生图/生视频时调用通用模式选择的图片/视频模型。通用模式工具栏有对话/图片/视频三个模型选择，等宽且不撑出输入框，文字不足用省略号。通用入口和回复图标使用用户给的 `ai-agent-line` SVG。
+- 通用对话模型列表已扩展为 `Seed 2.0 Lite`、`DeepSeek V4 Pro`、`DeepSeek R1 0528`、`Gemini 3 Flash Preview`、`Gemini 3.1 Pro Preview`、`GPT-4o`、`GPT-5.4`、`GPT-5.5`；`GPT-5.5` 金色显示。DeepSeek 图标使用用户给的 SVG；对话模型按钮按厂商显示图标。
+- 后台系统设置新增 `通用模式 / Agent 规划 / 意图识别` 分组。OpenRouter 列显示所有通用对话模型；`Seed 2.0 Lite` 与 BytePlus `Seed 2.0 Lite` 互斥，使用 `general.seed-2-0-lite`；另有 BytePlus `Seed 2.0 Pro` 独立一行独立开关，使用 `general.seed-2-0-pro`。`/api/model-availability` 返回 `generalModels`，前端按该列表过滤通用对话模型。
+- 修通用模式 provider 链路：旧配置 `chat.seed-2-0-lite=byteplus` 曾导致通用模式里选 GPT/Seed 等仍可能映射到火山 Seed，模型自称 Seed。现在 `mode=general` 用 `general.*` key；除用户在后台打开的 BytePlus 通用模型外，其它通用对话模型直连 OpenRouter。
+- 修通用模式模型身份污染：不再隔离不同模型的 assistant 历史，保留完整对话连续性。仅当用户问模型身份时，追加隐藏约束说明当前实际模型名和 ID，让模型按当前身份回答，不沿用历史中其它模型自称。
+- 修 DeepSeek 纯文本模型请求：`DeepSeek V4 Pro` 和 `DeepSeek R1 0528` 在通用模式下只打包文字历史，不带历史图片字段；当前请求若带图片或 `@资产` 仍提示切换支持图片的模型。该修复针对 `B_145/B_146/B_147/B_151/B_152` 一类 `no endpoints found`。
+- 已生成桌面文件 `C:\Users\ASUS\Desktop\OpenRouter对话模型清单.md`，包含 OpenRouter 当前 339 个对话模型的分类表格，未加入项目。
+
+### 2026-06-10 本轮追加：后台生成记录媒体 URL、BytePlus 图片固定计费和扣分文案
+
+- 修复后台生成记录、积分明细、历史媒体弹窗里的裂图问题。新增 `src/app/admin/admin-media-url.ts`，统一处理后台媒体 URL；新增 `src/app/admin/api/media-url/route.ts`，用后台登录态解析远程签名 URL 到本地保存副本。注意接口必须是 `/admin/api/media-url`，因为后台 Cookie path 是 `/admin`；此前放 `/api/admin/media-url` 时图片请求不带 Cookie 导致 401。
+- 线上排查确认：`/generated` 文件未丢，采样中 `541` 个 generated 文件全部存在；裂图主要是 `197` 条旧远程签名 URL，包括 BytePlus TOS 和 OpenRouter content URL。后台现在对远程 URL 先查 `.runtime/media-save-jobs.json`，能找到保存任务就跳本地 `localUrl / thumbnailUrl / posterUrl`。
+- `/admin/api/media-url` 支持 `variant=original|thumb`。左侧主图、悬停大图使用 `variant=original` 返回原图；右侧列表缩略图使用 `variant=thumb` 返回缩略图。曾排查 `37376543` 账号，右侧能显示但左侧显示小图，原因是接口默认返回缩略图；已改为主图返回原图。
+- `37376543` 排查记录：线上用户为 `373765430@qq.com / ID_868181`。其生成图远程 BytePlus URL 已在保存队列落地：原图 `/generated/users/ID_868181/images/1780890311109-e52c9ea3-bfd9-4e5e-8cfd-8201adc5df64.jpg`，缩略图 `/generated/users/ID_868181/image-thumbnails/images/1780890311109-e52c9ea3-bfd9-4e5e-8cfd-8201adc5df64.jpg`。接口验证 `variant=original` 307 到原图，`variant=thumb` 307 到缩略图。
+- BytePlus 图片费用兜底已改。历史统计：BytePlus 图片流水 147 条，84 条有费用、63 条为 0；有费用样本为 Seedream 4.5 `$0.04/张`、Seedream 5.0 `$0.035/张`。`src/lib/openrouter.ts` 现在在 BytePlus 图片 usage 缺失或返回 0 时按固定单价补算；如果响应中 `usage.usd/cost > 0` 仍优先使用响应值。
+- 新图片流水会在 `src/app/api/image/route.ts` 写入 `settings / ratio / resolution / size / sizes`，用于后续按 2K/4K 或真实尺寸重新核算。此前旧流水大多没有分辨率字段，所以无法回溯判断 2K 和 4K 是否同价。
+- 后台扣分文案拆分：`0（未返回成本）` 表示有流水但平台/旧逻辑没给成本；`0（扣分异常）` 表示 workspace 媒体完全匹配不到流水；`0（扣分关闭）` 表示后台关闭扣费；余额不足仍显示 `-实扣 / 应扣xxx`。生成记录从 workspace 补出来的无流水媒体会带 `isCreditMissing`，有 0 成本流水的媒体会带 `isCostUnavailable`。
+- 本轮已按用户要求部署线上：本地和线上 build 均通过，仅剩既有 Turbopack/ffmpeg tracing warning；PM2 `flashmuse` online；阿里 `/_next/static` 已同步并清缓存。没有提交或推送 GitHub。
+
+### 2026-06-10 本轮追加：公网素材审核、视频兜底、后台入口和后台表格
+
+- 线上火山素材审核入口已按用户要求重新打开：`NEXT_PUBLIC_ENABLE_BYTEPLUS_ASSET_REVIEW=true`。该入口用于真人/写实人物参考图审核，当前只在资产当前分类为 `角色图片`、`分镜图片`、`上传图片` 时显示；`场景图片`、生成图片、其它分类不显示。逻辑在 `chat-workbench.tsx` 的 `canReviewBytePlusAsset`，上传图如果被移动到场景分类则不显示。
+- 角色22 审核状态已在数据库确认：`bytePlusAssetId=asset-20260609180613-qc9g5`、`bytePlusAssetStatus=Active`。此前 B_31 是因为视频生成时仍传普通图片 URL，已在服务端 `/api/video` 加 `resolveBytePlusVideoReferenceImages()`，BytePlus 视频模型会从用户 workspace 资产中匹配 `Active` 素材并替换为 `asset://...`。该兜底覆盖前端状态没同步、重新生成、失败重试等场景。
+- 已加视频请求日志：替换成功时输出 `[video-generation] BytePlus asset references applied`，创建成功日志带 `assetReferenceCount`。排查时优先看 PM2 日志 `/root/.pm2/logs/flashmuse-out.log`。
+- B_33/B_35/B_36 是火山轮询阶段输出版权风控：`output video may be related to copyright restrictions`。已更新 `src/lib/error-message.ts`，用户红字显示 `输出视频可能涉及版权限制，平台拒绝生成。`，不再显示“平台服务临时异常”。不要添加非模型真实原因的建议句。
+- 视频提示词中的 `@资产名` 已在发给模型前清洗为 `参考图中的主体`，参考图 hint 只写 `参考图1/2`，不再包含 `@角色22` 这类资产名。
+- 阿里入口偶发把用户踢回首页已修：登录态和工作台实例锁检查不再因一次网络失败/5xx 就跳首页，只在明确未登录或实例失效时跳。初始工作台加载对 `auth/me`、`workspace-state` 加了轻量重试。
+- 输入框 mention 已改为原子块。完整 `@图片名称` 蓝色，后续输入黑色；Backspace/Delete 一次删除整个 mention；普通黑字逐字删除。核心函数：`getEditorMentionRanges()`、`getMentionRangeForDeletion()`、`renderEditorContent()`。
+- 后台打不开已修：`getCurrentAdminEmail()` 不再在 Server Component 渲染阶段补写 Cookie，避免 Next 16 抛 `Cookies can only be modified in a Server Action or Route Handler`。登录/登出 API 继续设置和清理 Cookie。
+- 前台工作台左下用户菜单新增 `后台管理`：`/api/auth/me` 返回 `isAdmin`，只有 `ADMIN_EMAILS` 白名单用户显示。点击新开 `/admin` 标签页，不跳走当前工作台。
+- 后台用户管理接入最近登录 IP/归属地：新增迁移 `20260610000000_user_login_audit`，`User` 新增 `lastLoginIp / lastLoginLocation / lastLoginUserAgent`；前台/后台密码登录和验证码登录均记录。IP 优先取 `x-forwarded-for` 第一个公网 IP。归属地查 `ipwho.is`，失败查 `ip-api.com`。中国地址显示省市，如 `浙江 杭州`；国外显示国家城市。老用户未重新登录显示 `未记录`。
+- 后台表格 UI 已调整：用户管理中用户列固定宽度、积分列左移；积分管理用户列新增头像；积分管理和生成记录中用户列后面的列全部左对齐，左边距统一。
+- 部署和数据库注意：线上 `.env.local` 存在两条 `DATABASE_URL`，第 1 条可用，第 2 条不可用；本轮执行 `npx prisma migrate deploy` 时用 Node 脚本读取第 1 条注入环境。不要在聊天或文档写出密码。一次误传 API route 到父目录导致构建多出 `/api/auth`、`/api/admin`，已删除；以后 scp route 文件必须指定完整目标 `.../login-password/route.ts`。
+
+### 2026-06-09 本轮追加：工作规则更新
+
+- 用户明确要求：后续任务默认只在本地代码里完成和验证，禁止自动部署服务器，禁止自动提交或推送 GitHub。
+- 只有用户明确说“部署”“上线”“提交”“推送”等要求时，才允许操作线上服务器或 GitHub。
+- 后续 AI 接手时，应先本地实现并汇报验证结果，等待用户决定是否部署。
+
+### 2026-06-09 本轮追加：BytePlus 一方素材库审核接入和当前调试状态
+
+- 已确认当前需求是 BytePlus 一方 Private asset library 的素材审核，不是 `Add real-human assets to asset library` 的真人扫码授权流程。
+- 官方页面 `https://docs.byteplus.com/en/docs/ModelArk/1520757` 的路由数据里隐藏了 Private asset library API reference。直接文档编号：`2318270 CreateAssetGroup`、`2318271 CreateAsset`、`2318273 ListAssets`、`2318274 GetAsset`。
+- `CreateAsset` 接口：`POST https://ark.ap-southeast-1.byteplusapi.com/?Action=CreateAsset&Version=2024-01-01`。该 API 只支持 AK/SK 签名，不支持 `ARK_API_KEY` Bearer 鉴权。服务 `ark`，Region `ap-southeast-1`，签名示例为 `HMAC-SHA256 Credential=AK.../yyyymmdd/ap-southeast-1/ark/request`。
+- 新增 `src/lib/byteplus-assets.ts`：读取 `BYTEPLUS_ACCESS_KEY / BYTEPLUS_SECRET_KEY` 等环境变量，生成 `X-Date / X-Content-Sha256 / Authorization`，调用 `CreateAssetGroup / CreateAsset / GetAsset`。素材组 ID 会缓存到 `.runtime/byteplus-asset-group.json`，也可通过 `BYTEPLUS_ASSET_GROUP_ID` 固定。
+- 新增 `src/app/api/byteplus-assets/route.ts`：登录用户才能调用；`POST` 把 `/generated/...` 转成 `NEXT_PUBLIC_PRIMARY_BASE_URL` 下的公网 URL 并提交图片素材；`GET?id=...` 查询素材状态。
+- 修改 `src/components/chat-workbench.tsx`：资产对象新增 BytePlus 素材字段；资产预览右侧新增“火山素材审核”卡片；审核状态为 `Active` 后，BytePlus 视频生成会将模型参考图替换为 `asset://{bytePlusAssetId}`。
+- 新增前端构建开关 `NEXT_PUBLIC_ENABLE_BYTEPLUS_ASSET_REVIEW`。默认不是 `false` 时显示入口。本地默认显示，线上已设置 `NEXT_PUBLIC_ENABLE_BYTEPLUS_ASSET_REVIEW=false` 隐藏入口，功能代码保留。
+- 本地已补 `BYTEPLUS_ACCESS_KEY / BYTEPLUS_SECRET_KEY` 到 `.env.local`，不要提交密钥。线上也曾设置过对应变量，但后续按用户新规则不要再默认部署。
+- 本地登录失败已修：本地数据库缺 `Session.activeWorkspaceInstanceId` 列，已执行 `npx prisma migrate deploy` 应用迁移。
+- 当前待排查：本地提交审核仍显示通用失败；已给 `/api/byteplus-assets` 加本地错误日志。下一步查看 `start-project.log` 的 `[byteplus-assets] create failed`，判断是公网 URL 下载失败、素材库未签授权/未启用、AK/SK 权限问题还是签名问题。
+
+### 2026-06-09 本轮追加：用量/积分显示修复、应扣积分和工作台单实例锁
+
+- 修复右上角“使用量”里积分和人民币对不齐的问题。旧逻辑中前台 `UsageSummaryButton` 用 workspace 保存的 `session.usageSummary`，人民币由写死汇率 `7.2` 乘美元计算；真实扣费在 `src/lib/credits.ts` 中按后台 `CreditSetting.usdToCnyRate / creditsPerCny` 写入 `CreditLedger`。因此后台设置变动、历史 `usageSummary` 漏记或 workspace 被旧状态覆盖时，显示会不准。
+- `src/components/chat-workbench.tsx` 的 `UsageSummary` 增加 `cny` 字段，删除前端固定汇率常量。右上角人民币直接显示真实流水折算的实际人民币，前台只展示用户实际扣分和实际人民币，不展示应扣积分。
+- `src/app/api/workspace-state/route.ts` 新增 `applyLedgerUsageSummaries()`。工作区 GET 和 PUT 都会按当前用户 `CreditLedger` 真实流水重写会话 `usageSummary`，避免旧 workspace 汇总继续污染右上角显示。该逻辑还会把旧流水按当前 `creditsPerCny` 用 `credits / creditsPerCny` 反推实际人民币。
+- `src/app/api/credits/me/route.ts` 已停止用 workspace `usageSummary.credits` 覆盖真实流水积分。现在“我的积分”消费积分只按 `CreditLedger`，workspace 只继续用于图片/视频数量和 token 兜底。
+- `src/lib/credits.ts` 的 `chargeCredits()` 现在返回并写入流水 metadata：`expectedCredits`、`chargedCredits`、`chargedCny`、`chargedUsd`、`usdToCnyRate`、`creditsPerCny`。如果用户余额不足，实际扣分仍为 `Math.min(user.credits, expectedCredits)`，不会扣成负数；同时保留应扣积分用于后台审计。
+- `/api/chat`、`/api/agent-plan`、`/api/image`、`/api/video` 返回给前台的 `usage.usd/cny` 已改为实际扣分口径。`usage` 不返回 `credits`，避免前端 `addSessionUsage(data.usage)` 和 `applyCreditResult(data.credit)` 重复累加积分。
+- 后台积分明细已显示“实际扣分 / 应扣积分”。`AdminCreditFlowItem` 增加 `expectedCredits`；`CreditFlowRow` 在 `expectedCredits > credits` 时显示 `-100 / 应扣127`。对话积分、规划积分、对话流图片/视频、资产库图片、反推/优化提示词都已接入。旧流水没有 `expectedCredits` metadata 时，后台用 `item.cny * creditSettings.creditsPerCny` 反推。
+- 新增工作台单页面实例锁，解决“同一浏览器多标签共享最新 Cookie，旧标签不会被单 session 踢掉”的问题。`prisma/schema.prisma` 的 `Session` 增加 `activeWorkspaceInstanceId` 和 `activeWorkspaceSeenAt`，新增迁移 `20260609000000_session_workspace_instance`。
+- 新增 `src/app/api/auth/workspace-instance/route.ts`。工作台页面使用 `instanceId` 声明和检查唯一有效实例；`claim=true` 会把当前页面写入 Session，后续检查只有匹配该实例才返回 active。未登录、session 过期、用户禁用或实例不匹配都会返回 inactive。
+- `src/components/chat-workbench.tsx` 进入工作台后会生成页面级 `workspaceInstanceId`，加载完成后先 claim 当前实例，再每 2 秒和窗口 focus 时检查。若不是当前实例，执行 `window.location.replace("/")` 回首页。首页登录状态仍保留，因为不会清除 Cookie。
+- 已部署线上启用：同步本地改动到马来 `/var/www/flashmuse`，停 PM2，执行 `npx prisma migrate deploy`，应用迁移 `20260609000000_session_workspace_instance`，执行 `npx prisma generate` 和 `npm run build`，再 `pm2 restart flashmuse --update-env`、`pm2 save`，最后执行 `/usr/local/bin/sync-flashmuse-next-static.sh --clear-cache` 同步阿里静态并清缓存。
+- 部署中发现线上 `.env.local` 的 `DATABASE_URL` 带双引号且不能直接 `source`。Prisma CLI 需要通过 Node 读取并剥掉首尾引号后设置环境变量。还发现 PostgreSQL 用户 `flashmuse` 当前密码与 `.env.local` 不一致，已把数据库用户密码重置为 `.env.local` 中的值；不要把密码写入文档、聊天或 Git。
+- 验证结果：线上 `npm run build` 通过，仅有既有 `ffmpeg-static`/Turbopack tracing warning；PM2 `flashmuse` online；`https://main.venusface.com/` 返回 200；`https://api.venusface.com/api/model-availability` 返回 200；阿里 `/_next/static` 已同步。接口 `/api/auth/workspace-instance` 已出现在 Next build 路由列表。
+
 ### 2026-06-09 本轮追加：Logo 切换、上传图无提示词和马来缩略图回退
 
 - 首页 Logo 切换已完成。`src/app/page.tsx` 新增马来/阿里站点识别：马来首页点击左上角图形 Logo 或文字 Logo 跳 `https://ali.venusface.com/`；阿里首页点击跳 `https://main.venusface.com/`。马来首页文字 Logo 右侧显示短标 `Intl.`，字体调为 `13px` 并下对齐；阿里首页不显示该标识。

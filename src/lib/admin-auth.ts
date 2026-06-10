@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "crypto";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { isAdminEmail } from "@/lib/admin";
 import { normalizeEmail } from "@/lib/auth";
 
@@ -19,6 +19,61 @@ function safeEqualText(left: string, right: string) {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+function getCookieHeaderValues(rawCookieHeader: string, name: string) {
+  return rawCookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(`${name}=`))
+    .map((part) => part.slice(name.length + 1))
+    .filter((value) => value.length > 0);
+}
+
+function getAdminCookieCandidates(cookieStore: Awaited<ReturnType<typeof cookies>>, rawCookieHeader: string) {
+  const values = cookieStore
+    .getAll(adminCookieName)
+    .map((cookie) => cookie.value)
+    .filter((value) => value.length > 0);
+
+  return Array.from(new Set([...values, ...getCookieHeaderValues(rawCookieHeader, adminCookieName)]));
+}
+
+function setAdminCookie(cookieStore: Awaited<ReturnType<typeof cookies>>, token: string, maxAge: number) {
+  if (authCookieDomain) {
+    cookieStore.set(adminCookieName, "", {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
+      path: "/admin",
+      maxAge: 0,
+    });
+  }
+
+  cookieStore.set(adminCookieName, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
+    path: "/admin",
+    maxAge,
+    ...(authCookieDomain ? { domain: authCookieDomain } : {}),
+  });
+}
+
+function readValidAdminEmail(token: string) {
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature || !safeEqualText(signature, signAdminPayload(payload))) return null;
+
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { email?: unknown; expiresAt?: unknown };
+    const email = normalizeEmail(parsed.email);
+    const expiresAt = typeof parsed.expiresAt === "number" ? parsed.expiresAt : 0;
+
+    if (!email || expiresAt <= Date.now() || !isAdminEmail(email)) return null;
+    return email;
+  } catch {
+    return null;
+  }
+}
+
 export async function createAdminSession(email: string) {
   const normalizedEmail = normalizeEmail(email);
   const expiresAt = Date.now() + adminSessionMaxAgeSeconds * 1000;
@@ -26,46 +81,32 @@ export async function createAdminSession(email: string) {
   const token = `${payload}.${signAdminPayload(payload)}`;
   const cookieStore = await cookies();
 
-  cookieStore.set(adminCookieName, token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
-    path: "/admin",
-    maxAge: adminSessionMaxAgeSeconds,
-    ...(authCookieDomain ? { domain: authCookieDomain } : {}),
-  });
+  setAdminCookie(cookieStore, token, adminSessionMaxAgeSeconds);
 }
 
 export async function getCurrentAdminEmail() {
   const cookieStore = await cookies();
-  const token = cookieStore.get(adminCookieName)?.value;
-  if (!token) return null;
+  const rawCookieHeader = (await headers()).get("cookie") ?? "";
+  const tokens = getAdminCookieCandidates(cookieStore, rawCookieHeader);
+  if (tokens.length === 0) return null;
 
-  const [payload, signature] = token.split(".");
-  if (!payload || !signature || !safeEqualText(signature, signAdminPayload(payload))) {
-    await clearAdminSession();
-    return null;
+  for (const token of tokens) {
+    const email = readValidAdminEmail(token);
+    if (email) return email;
   }
 
-  try {
-    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { email?: unknown; expiresAt?: unknown };
-    const email = normalizeEmail(parsed.email);
-    const expiresAt = typeof parsed.expiresAt === "number" ? parsed.expiresAt : 0;
-
-    if (!email || expiresAt <= Date.now() || !isAdminEmail(email)) {
-      await clearAdminSession();
-      return null;
-    }
-
-    return email;
-  } catch {
-    await clearAdminSession();
-    return null;
-  }
+  return null;
 }
 
 export async function clearAdminSession() {
   const cookieStore = await cookies();
+  cookieStore.set(adminCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
+    path: "/admin",
+    maxAge: 0,
+  });
 
   cookieStore.set(adminCookieName, "", {
     httpOnly: true,

@@ -8,6 +8,8 @@ import { validateReferenceImageCount } from "@/lib/upload-rules";
 import { enqueueRemoteAssetSave } from "@/lib/media-save-queue";
 import { upsertVideoManifestEntry } from "@/lib/video-manifest";
 import { isAgentVideoModelEnabled, isConversationVideoModelEnabled } from "@/lib/system-settings";
+import { prisma } from "@/lib/prisma";
+import { appendUploadRuleFeedbackLog } from "@/lib/upload-rule-feedback-log";
 
 type UsageMeta = {
   promptTokens?: number;
@@ -15,6 +17,11 @@ type UsageMeta = {
   totalTokens?: number;
   usd?: number;
 };
+
+function withChargedUsage(usage: UsageMeta | undefined, credit: Awaited<ReturnType<typeof chargeCredits>> | undefined) {
+  if (!credit || credit.skipped) return usage;
+  return { ...(usage ?? {}), usd: credit.chargedUsd, cny: credit.chargedCny };
+}
 
 function getFiniteNumber(value: unknown) {
   const numberValue = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
@@ -50,6 +57,50 @@ function withBytePlusVideoUsd(usage: UsageMeta | undefined, model: string | unde
 
 function isBytePlusVideoModel(model?: string) {
   return Boolean(model?.startsWith("byteplus:video."));
+}
+
+function normalizeMediaUrlForMatch(value: string) {
+  return value.split("?")[0].split("#")[0].replace(/^https?:\/\/[^/]+/, "");
+}
+
+function getAssetString(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+async function resolveBytePlusVideoReferenceImages(userId: string | undefined, model: string | undefined, referenceImages: string[]) {
+  if (!userId || !isBytePlusVideoModel(model) || referenceImages.length === 0) return referenceImages;
+
+  const workspace = await prisma.userWorkspaceState.findUnique({ where: { userId }, select: { state: true } }).catch(() => null);
+  const state = workspace?.state;
+  const assets = state && typeof state === "object" && Array.isArray((state as { assets?: unknown }).assets) ? (state as { assets: unknown[] }).assets : [];
+  if (assets.length === 0) return referenceImages;
+
+  const assetIdByUrl = new Map<string, string>();
+  for (const item of assets) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const url = getAssetString(record, "url");
+    const bytePlusAssetId = getAssetString(record, "bytePlusAssetId");
+    const status = getAssetString(record, "bytePlusAssetStatus");
+    if (!url || !bytePlusAssetId || status !== "Active") continue;
+    assetIdByUrl.set(normalizeMediaUrlForMatch(url), bytePlusAssetId);
+  }
+
+  let replacedCount = 0;
+  const nextReferences = referenceImages.map((url) => {
+    if (url.startsWith("asset://")) return url;
+    const assetId = assetIdByUrl.get(normalizeMediaUrlForMatch(url));
+    if (!assetId) return url;
+    replacedCount += 1;
+    return `asset://${assetId}`;
+  });
+
+  if (replacedCount > 0) {
+    logVideoTiming("BytePlus asset references applied", { model, referenceCount: referenceImages.length, replacedCount });
+  }
+
+  return nextReferences;
 }
 
 function getBytePlusProviderKey(modelId: string | undefined, source: string | undefined) {
@@ -181,8 +232,21 @@ function getVideoUrl(value: unknown): string | undefined {
 }
 
 export async function POST(request: Request) {
+  let body: {
+    prompt?: string;
+    model?: string;
+    taskId?: string;
+    referenceImages?: string[];
+    settings?: { ratio?: string; resolution?: string; duration?: string };
+    conversationId?: string;
+    conversationTitle?: string;
+    requestId?: string;
+    usage?: UsageMeta;
+    metadata?: { creditSource?: string };
+  } | undefined;
+
   try {
-    const body = (await request.json()) as {
+    body = (await request.json()) as {
       prompt?: string;
       model?: string;
       taskId?: string;
@@ -249,7 +313,7 @@ export async function POST(request: Request) {
         return NextResponse.json({
           ...task,
           status: "succeeded",
-          usage,
+          usage: withChargedUsage(usage, credit),
           credit,
           content: {
             ...task.content,
@@ -291,13 +355,28 @@ export async function POST(request: Request) {
 
     const user = await getCurrentUser();
     await assertUserCanUseCredits(user, "video");
+    const modelReferenceImages = await resolveBytePlusVideoReferenceImages(user?.id, body.model, referenceImages);
 
     const createStartedAt = Date.now();
-    const task = await createOpenRouterVideoTask(prompt, referenceImages, body.settings, body.model, { bytePlusProviderKey: getBytePlusProviderKey(body.model, creditSource) });
+    const task = await createOpenRouterVideoTask(prompt, modelReferenceImages, body.settings, body.model, { bytePlusProviderKey: getBytePlusProviderKey(body.model, creditSource) });
     const createDoneAt = Date.now();
     const videoError = getVideoErrorMessage(task);
 
     if (videoError) {
+      if (referenceImages.length > 0) {
+        void appendUploadRuleFeedbackLog({
+          source: "video",
+          mode: "video",
+          model: body.model,
+          requestId: body.requestId,
+          conversationId: body.conversationId,
+          conversationTitle: body.conversationTitle,
+          error: videoError,
+          referenceImageCount: referenceImages.length,
+          imageCount: referenceImages.length,
+          settings: body.settings,
+        });
+      }
       const codedError = await createCodedApiError(new Error(videoError), GENERIC_MEDIA_ERROR_MESSAGE, "video task create failed");
       return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
     }
@@ -305,6 +384,20 @@ export async function POST(request: Request) {
     const id = task.polling_url ?? task.pollingUrl ?? getCreateTaskId(task);
 
     if (!id) {
+      if (referenceImages.length > 0) {
+        void appendUploadRuleFeedbackLog({
+          source: "video",
+          mode: "video",
+          model: body.model,
+          requestId: body.requestId,
+          conversationId: body.conversationId,
+          conversationTitle: body.conversationTitle,
+          error: "Missing video task id",
+          referenceImageCount: referenceImages.length,
+          imageCount: referenceImages.length,
+          settings: body.settings,
+        });
+      }
       const codedError = await createCodedApiError(new Error("Missing video task id"), GENERIC_MEDIA_ERROR_MESSAGE, "video task id missing");
       return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
     }
@@ -319,12 +412,28 @@ export async function POST(request: Request) {
         ratio: body.settings?.ratio,
         resolution: body.settings?.resolution,
         duration: body.settings?.duration,
-        referenceCount: referenceImages.length,
+        referenceCount: modelReferenceImages.length,
+        assetReferenceCount: modelReferenceImages.filter((url) => url.startsWith("asset://")).length,
       });
     }
 
     return NextResponse.json({ ...task, id, job_id: getCreateTaskId(task), usage: getUsageMeta(task) });
   } catch (error) {
+    const referenceImageCount = Array.isArray(body?.referenceImages) ? body.referenceImages.length : 0;
+    if (referenceImageCount > 0) {
+      void appendUploadRuleFeedbackLog({
+        source: "video",
+        mode: "video",
+        model: body?.model,
+        requestId: body?.requestId ?? body?.taskId,
+        conversationId: body?.conversationId,
+        conversationTitle: body?.conversationTitle,
+        error,
+        referenceImageCount,
+        imageCount: referenceImageCount,
+        settings: body?.settings,
+      });
+    }
     const codedError = await createCodedApiError(error, GENERIC_MEDIA_ERROR_MESSAGE, "video request failed");
     return NextResponse.json(codedError, { status: 500 });
   }

@@ -1,6 +1,7 @@
 import { createAdminSession } from "@/lib/admin-auth";
 import { isAdminEmail } from "@/lib/admin";
 import { isValidEmail, jsonError, normalizeEmail, verifyPassword } from "@/lib/auth";
+import { getLoginAuditData } from "@/lib/login-audit";
 import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
@@ -18,7 +19,7 @@ export async function POST(request: Request) {
   if (!user || !user.passwordHash) return jsonError("该邮箱还没有设置密码，请使用验证码登录");
   if (!(await verifyPassword(password, user.passwordHash))) return jsonError("密码不正确");
 
-  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+  await prisma.user.update({ where: { id: user.id }, data: await getLoginAuditData(request) });
   await createAdminSession(email);
 
   return Response.json({ ok: true });

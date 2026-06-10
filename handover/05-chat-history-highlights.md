@@ -2,7 +2,72 @@
 
 这个文件用于保留和用户对话中的重要结论，帮助下一个 AI 接手时不丢上下文。
 
+## 2026-06-10 本轮本地通用模式关键交接
+
+- 本轮用户再次强调只做本地，不部署。本轮没有部署服务器，没有提交或推送 GitHub。
+- 本地登录“请求失败”原因是本地 PostgreSQL 缺 `20260610000000_user_login_audit` 迁移，`User.lastLoginIp` 列不存在。已执行 `npx prisma migrate deploy`，并改 `scripts/start-project.ps1`：启动前自动 `docker compose up -d` 和 `npx prisma migrate deploy`。以后本地登录 500 先看 `start-project.log` 和迁移状态。
+- 新增 `通用模式`：在输入框模式菜单里位于 `Agent 模式` 上方，图标用用户给的 `ai-agent-line` SVG。通用模式普通聊天走 `/api/chat mode=general`，不是影片/短剧 Agent；明确生图/生视频时复用生成链路，调用通用模式选择的图片/视频模型。通用模式回复前的小蓝图标也用 `ai-agent-line`。
+- 通用模式工具栏有三个等宽选择框：对话模型、图片模型、视频模型。选择框不显示 `对话/图片/视频` 前缀，只显示模型名；宽度不足自动 `...`，输入框变宽后显示更多。三个框永远在输入框里，不撑出。
+- 通用对话模型列表当前顺序：`Seed 2.0 Lite`、`DeepSeek V4 Pro`、`DeepSeek R1 0528`、`Gemini 3 Flash Preview`、`Gemini 3.1 Pro Preview`、`GPT-4o`、`GPT-5.4`、`GPT-5.5`。`GPT-5.5` 金色显示。DeepSeek 图标使用用户给的 SVG。
+- 后台系统设置已接通通用对话模型：新增 `通用模式 / Agent 规划 / 意图识别` 分组。OpenRouter 列展示全部通用对话模型；`Seed 2.0 Lite` 可与 BytePlus `Seed 2.0 Lite` 互斥；BytePlus `Seed 2.0 Pro` 独立一行、独立开关、不互斥。新增系统设置 key：`general.seed-2-0-lite`、`general.seed-2-0-pro`。`/api/model-availability` 新增 `generalModels`。
+- 重要链路修复：旧本地 `.env.local` 有 `chat.seed-2-0-lite` 配成 `byteplus`，会让旧普通对话链路实际请求火山 Seed，所以用户选其它模型时看到模型自称 Seed。现在 `mode=general` 使用新的 `general.*` key，不再走旧 `chat.*` 映射；除后台打开的 BytePlus 通用模型外，通用对话模型直连 OpenRouter。
+- 模型身份污染最终方案：不隔离历史。用户曾担心“每个模型看不到其它模型回复会破坏连续性”，所以已改为完整历史照常发送；只有当用户问“你是谁/什么模型/谁开发/当前模型”等身份问题时，追加隐藏约束，说明当前实际模型名和模型 ID，要求不要沿用历史里其它 assistant 的身份。
+- DeepSeek 报错结论：`B_145/B_146/B_147/B_151/B_152` 都是通用模式 DeepSeek 的 `no endpoints found`。直测 OpenRouter，`DeepSeek V4 Pro` 和 `DeepSeek R1 0528` 纯文本多次 200；报错原因主要是历史里带图片字段，而这两个是纯文本模型。已对这两个模型特殊处理：历史图片字段不打包，只传文字历史；如果当前这次用户带图片或 `@资产`，前端提示切换支持图片的模型。
+- 本地直测结果：`Seed 2.0 Lite`、`DeepSeek V4 Pro`、`DeepSeek R1 0528` 可用；`Gemini 3 Flash Preview`、`Gemini 3.1 Pro Preview`、`GPT-4o`、`GPT-5.4`、`GPT-5.5` 当前返回 OpenRouter 403 地区不可用。后续用户测试这些模型报地区不可用不是本项目路由错。
+- 桌面有 `C:\Users\ASUS\Desktop\OpenRouter对话模型清单.md`，记录 OpenRouter 339 个对话模型，按 53 个厂商分类。该文件不在项目内。
+
+## 2026-06-10 本轮对话关键交接
+
+- 本轮用户要求排查后台生成记录里图片不显示和很多 `扣分异常`。结论：线上 generated 文件没有丢，裂图主要来自过期远程签名 URL。采样显示 generated 文件 `541` 个全部存在，远程 URL `197` 条，主要是 BytePlus TOS 和 OpenRouter content URL。
+- 已新增后台媒体 URL 解析：`src/app/admin/admin-media-url.ts` + `src/app/admin/api/media-url/route.ts`。后台遇到远程签名 URL 时走 `/admin/api/media-url`，接口读 `.runtime/media-save-jobs.json`，把远程 URL 映射到本地 `localUrl / thumbnailUrl / posterUrl`。接口必须放 `/admin/api`，不要移到 `/api/admin`，因为后台 Cookie path 是 `/admin`。
+- 关键踩坑：第一次接口返回 `http://localhost:3000/generated/...`，导致浏览器打不开；已改成相对 `Location: /generated/...`。第二次发现左侧主图显示小缩略图，已加 `variant=original|thumb`：主图/悬停大图用 `original`，右侧列表小图用 `thumb`。
+- `37376543` 账号排查：用户为 `373765430@qq.com / ID_868181`，他只有一张生成图但后台不显示。原因是 workspace 和资产里仍是 BytePlus 远程签名 URL，但保存队列已有本地副本。原图为 `/generated/users/ID_868181/images/1780890311109-e52c9ea3-bfd9-4e5e-8cfd-8201adc5df64.jpg`，缩略图为 `/generated/users/ID_868181/image-thumbnails/images/1780890311109-e52c9ea3-bfd9-4e5e-8cfd-8201adc5df64.jpg`。服务器验证两者 200，接口验证 `original` 返回原图、`thumb` 返回缩略图。
+- 用户问 BytePlus 图片是不是每次都返回 0。线上/本地流水统计：不是。BytePlus 图片共 147 条，63 条为 0，84 条有费用。Seedream 4.5 有费用样本是 `$0.04/张`，Seedream 5.0 有费用样本是 `$0.035/张`。用户决定先按这个固定费用扣，后续再按新流水里的分辨率和尺寸核算。
+- 已改 `src/lib/openrouter.ts`：BytePlus 图片如果响应 `usage.usd/cost > 0` 就用响应值；如果缺失或为 0，Seedream 4.5 按 `$0.04/张`，Seedream 5.0 按 `$0.035/张`。已改 `src/app/api/image/route.ts`：新流水 metadata 写 `settings / ratio / resolution / size / sizes`，后面可以按 2K/4K 重新算。
+- 已改后台扣分文案：`0（未返回成本）` 表示有流水但成本为 0；`0（扣分异常）` 表示完全找不到流水；`0（扣分关闭）` 表示后台扣费关闭；应扣/实扣仍保留。相关字段在 `AdminCreditFlowItem`：`expectedCredits / isCreditMissing / isCostUnavailable`。
+- 本轮多次按用户要求直接部署线上，使用马来 `/usr/local/bin/deploy-flashmuse-production.sh`，线上 build 通过，PM2 online，阿里 `_next/static` 同步并清缓存。没有提交/推送 GitHub。
+- 用户临时改变规则：火山素材审核功能必须在公网测，相关修复本轮允许直接改完部署。线上火山审核入口已打开。后续若用户继续测试火山审核，可直接部署，但 GitHub 仍不要提交/推送，除非用户明确要求。
+- 火山审核入口不是所有图片都显示。最终规则是按当前分类：`角色图片`、`分镜图片`、`上传图片` 显示；`场景图片` 和其它分类不显示。用户强调“上传图如果移动到场景图片分类里，就不显示”。
+- 自动识别真人不能做到 100%，所以本轮没有做真人自动检测。当前方案是用户在可能有真人的分类中手动提交审核。
+- 角色22 的线上审核状态已确认通过，`asset-20260609180613-qc9g5`。B_31 是没用 asset ID；已在服务端视频接口兜底替换 `asset://`。如果以后用户说“审核通过还真人拦截”，先看 `/root/.pm2/logs/flashmuse-out.log` 是否有 `BytePlus asset references applied` 和 `assetReferenceCount: 1`。
+- B_33 这类 `output video may be related to copyright restrictions` 是输出版权风控，不是素材审核失败。用户要求错误红字显示模型真实原因，不要显示“平台服务临时异常”，也不要加不是模型给出的建议句。当前文案：`输出视频可能涉及版权限制，平台拒绝生成。`
+- 对 `@角色22 跑步的视频` 这类输入，模型真实 prompt 会清洗成 `参考图中的主体 跑步的视频`，避免资产名进入火山提示词。
+- 阿里工作台不稳定导致退出的真实原因：定时 `/api/auth/me` 或 `/api/auth/workspace-instance` 一次失败就跳首页。已改为仅明确未登录/实例失效才跳；网络抖动不踢。
+- 输入框 mention 体验已修：只有完整 `@图片名称` 蓝色；后续输入黑色；Backspace/Delete 一次删除整个 mention。若后续出现输入法/光标问题，看 `PlainMentionEditor`。
+- 后台页面曾打不开，原因是 Server Component 里写 Cookie。已修 `getCurrentAdminEmail()` 只读 Cookie。以后不要在 Server Component 调 `cookies().set()`。
+- 左下用户菜单新增 `后台管理`，只对白名单用户显示，点击新开后台页。实现依赖 `/api/auth/me` 的 `isAdmin` 字段。
+- 后台用户管理最近登录 IP 已做。`12424740@qq.com` 当前有 `60.177.136.74 / 浙江 杭州`。如果用户看不到，多半是前端旧包或缓存；确认构建里无 `待接入`，阿里 `_next/static` 已同步。
+- 后台表格本轮做了视觉统一：用户管理积分列左移，积分管理用户加头像，积分管理和生成记录后续列左对齐。
+- 线上部署坑：`.env.local` 有两条 `DATABASE_URL`，第 1 条可用、第 2 条不可用。Prisma 迁移别直接 source，应用 Node 脚本读取第 1 条。曾误 scp 多 route 文件到父目录生成 `/api/auth` `/api/admin` 多余路由，已删除。
+
+## 2026-06-09 重要工作规则
+
+- 用户明确要求：以后再做任务，默认只在本地完成代码修改和验证，不要直接部署服务器，不要直接提交或推送 GitHub。
+- 只有用户明确要求“部署 / 上线 / 提交 / 推送”时，才允许操作线上服务器或 GitHub。
+- 后续 AI 做完本地改动后，应先汇报改动和验证结果，等待用户决定下一步。
+
+## 2026-06-09 火山一方素材库审核调试记录
+
+- 用户纠正：要做的不是 BytePlus `Add real-human assets` 真人扫码授权，而是交接文档里说的素材库审核 / 一方 `CreateAsset` 入库流程。
+- 已从官方 `https://docs.byteplus.com/en/docs/ModelArk/1520757` 页面 HTML 的 `window._ROUTER_DATA` 里找到隐藏文档：`CreateAssetGroup`、`CreateAsset`、`ListAssets`、`GetAsset`。`CreateAsset` URL 是 `https://ark.ap-southeast-1.byteplusapi.com/?Action=CreateAsset&Version=2024-01-01`，只支持 AK/SK。
+- 关键流程：若没有素材组，先 `CreateAssetGroup` 创建 `GroupType=AIGC`；再 `CreateAsset` 提交图片 URL；再 `GetAsset` 轮询；状态 `Active` 后，Seedance 2.0 视频生成的参考图传 `asset://Asset-...`。
+- 本地代码已实现一方 API：`src/lib/byteplus-assets.ts`、`src/app/api/byteplus-assets/route.ts`。前端资产预览已加入“火山素材审核”卡片和状态字段；`Active` 后 BytePlus 视频请求会自动用 `asset://`。
+- 用户随后要求线上先隐藏这个入口，本地继续做。线上通过 `NEXT_PUBLIC_ENABLE_BYTEPLUS_ASSET_REVIEW=false` 隐藏；本地默认显示。后续不要直接部署，除非用户明确要求。
+- 本地登录“请求失败”已排查并修复：本地数据库缺工作台实例锁迁移字段，已执行 `npx prisma migrate deploy`。
+- 本地 `.env.local` 已加入素材库 `BYTEPLUS_ACCESS_KEY / BYTEPLUS_SECRET_KEY`。密钥来自外部 `E:\project\【1】Api key\Byteplus\Byteplus api key.md`，不要输出、不要写入文档、不要提交。
+- 当前最后状态：用户本地点击“提交审核”仍看到 `请求失败，请稍后再试。`。已在本地 `/api/byteplus-assets` catch 里加 `console.error("[byteplus-assets] create failed", error)`。下一步应让用户再点一次，然后读取 `start-project.log` 查真实错误；先不要部署。
+
 ## 2026-06-08 本轮关键交接
+
+### 2026-06-09 本轮追加：用量显示、应扣积分和工作台单实例
+
+- 用户反馈：很多对话流右上角使用量里，积分和人民币对不起来。排查结论：真实扣费大多没错，显示口径有问题。右上角以前读 workspace `session.usageSummary`，人民币还写死用 `7.2` 汇率；真实扣费按后台 `CreditSetting` 和 `CreditLedger`。部分历史会话的 `usageSummary` 还比真实流水少，说明旧 workspace 汇总曾漏记或被旧状态覆盖。
+- 已统一口径：真实积分以 `CreditLedger` 为准。`/api/workspace-state` 现在 GET/PUT 都会用真实流水重算每个会话 `usageSummary`。前台右上角显示的积分、美元、人民币都是“实际扣分口径”，人民币不再由前端固定汇率换算。
+- 已补应扣积分：`chargeCredits()` 写 `expectedCredits / chargedCredits / chargedCny / chargedUsd` 到流水 metadata。用户余额不足时，真实只扣余额；前台只显示实际扣分，后台行内显示 `-实际扣分 / 应扣xxx`。旧流水没有 metadata 时，后台用 `cny * creditsPerCny` 反推应扣。
+- 用户进一步确认：同一个账号不能同时操作多个工作台，即使同一台电脑多标签也不行，否则会互相覆盖输入和 workspace。单 session 只能限制不同登录态；同一浏览器多个标签共享同一个最新 Cookie，因此还需要工作台页面实例锁。
+- 已新增工作台单实例锁：`Session` 表新增 `activeWorkspaceInstanceId / activeWorkspaceSeenAt`；新增接口 `/api/auth/workspace-instance`。工作台页面打开后声明自己是唯一有效实例，旧工作台最多 2 秒检测到不是当前实例并回首页。回首页不等于退出登录，首页仍显示登录状态；再次进入工作台会抢占唯一实例。
+- 线上部署已完成：迁移 `20260609000000_session_workspace_instance` 已应用，`npx prisma generate`、`npm run build` 通过，PM2 已重启，阿里 `/_next/static` 已同步并清缓存。健康检查：`https://main.venusface.com/` 200，`https://api.venusface.com/api/model-availability` 200。
+- 重要部署经验：线上 `.env.local` 不是 shell 可 source 格式，`DATABASE_URL` 带双引号。Prisma CLI 需要用 Node/dotenv 或手动剥离引号注入 `DATABASE_URL`。本轮还发现数据库用户密码与 `.env.local` 不一致，已重置为 `.env.local` 的值；不要暴露密码。
 
 ### 本轮追加：Logo 切换、上传图提示词、缩略图回退
 

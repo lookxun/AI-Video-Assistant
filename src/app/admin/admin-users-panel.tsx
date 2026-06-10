@@ -4,11 +4,7 @@ import { Fragment, useMemo, useState, useTransition } from "react";
 import { RiArrowDownSLine, RiArrowRightSLine, RiCloseLine, RiQuillPenAiLine, RiSearchLine } from "react-icons/ri";
 import { useBodyScrollLock } from "@/components/use-body-scroll-lock";
 import { AdminHoverImagePreview } from "./admin-hover-image-preview";
-
-function getMediaThumbnailUrl(url: string) {
-  if (!url.startsWith("/generated/")) return url;
-  return `/api/media-thumbnail?url=${encodeURIComponent(url)}`;
-}
+import { fallbackAdminImageToOriginal, getAdminMediaSourceUrl, getAdminMediaThumbnailUrl, normalizeAdminMediaUrl } from "./admin-media-url";
 
 function getLocalVideoPosterUrl(url: string) {
   const userVideoMatch = url.match(/^\/generated\/users\/([^/]+)\/videos\//);
@@ -71,6 +67,7 @@ export type AdminUserRow = {
   language: string;
   credits: number;
   disabled: boolean;
+  generalModeEnabled: boolean;
   generatedImageCount: number;
   generatedVideoCount: number;
   conversationCount: number;
@@ -85,6 +82,9 @@ export type AdminUserRow = {
   createdAtLabel: string;
   updatedAtLabel: string;
   lastLoginAtLabel: string;
+  lastLoginIp: string | null;
+  lastLoginLocation: string | null;
+  lastLoginUserAgent: string | null;
   workspaceSaved: boolean;
   workspaceUpdatedAtLabel: string;
   sessionCount: number;
@@ -255,9 +255,9 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
                   <div className="relative flex min-h-[480px] flex-1 items-center justify-center bg-[#f5f5f5]">
                     {activeMedia.type === "image" ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={activeMedia.url} alt="生成图片" className="max-h-[560px] max-w-full object-contain" />
+                      <img src={getAdminMediaSourceUrl(activeMedia.url)} alt="生成图片" className="max-h-[560px] max-w-full object-contain" />
                     ) : (
-                      <video src={activeMedia.url} controls className="max-h-[560px] max-w-full bg-black" />
+                      <video src={getAdminMediaSourceUrl(activeMedia.url)} controls className="max-h-[560px] max-w-full bg-black" />
                     )}
                   </div>
 
@@ -341,12 +341,12 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
                   <div className="relative flex h-[118px] items-center justify-center bg-[#eeeeee]">
                     {item.type === "image" ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={getMediaThumbnailUrl(item.url)} alt="图片缩略图" className="h-full w-full object-contain" />
+                        <img src={getAdminMediaThumbnailUrl(item.url)} onError={(event) => fallbackAdminImageToOriginal(event.currentTarget, item.url)} alt="图片缩略图" className="h-full w-full object-contain" />
                     ) : (
                       getLocalVideoPosterUrl(item.url) ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={getMediaThumbnailUrl(getLocalVideoPosterUrl(item.url) ?? item.url)} alt="视频封面" className="h-full w-full object-cover" />
-                      ) : <video src={item.url} className="h-full w-full object-cover" muted />
+                        <img src={getAdminMediaThumbnailUrl(getLocalVideoPosterUrl(item.url) ?? item.url)} onError={(event) => fallbackAdminImageToOriginal(event.currentTarget, item.url)} alt="视频封面" className="h-full w-full object-cover" />
+                      ) : <video src={getAdminMediaSourceUrl(item.url)} className="h-full w-full object-cover" muted />
                     )}
                     {item.isDeleted ? <div className="absolute inset-x-0 bottom-0 bg-red-500/88 py-1 text-center text-[12px] font-medium text-white">用户已删除</div> : null}
                     <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-8 text-left text-[11px] font-medium text-white">
@@ -402,7 +402,7 @@ function AdminHistoryMessage({ message }: { message: AdminConversationMessage })
             {message.images.map((url, index) => (
               <AdminHoverImagePreview key={`${url}-${index}`} src={url} alt="历史图片" wrapperClassName="relative block overflow-hidden rounded-[10px] bg-[#f2f2f2]">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={getMediaThumbnailUrl(url)} alt="历史图片" className="h-full max-h-[260px] w-full object-contain" />
+                <img src={getAdminMediaThumbnailUrl(url)} onError={(event) => fallbackAdminImageToOriginal(event.currentTarget, url)} alt="历史图片" className="h-full max-h-[260px] w-full object-contain" />
                 <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-8 text-left text-[11px] font-medium text-white">
                   <span className="block truncate">{message.mediaNames?.[url] || `图片${index + 1}`}</span>
                 </div>
@@ -415,7 +415,7 @@ function AdminHistoryMessage({ message }: { message: AdminConversationMessage })
           <div className="mt-3 space-y-2">
             {videos.map((url, index) => (
               <div key={`${url}-${index}`} className="relative w-[520px] max-w-full overflow-hidden rounded-[10px] bg-[#f2f2f2]">
-                <video src={url} controls className="w-full bg-[#f2f2f2]" />
+                <video src={getAdminMediaSourceUrl(url)} controls className="w-full bg-[#f2f2f2]" />
                 <div className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-16px)] rounded bg-black/62 px-2 py-1 text-[11px] font-medium text-white">{message.mediaNames?.[url] || `视频${index + 1}`}</div>
               </div>
             ))}
@@ -476,8 +476,12 @@ function yesNo(value: boolean) {
 }
 
 function getLoginPlace(user: AdminUserRow) {
+  if (user.lastLoginIp || user.lastLoginLocation) {
+    return { ip: user.lastLoginIp || "未知", place: formatLoginLocation(user.lastLoginLocation || "未知") };
+  }
+
   if (!user.email.endsWith("@flashmuse.test")) {
-    return { ip: "待接入", place: "待接入" };
+    return { ip: "未记录", place: "未记录" };
   }
 
   const match = user.email.match(/testuser(\d+)@flashmuse\.test$/);
@@ -488,6 +492,13 @@ function getLoginPlace(user: AdminUserRow) {
     ip: `10.${(index * 17) % 255}.${(index * 31) % 255}.${((index * 47) % 253) + 1}`,
     place: places[(index - 1) % places.length],
   };
+}
+
+function formatLoginLocation(location: string) {
+  const parts = location.split("/").map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) return location || "未知";
+  if (parts[0] === "中国") return Array.from(new Set(parts.slice(1))).join(" ") || "中国";
+  return Array.from(new Set(parts)).join(" ");
 }
 
 export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats: AdminUserStats }) {
@@ -543,6 +554,18 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId: user.id, disabled: !user.disabled }),
+      });
+      if (!response.ok) return;
+      window.location.reload();
+    });
+  }
+
+  function toggleUserGeneralMode(user: AdminUserRow) {
+    startTransition(async () => {
+      const response = await fetch("/admin/api/users/general-mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: user.id, generalModeEnabled: !user.generalModeEnabled }),
       });
       if (!response.ok) return;
       window.location.reload();
@@ -606,9 +629,10 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
                   "积分",
                   "最近登录 IP / 归属地",
                   "最后登录时间",
+                  "通用模式",
                   "状态",
                 ].map((item, index) => (
-                  <th key={`${item}-${index}`} className={`border-b border-[#eeeeee] py-3 font-medium ${index === 0 ? "w-[44px] pl-6 pr-0" : index === 1 ? "pl-2 pr-4" : "px-4"}`}>
+                  <th key={`${item}-${index}`} className={`border-b border-[#eeeeee] py-3 font-medium ${index === 0 ? "w-[44px] pl-6 pr-0" : index === 1 ? "w-[135px] pl-2 pr-4" : index === 2 ? "w-[290px] px-4" : index === 3 ? "w-[120px] px-4" : "px-4"}`}>
                     {item}
                   </th>
                 ))}
@@ -643,8 +667,22 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
                             <span className="font-medium">{formatNumber(user.credits)}</span>
                           </div>
                         </td>
-                        <td className="border-b border-[#f2f2f2] px-4 py-3 text-[#777777]">{loginPlace.ip} / {loginPlace.place}</td>
+                        <td className="border-b border-[#f2f2f2] px-4 py-3 text-[#777777]">
+                          <div className="leading-5">{loginPlace.ip}</div>
+                          <div className="mt-0.5 leading-5 text-[#999999]">{loginPlace.place}</div>
+                        </td>
                         <td className="border-b border-[#f2f2f2] px-4 py-3 text-[#777777]">{user.lastLoginAtLabel}</td>
+                        <td className="border-b border-[#f2f2f2] px-4 py-3">
+                          <button
+                            type="button"
+                            disabled={isPending}
+                            onClick={(event) => { event.stopPropagation(); toggleUserGeneralMode(user); }}
+                            className={`relative h-5 w-9 rounded-full transition disabled:cursor-not-allowed disabled:opacity-60 ${user.generalModeEnabled ? "bg-[#367cee]" : "bg-[#d8d8d8]"}`}
+                            aria-label="通用模式开关"
+                          >
+                            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition ${user.generalModeEnabled ? "left-[18px]" : "left-0.5"}`} />
+                          </button>
+                        </td>
                         <td className="border-b border-[#f2f2f2] px-4 py-3">
                           <div className="flex items-center gap-2">
                             <span className={`rounded-full px-2.5 py-1 text-[12px] ${user.disabled ? "bg-red-50 text-red-500" : "bg-emerald-50 text-emerald-600"}`}>{user.disabled ? "禁用" : "正常"}</span>
@@ -657,7 +695,7 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
 
                       {isExpanded ? (
                         <tr className="bg-[#fbfbfb]">
-                          <td colSpan={7} className="border-b border-[#f2f2f2] px-4 py-4">
+                          <td colSpan={8} className="border-b border-[#f2f2f2] px-4 py-4">
                             <div className="grid grid-cols-4 gap-[5px] px-1 py-1 text-left">
                               <div className="space-y-px">
                                 <DetailItem label="登录帐号" value={user.email} />
@@ -671,10 +709,12 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
                               <div className="space-y-px">
                                 <DetailItem label="最近登录 IP" value={loginPlace.ip} />
                                 <DetailItem label="最近登录归属地" value={loginPlace.place} />
+                                <DetailItem label="登录设备" value={user.lastLoginUserAgent || "未记录"} />
                                 <DetailItem label="Session 数" value={formatNumber(user.sessionCount)} />
                                 <DetailItem label="Session 活跃" value={user.lastSessionSeenAtLabel} />
                                 <DetailItem label="生成完成提醒" value={yesNo(user.notifyOnGenerationComplete)} />
                                 <DetailItem label="自动收入资产库" value={yesNo(user.autoSaveHistory)} />
+                                <DetailItem label="通用模式" value={user.generalModeEnabled ? "已开启" : "未开启"} />
                                 <DetailItem label="预览滚轮" value={`缩放${yesNo(user.previewWheelZoom)} / 翻页${yesNo(user.previewWheelFlip)}`} />
                               </div>
                               <div className="space-y-px">
@@ -699,7 +739,7 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
                 })
               ) : (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-[13px] text-[#999999]">
+                  <td colSpan={8} className="px-4 py-12 text-center text-[13px] text-[#999999]">
                     当前没有匹配用户
                   </td>
                 </tr>

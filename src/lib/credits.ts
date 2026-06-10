@@ -11,6 +11,15 @@ export type UsageLike = {
   usd?: number;
 };
 
+export type CreditChargeResult = {
+  chargedCredits: number;
+  expectedCredits: number;
+  chargedCny: number;
+  chargedUsd: number;
+  balance?: number;
+  skipped: boolean;
+};
+
 export type CreditContext = {
   conversationId?: string;
   conversationTitle?: string;
@@ -104,22 +113,24 @@ export async function chargeCredits(userId: string, kind: CreditKind, usage?: Us
   const usd = Math.max(0, cleanNumber(usage?.usd));
   const cny = usd * settings.usdToCnyRate;
   const shouldCharge = getChargeEnabled(settings, kind, context.metadata);
-  const credits = shouldCharge ? Math.max(0, Math.round(cny * settings.creditsPerCny)) : 0;
+  const expectedCredits = shouldCharge ? Math.max(0, Math.round(cny * settings.creditsPerCny)) : 0;
   const promptTokens = Math.max(0, Math.floor(cleanNumber(usage?.promptTokens)));
   const completionTokens = Math.max(0, Math.floor(cleanNumber(usage?.completionTokens)));
   const totalTokens = Math.max(0, Math.floor(cleanNumber(usage?.totalTokens) || promptTokens + completionTokens));
 
   if (context.requestId) {
     const existing = await prisma.creditLedger.findUnique({ where: { requestId_kind: { requestId: context.requestId, kind } } }).catch(() => null);
-    if (existing) return { chargedCredits: 0, balance: undefined, skipped: true };
+    if (existing) return { chargedCredits: 0, expectedCredits: 0, chargedCny: 0, chargedUsd: 0, balance: undefined, skipped: true } satisfies CreditChargeResult;
   }
 
   return prisma.$transaction(async (tx) => {
     const user = await tx.user.findUnique({ where: { id: userId }, select: { credits: true } });
-    if (!user) return { chargedCredits: 0, balance: undefined, skipped: true };
+    if (!user) return { chargedCredits: 0, expectedCredits: 0, chargedCny: 0, chargedUsd: 0, balance: undefined, skipped: true } satisfies CreditChargeResult;
 
-    const chargedCredits = Math.min(user.credits, credits);
+    const chargedCredits = Math.min(user.credits, expectedCredits);
     const nextCredits = Math.max(0, user.credits - chargedCredits);
+    const chargedCny = settings.creditsPerCny > 0 ? chargedCredits / settings.creditsPerCny : 0;
+    const chargedUsd = settings.usdToCnyRate > 0 ? chargedCny / settings.usdToCnyRate : 0;
 
     if (chargedCredits > 0) {
       await tx.user.update({ where: { id: userId }, data: { credits: nextCredits } });
@@ -143,11 +154,18 @@ export async function chargeCredits(userId: string, kind: CreditKind, usage?: Us
         cny,
         imageCount: Math.max(0, Math.floor(context.imageCount ?? 0)),
         videoCount: Math.max(0, Math.floor(context.videoCount ?? 0)),
-        metadata: shouldCharge ? context.metadata : mergeCreditMetadata(context.metadata, { creditChargeDisabled: true }),
+        metadata: mergeCreditMetadata(shouldCharge ? context.metadata : mergeCreditMetadata(context.metadata, { creditChargeDisabled: true }) as Prisma.InputJsonValue, {
+          expectedCredits,
+          chargedCredits,
+          chargedCny,
+          chargedUsd,
+          usdToCnyRate: settings.usdToCnyRate,
+          creditsPerCny: settings.creditsPerCny,
+        }),
       },
     });
 
-    return { chargedCredits, balance: nextCredits, skipped: false };
+    return { chargedCredits, expectedCredits, chargedCny, chargedUsd, balance: nextCredits, skipped: false } satisfies CreditChargeResult;
   });
 }
 

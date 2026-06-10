@@ -1,0 +1,1 @@
+ALTER TABLE "User" ADD COLUMN "generalModeEnabled" BOOLEAN NOT NULL DEFAULT false;

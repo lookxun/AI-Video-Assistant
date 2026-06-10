@@ -180,6 +180,18 @@ function getMetadataBoolean(metadata: unknown, key: string) {
   return isRecord(metadata) ? metadata[key] === true : false;
 }
 
+function getMetadataNumber(metadata: unknown, key: string) {
+  if (!isRecord(metadata)) return undefined;
+  const value = metadata[key];
+  const numberValue = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(numberValue) ? numberValue : undefined;
+}
+
+function getLedgerExpectedCredits(item: { credits: number; cny: number; metadata: unknown }, creditsPerCny: number) {
+  if (getMetadataBoolean(item.metadata, "creditChargeDisabled")) return 0;
+  return Math.max(0, Math.floor(getMetadataNumber(item.metadata, "expectedCredits") ?? Math.round(item.cny * creditsPerCny) ?? item.credits));
+}
+
 function getMediaPrompt(message: Record<string, unknown>, key: string) {
   const promptMap = getRecordValue(message, key);
   return isRecord(promptMap) ? promptMap : undefined;
@@ -592,6 +604,7 @@ function getWorkspaceConversationMediaItems(state: unknown) {
           count: 0,
           model: modelId,
           parameters: formatAdminMediaParameterLine(media, "image", modelId, "图片生成"),
+          isCreditMissing: true,
           createdAtLabel,
           createdAtTs,
         });
@@ -617,6 +630,7 @@ function getWorkspaceConversationMediaItems(state: unknown) {
           count: 0,
           model: modelId,
           parameters: formatAdminMediaParameterLine(media, "video", modelId, "视频生成"),
+          isCreditMissing: true,
           createdAtLabel,
           createdAtTs,
         });
@@ -1104,7 +1118,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
       detail.totalCredits += item.credits;
       detail.totalUsd += item.usd;
       detail.totalCny += item.cny;
-      detail.items.push({ id: item.id, requestId: item.requestId ?? item.id, kind: "image", systemName: "", displayName: assetMedia?.name || item.label || category.title, url: assetMedia?.url || assetLedgerUrl, status: "success", errorText: isDeletedAssetMedia || assetMedia?.isDeleted ? "用户已删除" : undefined, deletedAtLabel: assetMedia?.deletedAtLabel, credits: item.credits, totalTokens: item.totalTokens, usd: item.usd, cny: item.cny, count: item.imageCount, model: item.model || "-", parameters: formatAdminMediaParameterLine(assetMedia, "image", item.model || "-", item.label || category.title), isChargeDisabled: getMetadataBoolean(item.metadata, "creditChargeDisabled"), promptText: assetMedia?.prompt, createdAtLabel: formatShortDate(item.createdAt), createdAtTs: item.createdAt.getTime() });
+      detail.items.push({ id: item.id, requestId: item.requestId ?? item.id, kind: "image", systemName: "", displayName: assetMedia?.name || item.label || category.title, url: assetMedia?.url || assetLedgerUrl, status: "success", errorText: isDeletedAssetMedia || assetMedia?.isDeleted ? "用户已删除" : undefined, deletedAtLabel: assetMedia?.deletedAtLabel, credits: item.credits, expectedCredits: getLedgerExpectedCredits(item, creditSettings.creditsPerCny), totalTokens: item.totalTokens, usd: item.usd, cny: item.cny, count: item.imageCount, model: item.model || "-", parameters: formatAdminMediaParameterLine(assetMedia, "image", item.model || "-", item.label || category.title), isChargeDisabled: getMetadataBoolean(item.metadata, "creditChargeDisabled"), isCostUnavailable: !getMetadataBoolean(item.metadata, "creditChargeDisabled") && item.credits === 0 && item.usd === 0 && item.cny === 0, promptText: assetMedia?.prompt, createdAtLabel: formatShortDate(item.createdAt), createdAtTs: item.createdAt.getTime() });
       userDetails.set(category.id, detail);
       userAssetGenerationCreditDetailMap.set(item.userId, userDetails);
     } else if (creditSource === "image_prompt_reverse" || creditSource === "prompt_optimization") {
@@ -1125,7 +1139,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
       const isFailedPromptTool = getMetadataString(item.metadata, "status") === "failed" || Boolean(failureReason);
       if (creditSource === "image_prompt_reverse" && (!matchedUrl || (!outputPrompt && !isFailedPromptTool))) continue;
       if (creditSource === "prompt_optimization" && !outputPrompt && !isFailedPromptTool) continue;
-      detail.items.push({ id: item.id, requestId: item.requestId ?? item.id, kind: "image", systemName: "", displayName: isFailedPromptTool ? creditSource === "image_prompt_reverse" ? "反推失败" : "优化失败" : outputPrompt, mediaName: creditSource === "image_prompt_reverse" ? promptMedia?.name : undefined, url: promptMedia?.url || "", status: isFailedPromptTool ? "failed" : "success", errorText: isFailedPromptTool ? failureReason || "服务器繁忙，请稍候再试！" : undefined, credits: item.credits, totalTokens: item.totalTokens, usd: item.usd, cny: item.cny, count: item.imageCount, model: item.model || "-", parameters: getModelLabel("image", item.model || "-"), isChargeDisabled: getMetadataBoolean(item.metadata, "creditChargeDisabled"), createdAtLabel: formatShortDate(item.createdAt), createdAtTs: item.createdAt.getTime() });
+      detail.items.push({ id: item.id, requestId: item.requestId ?? item.id, kind: "image", systemName: "", displayName: isFailedPromptTool ? creditSource === "image_prompt_reverse" ? "反推失败" : "优化失败" : outputPrompt, mediaName: creditSource === "image_prompt_reverse" ? promptMedia?.name : undefined, url: promptMedia?.url || "", status: isFailedPromptTool ? "failed" : "success", errorText: isFailedPromptTool ? failureReason || "服务器繁忙，请稍候再试！" : undefined, credits: item.credits, expectedCredits: getLedgerExpectedCredits(item, creditSettings.creditsPerCny), totalTokens: item.totalTokens, usd: item.usd, cny: item.cny, count: item.imageCount, model: item.model || "-", parameters: getModelLabel("image", item.model || "-"), isChargeDisabled: getMetadataBoolean(item.metadata, "creditChargeDisabled"), createdAtLabel: formatShortDate(item.createdAt), createdAtTs: item.createdAt.getTime() });
       userDetails.set(category.id, detail);
       userPromptToolCreditDetailMap.set(item.userId, userDetails);
     } else {
@@ -1137,9 +1151,11 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
           updatedAtLabel: formatShortDate(item.createdAt),
           updatedAtTs: item.createdAt.getTime(),
           chatCredits: 0,
+          chatExpectedCredits: 0,
           chatUsd: 0,
           chatCny: 0,
           planCredits: 0,
+          planExpectedCredits: 0,
           planUsd: 0,
           planCny: 0,
           chatChargeDisabled: false,
@@ -1156,11 +1172,13 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         if (item.kind === "text") {
           if (item.label === "Agent 规划" || item.requestId?.endsWith(":plan")) {
             detail.planCredits += item.credits;
+            detail.planExpectedCredits = (detail.planExpectedCredits ?? 0) + getLedgerExpectedCredits(item, creditSettings.creditsPerCny);
             detail.planUsd = (detail.planUsd ?? 0) + item.usd;
             detail.planCny = (detail.planCny ?? 0) + item.cny;
             detail.planChargeDisabled = detail.planChargeDisabled || getMetadataBoolean(item.metadata, "creditChargeDisabled");
           } else {
             detail.chatCredits += item.credits;
+            detail.chatExpectedCredits = (detail.chatExpectedCredits ?? 0) + getLedgerExpectedCredits(item, creditSettings.creditsPerCny);
             detail.chatUsd = (detail.chatUsd ?? 0) + item.usd;
             detail.chatCny = (detail.chatCny ?? 0) + item.cny;
             detail.chatChargeDisabled = detail.chatChargeDisabled || getMetadataBoolean(item.metadata, "creditChargeDisabled");
@@ -1197,6 +1215,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
           errorText: isDeletedMedia ? "用户已删除" : undefined,
           deletedAtLabel: isDeletedMedia ? deletedAssetInfo?.deletedAtLabel ?? formatShortDate(item.createdAt) : undefined,
           credits: item.credits,
+          expectedCredits: getLedgerExpectedCredits(item, creditSettings.creditsPerCny),
           totalTokens: item.totalTokens,
           usd: item.usd,
           cny: item.cny,
@@ -1204,6 +1223,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
           model: item.model || "-",
           parameters: parameterLine,
           isChargeDisabled: getMetadataBoolean(item.metadata, "creditChargeDisabled"),
+          isCostUnavailable: !getMetadataBoolean(item.metadata, "creditChargeDisabled") && item.credits === 0 && item.usd === 0 && item.cny === 0 && resolvedUrl !== "__FAILED__",
           promptText: mediaDetail?.prompt,
           createdAtLabel: formatShortDate(item.createdAt),
           createdAtTs: item.createdAt.getTime(),
@@ -1234,7 +1254,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         const uploadItems = (conversationUploadItemMap?.get(conversation.id) ?? []).map((item) => enrichUploadCreditItem(item, assetMediaMapForUploads));
         if (!detail && uploadItems.length === 0) return undefined;
 
-        const nextDetail: AdminCreditConversationDetail = detail ? { ...detail, title: conversation.title, conversationCode: conversation.conversationCode, updatedAtLabel: conversation.updatedAtLabel, updatedAtTs: conversation.updatedAtTs, mediaItems: [...detail.mediaItems] } : { id: conversation.id, title: conversation.title, conversationCode: conversation.conversationCode, updatedAtLabel: conversation.updatedAtLabel, updatedAtTs: conversation.updatedAtTs, chatCredits: 0, chatUsd: 0, chatCny: 0, planCredits: 0, planUsd: 0, planCny: 0, mediaItems: [] };
+        const nextDetail: AdminCreditConversationDetail = detail ? { ...detail, title: conversation.title, conversationCode: conversation.conversationCode, updatedAtLabel: conversation.updatedAtLabel, updatedAtTs: conversation.updatedAtTs, mediaItems: [...detail.mediaItems] } : { id: conversation.id, title: conversation.title, conversationCode: conversation.conversationCode, updatedAtLabel: conversation.updatedAtLabel, updatedAtTs: conversation.updatedAtTs, chatCredits: 0, chatExpectedCredits: 0, chatUsd: 0, chatCny: 0, planCredits: 0, planExpectedCredits: 0, planUsd: 0, planCny: 0, mediaItems: [] };
 
         for (const [baseRequestId, failedCount] of imageFailureMap ?? []) {
           const hasMatchingMedia = nextDetail.mediaItems.some((item) => item.kind === "image" && item.requestId.startsWith(baseRequestId));
@@ -1335,6 +1355,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
       id: user.id,
       userEmail: user.email,
       nickname: user.nickname,
+      avatarUrl: user.avatarUrl,
       currentCredits: user.credits,
       giftedCredits: userIncreaseMap.get(user.id) ?? 0,
       signupGiftedCredits: userSignupIncreaseMap.get(user.id) ?? 0,
@@ -1415,6 +1436,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
       language: user.language,
       credits: user.credits,
       disabled: user.disabled,
+      generalModeEnabled: user.generalModeEnabled,
       generatedImageCount: Math.max(user.generatedImageCount, workspaceSummary.generatedImageCount),
       generatedVideoCount: Math.max(user.generatedVideoCount, workspaceSummary.generatedVideoCount),
       conversationCount: workspaceSummary.conversationCount,
@@ -1429,6 +1451,9 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
       createdAtLabel: formatDate(user.createdAt),
       updatedAtLabel: formatDate(user.updatedAt),
       lastLoginAtLabel: formatDate(getUserLatestLoginActivity(user)),
+      lastLoginIp: user.lastLoginIp,
+      lastLoginLocation: user.lastLoginLocation,
+      lastLoginUserAgent: user.lastLoginUserAgent,
       workspaceSaved: Boolean(user.workspace),
       workspaceUpdatedAtLabel: formatDate(user.workspace?.updatedAt),
       sessionCount: user._count.sessions,

@@ -32,7 +32,23 @@ export type VideoModelRule = {
 
 export const models: ConversationModel[] = [
   { label: "Seed 2.0 Lite", id: "bytedance-seed/seed-2.0-lite" },
+  { label: "DeepSeek V4 Pro", id: "deepseek/deepseek-v4-pro" },
+  { label: "DeepSeek R1 0528", id: "deepseek/deepseek-r1-0528" },
+  { label: "Gemini 3 Flash Preview", id: "google/gemini-3-flash-preview" },
+  { label: "Gemini 3.1 Pro Preview", id: "google/gemini-3.1-pro-preview" },
+  { label: "GPT-4o", id: "openai/gpt-4o" },
   { label: "GPT-5.4", id: "openai/gpt-5.4" },
+  { label: "GPT-5.5", id: "openai/gpt-5.5" },
+] as const;
+
+export const bytePlusConversationModels: ConversationModel[] = [
+  { label: "Seed 2.0 Pro", id: "byteplus:chat.seed-2-0-pro" },
+] as const;
+
+export const frontendConversationModels: ConversationModel[] = [
+  models[0],
+  ...bytePlusConversationModels,
+  ...models.slice(1),
 ] as const;
 
 export const DEFAULT_CHAT_MODEL = "bytedance-seed/seed-2.0-lite";

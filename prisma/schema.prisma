@@ -21,11 +21,15 @@ model User {
   previewWheelFlip           Boolean   @default(true)
   credits                    Int       @default(1500)
   disabled                   Boolean   @default(false)
+  generalModeEnabled         Boolean   @default(false)
   generatedImageCount        Int       @default(0)
   generatedVideoCount        Int       @default(0)
   createdAt                  DateTime  @default(now())
   updatedAt                  DateTime  @updatedAt
   lastLoginAt                DateTime?
+  lastLoginIp                String?
+  lastLoginLocation          String?
+  lastLoginUserAgent         String?
   sessions                   Session[]
   workspace                  UserWorkspaceState?
   creditLedgers              CreditLedger[]
@@ -99,6 +103,8 @@ model Session {
   expiresAt  DateTime
   createdAt  DateTime @default(now())
   lastSeenAt DateTime @default(now())
+  activeWorkspaceInstanceId String?
+  activeWorkspaceSeenAt DateTime?
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])

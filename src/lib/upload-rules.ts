@@ -1,4 +1,4 @@
-export type UploadRuleMode = "agent" | "image" | "video" | "asset-image";
+export type UploadRuleMode = "agent" | "general" | "image" | "video" | "asset-image";
 export type UploadTransportMode = "local-base64" | "server-url";
 
 export type UploadKind = "image" | "document" | "video" | "audio";
@@ -67,7 +67,7 @@ export function getUploadRule(context: UploadRuleContext): UploadRule {
   const transportMode = context.transportMode ?? "local-base64";
   const bytePlusLocalImageMax = transportMode === "server-url" ? 14 : 6;
 
-  if (context.mode === "agent") {
+  if (context.mode === "agent" || context.mode === "general") {
     return makeRule({
       image: kindRule({ enabled: true, maxCount: 5, maxSizeMb: 5, formats: commonImageFormats }),
       document: kindRule({ enabled: true, maxCount: 5, maxSizeMb: 10, formats: documentFormats }),

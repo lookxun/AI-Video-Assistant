@@ -90,7 +90,7 @@ import {
   RiShieldUserLine,
   RiSaveLine,
 } from "react-icons/ri";
-import { ADVANCED_CHAT_MODEL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_VIDEO_MODEL, bytePlusVideoGenerationModels, frontendImageGenerationModels, getExpectedImageDimensions, getExpectedVideoDimensions, getImageQualityBadgeLabel, getImageResolutionLabel, getSupportedImageResolutions, getSupportedVideoRatios, getSupportedVideoResolutions, imageGenerationModels, isNonStandardVideoSize, normalizeImageResolutionForModel, normalizeVideoRatioForModel, normalizeVideoResolutionForModel, videoGenerationModels, type GenerationModel, type ModelName } from "@/lib/models";
+import { ADVANCED_CHAT_MODEL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_VIDEO_MODEL, bytePlusVideoGenerationModels, frontendConversationModels, frontendImageGenerationModels, getExpectedImageDimensions, getExpectedVideoDimensions, getImageQualityBadgeLabel, getImageResolutionLabel, getSupportedImageResolutions, getSupportedVideoRatios, getSupportedVideoResolutions, imageGenerationModels, isNonStandardVideoSize, normalizeImageResolutionForModel, normalizeVideoRatioForModel, normalizeVideoResolutionForModel, videoGenerationModels, type ConversationModel, type GenerationModel, type ModelName } from "@/lib/models";
 import { toUserErrorMessage } from "@/lib/error-message";
 import { useBodyScrollLock } from "@/components/use-body-scroll-lock";
 import { BytePlusIcon } from "@/components/byteplus-icon";
@@ -116,6 +116,7 @@ type Message = {
   videoPrompts?: Record<string, string>;
   videoPosters?: Record<string, string>;
   videoDimensionsMap?: Record<string, ImageDimensions>;
+  textModel?: ModelName;
   statusText?: string;
   pendingImageCount?: number;
   failedImageCount?: number;
@@ -186,6 +187,11 @@ type AssetItem = {
   librarySource?: "asset_generation" | "conversation";
   sourcePrompt: string;
   promptSource?: "generated" | "upload" | "reverse";
+  bytePlusAssetId?: string;
+  bytePlusAssetGroupId?: string;
+  bytePlusAssetStatus?: "Processing" | "Active" | "Failed";
+  bytePlusAssetError?: string;
+  bytePlusAssetUpdatedAt?: number;
   previewMeta?: PreviewMediaMeta;
   sessionId: string;
   messageId?: string;
@@ -276,12 +282,13 @@ type PendingGeneration = {
   agentSuggestions?: SuggestionInput[];
   agentItemPrompts?: string[];
   agentItemSettings?: GenerationSettings[];
+  selectedMediaModels?: Record<"image" | "video", ModelName>;
   retryFailedIndex?: number;
   needsIntentResolution?: boolean;
   sourceText?: string;
 };
 
-type WorkMode = "agent" | "image" | "video";
+type WorkMode = "general" | "agent" | "image" | "video";
 
 type UploadedImage = {
   id: string;
@@ -316,7 +323,7 @@ type MessageGenerationMeta = {
   itemPrompts?: string[];
 };
 
-type ControlMenuName = "model" | "characterModel" | "characterRatio" | "characterResolution" | "characterStyle" | "imageSettings" | "style" | "duration" | "imageCount";
+type ControlMenuName = "model" | "generalChatModel" | "generalImageModel" | "generalVideoModel" | "characterModel" | "characterRatio" | "characterResolution" | "characterStyle" | "imageSettings" | "style" | "duration" | "imageCount";
 type ModeMenuName = "mode";
 type ActivePanel = "chat" | "workflow" | "assets";
 type UserDialogTab = "profile" | "credits" | "security" | "settings";
@@ -339,7 +346,15 @@ type WorkSession = {
   pendingRequest?: PendingGeneration | null;
   pendingRequests?: PendingGeneration[];
   usageSummary?: UsageSummary;
+  memorySummary?: SessionMemorySummary;
   messagesLoaded?: boolean;
+};
+
+type SessionMemorySummary = {
+  content: string;
+  updatedAt: number;
+  summarizedMessageId?: string;
+  summarizedTokenEstimate?: number;
 };
 
 type WorkspaceStatePayload = {
@@ -372,6 +387,8 @@ type CurrentUserProfile = {
   generatedImageCount?: number;
   generatedVideoCount?: number;
   credits?: number;
+  generalModeEnabled?: boolean;
+  isAdmin?: boolean;
 };
 
 type UsageSummary = {
@@ -379,6 +396,7 @@ type UsageSummary = {
   completionTokens: number;
   totalTokens: number;
   usd: number;
+  cny: number;
   credits: number;
 };
 
@@ -495,6 +513,7 @@ type StoredInputSettings = {
   selectedDurations?: Partial<Record<WorkMode, string>>;
   selectedImageCounts?: Partial<Record<WorkMode, string>>;
   selectedGenerationModels?: Partial<Record<"image" | "video", string>>;
+  selectedGeneralModels?: Partial<Record<"chat" | "image" | "video", string>>;
 };
 type AgentModelTier = "normal" | "advanced";
 
@@ -522,10 +541,10 @@ const ASSET_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_PERSISTED_SESSIONS = 30;
 const MAX_INTENT_MEMORY_RULES = 50;
 const MAX_FEEDBACK_LOGS = 300;
-const USD_TO_CNY_RATE = 7.2;
 const MAX_UPLOADED_IMAGES = 10;
 const MAX_SESSION_PENDING_REQUESTS = 10;
 const GENERIC_MEDIA_ERROR_MESSAGE = "服务器繁忙，请稍候再试.....";
+const ENABLE_BYTEPLUS_ASSET_REVIEW = process.env.NEXT_PUBLIC_ENABLE_BYTEPLUS_ASSET_REVIEW !== "false";
 const legacyMediaUrlReplacements = new Map([
   ["/generated/videos/1780454968504-21fb484e-7894-45cb-b730-63c475ee71f2.mp4", "/generated/videos/1780454887939-f010e856-7f46-4fdc-9290-8dd58bd22d85.mp4"],
 ]);
@@ -543,6 +562,26 @@ function getCurrentWorkspaceSite(hostname: string): WorkspaceSite {
   if (hostname === "main.venusface.com" || hostname === "api.venusface.com" || hostname === "101.47.19.109") return "malaysia";
   if (hostname === "ali.venusface.com" || hostname === "static.venusface.com" || hostname === "101.37.129.164") return "ali";
   return "other";
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function fetchJsonWithRetry<T>(url: string, init?: RequestInit, attempts = 3) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetch(url, init);
+      const data = (await response.json().catch(() => ({}))) as T;
+      if (response.ok || response.status === 401) return { response, data };
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < attempts - 1) await delay(600 * (attempt + 1));
+  }
+  throw lastError instanceof Error ? lastError : new Error("请求失败");
 }
 
 function toLocalGeneratedUrl(url: string) {
@@ -1112,12 +1151,20 @@ const imageCountOptions = ["1张", "2张", "3张", "4张"];
 const styleOptions = ["写实风格", "2D风格", "3D风格"];
 const durationOptions = ["5秒", "10秒", "15秒"];
 const userLanguageOptions: UserLanguage[] = ["简体中文", "繁体中文"];
+const MEMORY_SUMMARY_INITIAL_TOKEN_THRESHOLD = 20_000;
+const MEMORY_SUMMARY_INCREMENTAL_TOKEN_THRESHOLD = 12_000;
+const MEMORY_RECENT_MESSAGE_LIMIT = 24;
 const modeOptions: Array<{ label: string; value: WorkMode; icon: typeof RiImageLine }> = [
+  { label: "通用模式", value: "general", icon: AiAgentLineIcon },
   { label: "Agent 模式", value: "agent", icon: RiAiIcon },
   { label: "图片生成", value: "image", icon: RiImageAiLine },
   { label: "视频生成", value: "video", icon: RiFilmAiLine },
 ];
 const modeNoticeText: Record<WorkMode, { title: string; description: string }> = {
+  general: {
+    title: "当前已切换到通用模式",
+    description: "适合普通问答和自由创作。按你选择的对话模型对话；需要生图或生视频时，会调用你选择的图片或视频模型。",
+  },
   agent: {
     title: "当前已切换到Agent模式",
     description: "适合想法还不明确时使用。Agent会帮你理解需求、整理创意、推进故事和分镜，也可以在明确生成意图时自动进入图片或视频生成。",
@@ -1346,8 +1393,20 @@ function getVideoDurationOptions(modelId: string) {
 }
 
 function getGenerationModelLabel(mode: WorkMode, modelId: string) {
-  if (mode === "agent") return "";
+  if (mode !== "image" && mode !== "video") return "";
   return generationModelOptions[mode].find((model) => model.id === modelId)?.label ?? modelId;
+}
+
+function getConversationModelLabel(modelId: string) {
+  return frontendConversationModels.find((model) => model.id === modelId)?.label ?? getActualTextModelLabel(modelId);
+}
+
+function conversationModelSupportsImages(modelId: string) {
+  return !shouldUseTextOnlyHistoryForConversationModel(modelId);
+}
+
+function shouldUseTextOnlyHistoryForConversationModel(modelId: string) {
+  return modelId === "deepseek/deepseek-v4-pro" || modelId === "deepseek/deepseek-r1-0528";
 }
 
 function getActualTextModelLabel(modelId: string) {
@@ -1355,6 +1414,12 @@ function getActualTextModelLabel(modelId: string) {
     "seed-2-0-lite-260428": "Seed 2.0 Lite",
     "seed-2-0-pro-260328": "Seed 2.0 Pro",
     "glm-4-7-251222": "GLM-4.7",
+    "deepseek/deepseek-v4-pro": "DeepSeek V4 Pro",
+    "deepseek/deepseek-r1-0528": "DeepSeek R1 0528",
+    "google/gemini-3-flash-preview": "Gemini 3 Flash Preview",
+    "google/gemini-3.1-pro-preview": "Gemini 3.1 Pro Preview",
+    "openai/gpt-4o": "GPT-4o",
+    "openai/gpt-5.5": "GPT-5.5",
   };
   return labels[modelId] ?? (modelId === DEFAULT_CHAT_MODEL ? "Seed 2.0 Lite" : modelId === ADVANCED_CHAT_MODEL ? "GPT-5.4" : modelId);
 }
@@ -1752,13 +1817,13 @@ function getVideoPosterForMessage(message: Message, url: string) {
 }
 
 function isWorkMode(value: unknown): value is WorkMode {
-  return value === "agent" || value === "image" || value === "video";
+  return value === "general" || value === "agent" || value === "image" || value === "video";
 }
 
 function mergeValidModeSettings(current: Record<WorkMode, string>, stored: Partial<Record<WorkMode, string>> | undefined, validators: Record<WorkMode, readonly string[]>) {
   const next = { ...current };
 
-  (["agent", "image", "video"] as WorkMode[]).forEach((modeName) => {
+  (["general", "agent", "image", "video"] as WorkMode[]).forEach((modeName) => {
     const value = stored?.[modeName];
     if (value && validators[modeName].includes(value)) next[modeName] = value;
   });
@@ -1767,6 +1832,7 @@ function mergeValidModeSettings(current: Record<WorkMode, string>, stored: Parti
 }
 
 function getGenerationModelIcon(modelId: string) {
+  if (modelId.startsWith("deepseek/")) return DeepSeekIcon;
   if (modelId.startsWith("byteplus:") || modelId.startsWith("byteplus/") || modelId.startsWith("ep-")) return BytePlusIcon;
   if (modelId.startsWith("openai/")) return RiOpenaiFill;
   if (modelId.startsWith("google/")) return RiGoogleFill;
@@ -1776,6 +1842,10 @@ function getGenerationModelIcon(modelId: string) {
 
 function isGoldGenerationModel(modelId: string) {
   return modelId === "openai/gpt-5.4-image-2" || modelId === "bytedance/seedance-2.0" || modelId === "byteplus:video.seedance-2-0";
+}
+
+function isGoldConversationModel(modelId: string) {
+  return modelId === "openai/gpt-5.5";
 }
 
 const ratioCardMeta: Record<string, { icon: string; width: string; height: string }> = {
@@ -1863,7 +1933,6 @@ function UsageSummaryButton({ summary, mediaCounts }: { summary?: UsageSummary; 
   const imageCount = mediaCounts?.images ?? 0;
   const videoCount = mediaCounts?.videos ?? 0;
   const hasUsage = safeSummary.totalTokens > 0 || safeSummary.usd > 0 || safeSummary.credits > 0 || imageCount > 0 || videoCount > 0;
-  const cny = safeSummary.usd * USD_TO_CNY_RATE;
 
   return (
     <div className="group absolute right-4 top-1/2 -translate-y-1/2">
@@ -1879,7 +1948,7 @@ function UsageSummaryButton({ summary, mediaCounts }: { summary?: UsageSummary; 
             <div>• <RiFilmLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {videoCount.toLocaleString("en-US")}</div>
             <div>• <RiVipDiamondLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {safeSummary.credits.toLocaleString("en-US")}</div>
             <div>• <RiMoneyDollarCircleLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {safeSummary.usd.toFixed(4)}</div>
-            <div>• <RiMoneyCnyCircleLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {cny.toFixed(2)} 约</div>
+            <div>• <RiMoneyCnyCircleLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {safeSummary.cny.toFixed(2)} 约</div>
           </div>
         ) : (
           <div className="whitespace-nowrap">暂无用量</div>
@@ -2411,6 +2480,22 @@ function AiGenerate3dIcon({ className = "h-[18px] w-[18px] shrink-0 text-[#77777
   );
 }
 
+function AiAgentLineIcon({ className = "h-4 w-4", ...props }: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className} {...props}>
+      <path d="M12 2C17.5228 2 22 6.47715 22 12C22 14.7096 20.9205 17.1697 19.1709 18.9697C17.3551 20.8376 14.8124 22 12 22C9.18756 22 6.64488 20.8376 4.8291 18.9697C3.07949 17.1697 2 14.7096 2 12C2 6.47715 6.47715 2 12 2ZM12 16C10.0022 16 8.20124 16.8375 6.9248 18.1816C8.30642 19.3175 10.0724 20 12 20C13.9274 20 15.6927 19.3173 17.0742 18.1816C15.7978 16.8377 13.9975 16 12 16ZM12 4C7.58172 4 4 7.58172 4 12C4 13.7701 4.57462 15.4044 5.54785 16.7295C7.1822 15.0483 9.46797 14 12 14C14.5318 14 16.8169 15.0485 18.4512 16.7295C19.4246 15.4043 20 13.7703 20 12C20 7.58172 16.4183 4 12 4ZM11.5293 5.31934C11.7058 4.89329 12.2943 4.89329 12.4707 5.31934L12.7236 5.93066C13.1556 6.97343 13.9615 7.80622 14.9746 8.25684L15.6924 8.5752C16.1029 8.75796 16.1028 9.35627 15.6924 9.53906L14.9326 9.87695C13.9448 10.3163 13.1534 11.1193 12.7139 12.1279L12.4668 12.6934C12.2864 13.1074 11.7137 13.1074 11.5332 12.6934L11.2871 12.1279C10.8476 11.1193 10.0552 10.3163 9.06738 9.87695L8.30762 9.53906C7.89719 9.35628 7.89717 8.75795 8.30762 8.5752L9.02539 8.25684C10.0385 7.80623 10.8445 6.97345 11.2764 5.93066L11.5293 5.31934Z" />
+    </svg>
+  );
+}
+
+function DeepSeekIcon({ className = "h-4 w-4", ...props }: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className} {...props}>
+      <path d="M19.7486 6.70266C20.3482 6.09168 21.0251 5.88487 21.8216 5.88487 22.4994 5.88487 22.8772 5.51788 23.1687 5.23481 23.3841 5.0256 23.5423 4.86223 23.7495 4.9267 23.9849 4.99995 24.0039 5.27202 23.9849 5.49211 23.8092 7.48319 22.5352 9.10375 20.5089 9.33432 20.3217 9.35326 20.2848 9.41777 20.2886 9.58097 20.2886 12.135 19.3023 14.3682 17.7413 16.3177 17.3773 16.7723 17.4617 17.397 18.0099 17.5934 18.2913 17.6942 18.6306 17.8197 19.0629 18.0261 19.3173 18.1475 19.3664 18.8022 18.6619 18.952 18.2141 19.0446 17.728 19.1012 17.2409 19.0989 16.0407 19.0932 14.7567 19.2619 13.6741 19.7802 12.5444 20.3211 11.5023 20.4276 10.5351 20.4832 6.05234 20.7487 1.91959 17.3891 1.14577 12.9829.4786 9.18832 2.57147 5.07162 6.66325 4.61173 7.14737 4.55719 7.62089 4.53981 8.0848 4.55739 8.87454 4.58733 9.6213 4.41281 10.366 4.23877 11.0506 4.07878 11.7335 3.9192 12.4464 3.9192 13.289 3.9192 13.4518 4.23796 13.1926 4.33093 12.9459 4.42011 12.0002 5.5 12.8219 6.09927 13.5751 6.5753 14.217 7.22865 14.859 7.88213 15.7004 8.73861 16.542 9.59533 17.6349 10.0534 17.8183 10.1293 17.8968 10.0914 17.9488 9.91865 17.984 9.80487 18.021 9.69242 18.0579 9.58018 18.1084 9.42668 18.1588 9.27358 18.2041 9.11798 18.2458 8.98703 18.2118 8.896 18.0803 8.80682 16.5019 7.7348 15.7807 5.49544 16.7241 3.7693 16.9257 3.40591 17.2152 3.45676 17.3454 3.8414 17.5002 4.5 17.6793 4.81997 18.5532 5.2113 19.1972 5.4997 19.6209 5.94937 19.7486 6.70266ZM12.2889 8.15848C10.7532 7.02012 8.79874 6.38384 6.88727 6.59919 5.50456 6.7546 4.48708 7.51265 3.84434 8.54596 4.06732 8.56243 4.31508 8.58934 4.58987 8.62966 6.85894 8.96265 8.79097 9.98777 10.3898 11.5802 11.3587 12.5454 12.1238 13.6898 12.8253 14.6671 13.4051 15.4748 13.9559 16.1921 14.5951 16.7793 15.8396 15.7081 16.6794 14.4169 17.0503 13.8 17.8977 12.3908 17.6928 12.2942 16.853 11.898 16.316 11.6446 15.5193 11.2687 14.5722 10.3488 13.5602 9.36588 13.0771 8.7451 12.2889 8.15848ZM3.11574 12.637C3.70717 16 6.70788 18.473 10.417 18.4867 11.3223 18.4901 12.1492 18.2666 12.8906 17.9119 12.2402 17.2517 11.6978 16.526 11.2006 15.8333 10.4412 14.7753 9.79818 13.8139 8.97846 12.9972 7.66251 11.6866 6.11607 10.8751 4.29954 10.6085 3.72541 10.5242 3.34242 10.5175 3.11076 10.5295 2.99297 11.2236 2.99407 11.9452 3.11574 12.637ZM15.1938 11.1427C14.7189 10.6785 13.9006 9.95702 13.1369 10.3762 12.0002 11 14.354 13.4813 15.472 13.4291 17.254 13.3458 15.7214 11.7533 15.1938 11.1427Z" />
+    </svg>
+  );
+}
+
 function ImageUploadLineIcon({ className = "h-4 w-4", ...props }: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className} {...props}>
@@ -2662,6 +2747,7 @@ function normalizeUsageSummary(value?: UsageMeta): UsageSummary {
     completionTokens: Math.max(0, Math.floor(value?.completionTokens ?? 0)),
     totalTokens: Math.max(0, Math.floor(value?.totalTokens ?? 0)),
     usd: Math.max(0, Number(value?.usd ?? 0)),
+    cny: Math.max(0, Number(value?.cny ?? 0)),
     credits: Math.max(0, Math.floor(value?.credits ?? 0)),
   };
 }
@@ -2676,6 +2762,7 @@ function addUsageSummary(current: UsageSummary | undefined, usage?: UsageMeta) {
     completionTokens: safeCurrent.completionTokens + safeUsage.completionTokens,
     totalTokens: safeCurrent.totalTokens + safeUsage.totalTokens,
     usd: safeCurrent.usd + safeUsage.usd,
+    cny: safeCurrent.cny + safeUsage.cny,
     credits: safeCurrent.credits + safeUsage.credits,
   };
 }
@@ -2817,10 +2904,9 @@ function getVideoWaitProgress(startedAt?: number, now = Date.now(), index = 0) {
   return 95 + ((Math.abs(Math.floor(start / 1000)) + index * 3) % 5);
 }
 
-function isModelInfoQuestion(text: string) {
-  // Let the Agent answer model-related questions directly instead of rendering a synthetic assistant message.
-  void text;
-  return false;
+function isModelIdentityQuestion(text: string) {
+  const normalized = normalizeIntentText(text);
+  return /(你是(什么|哪个|哪一个)?模型|你用(的)?(什么|哪个|哪一个)?模型|你是谁|谁开发(的)?你|你是哪家|你的开发商|你的模型名|当前模型|实际模型)/.test(normalized);
 }
 
 function normalizeIntentText(text: string) {
@@ -2949,8 +3035,70 @@ function toChatPayloadMessages(messages: Message[]): ChatPayloadMessage[] {
     }));
 }
 
-function toAgentPayloadMessages(messages: Message[], keepLatestUserImages: boolean): ChatPayloadMessage[] {
-  const payload: ChatPayloadMessage[] = toChatPayloadMessages(messages).map((message) => ({
+function estimateTextTokens(text: string) {
+  if (!text) return 0;
+  const cjkCount = (text.match(/[\u3400-\u9fff]/g) ?? []).length;
+  const otherCount = Math.max(0, text.length - cjkCount);
+  return Math.ceil(cjkCount + otherCount / 4);
+}
+
+function estimateMessageTokens(messages: Array<{ content?: string }>) {
+  return messages.reduce((total, message) => total + estimateTextTokens(message.content ?? "") + 6, 0);
+}
+
+function getMessagesAfterSummary(messages: Message[], memorySummary?: SessionMemorySummary) {
+  if (!memorySummary?.summarizedMessageId) return messages;
+  const summaryIndex = messages.findIndex((message) => message.id === memorySummary.summarizedMessageId);
+  return summaryIndex >= 0 ? messages.slice(summaryIndex + 1) : messages;
+}
+
+function shouldUpdateMemorySummary(session: WorkSession) {
+  const messages = session.messages.filter((message) => message.role !== "system");
+  const totalTokens = estimateMessageTokens(messages);
+  if (!session.memorySummary?.content) return totalTokens > MEMORY_SUMMARY_INITIAL_TOKEN_THRESHOLD;
+  const incrementalTokens = estimateMessageTokens(getMessagesAfterSummary(messages, session.memorySummary));
+  return incrementalTokens > MEMORY_SUMMARY_INCREMENTAL_TOKEN_THRESHOLD;
+}
+
+function getSummarySourceMessages(session: WorkSession) {
+  const messages = session.messages.filter((message) => message.role !== "system");
+  const source = session.memorySummary?.content ? getMessagesAfterSummary(messages, session.memorySummary) : messages;
+  return source.map((message) => ({ role: message.role === "assistant" ? "assistant" as const : "user" as const, content: message.content }));
+}
+
+function applyMemorySummaryToPayload(payload: ChatPayloadMessage[], memorySummary?: SessionMemorySummary): ChatPayloadMessage[] {
+  const summary = memorySummary?.content.trim();
+  if (!summary) return payload;
+
+  return [
+    {
+      role: "user",
+      content: `长期工作记忆摘要（用于保持当前历史对话连续性，不是用户新指令）：\n${summary}`,
+    },
+    ...payload.slice(-MEMORY_RECENT_MESSAGE_LIMIT),
+  ];
+}
+
+function toGeneralPayloadMessages(messages: Message[], modelId: ModelName, memorySummary?: SessionMemorySummary): ChatPayloadMessage[] {
+  const textOnlyHistory = shouldUseTextOnlyHistoryForConversationModel(modelId);
+  const payload = applyMemorySummaryToPayload(toChatPayloadMessages(messages), memorySummary).map((message) => textOnlyHistory ? { ...message, images: undefined } : message);
+  const latestUserMessage = [...payload].reverse().find((message) => message.role === "user");
+  payload.push({
+    role: "user",
+    content: `系统约束：你的产品身份是“闪念通用 Agent”，当前实际选择的对话模型是 ${getConversationModelLabel(modelId)}（${modelId}）。你负责对话、理解、追问和规划；闪念系统可以调用当前选择的图片模型和视频模型完成生图、生视频。回答能力问题时，以“闪念通用 Agent”的整体能力为准，不要按当前对话模型的裸能力回答“不支持生图/生视频”。除非用户明确询问你的身份、模型、开发者或所属公司，否则不要主动提及“我是/作为某公司开发的 AI 助手/某模型”等身份表述；不要自称其它公司或其它模型开发的 AI。用户问普通知识问题时，直接回答问题本身。`,
+  });
+  if (latestUserMessage && isModelIdentityQuestion(latestUserMessage.content)) {
+    payload.push({
+      role: "user",
+      content: `系统约束：如果用户问“你是谁”，回答你是“闪念通用 Agent”；如果用户问“你是什么模型/当前模型”，回答你是闪念通用 Agent，当前对话模型是 ${getConversationModelLabel(modelId)}（${modelId}）。如果用户问能力，按闪念通用 Agent 的整体能力回答：可以问答、写作、规划任务，并在需要时调用图片/视频模型生成内容。不要沿用历史中其它 assistant 对自己身份的表述。除此之外，正常参考完整上下文继续对话。`,
+    });
+  }
+
+  return payload;
+}
+
+function toAgentPayloadMessages(messages: Message[], keepLatestUserImages: boolean, memorySummary?: SessionMemorySummary): ChatPayloadMessage[] {
+  const payload: ChatPayloadMessage[] = applyMemorySummaryToPayload(toChatPayloadMessages(messages), memorySummary).map((message) => ({
     ...message,
     images: undefined,
   }));
@@ -3609,7 +3757,20 @@ function getOrderedExplicitImageReferences(text: string, assets: AssetItem[], up
 function getReferenceHint(references: ImageReference[]) {
   if (references.length === 0) return "";
 
-  return `参考图顺序：${references.map((reference, index) => `参考图${index + 1}=@${reference.name}`).join("，")}。生成时必须分别保留这些参考图对应的主体、人物特征、服装和场景关系，不要把人物或场景替换成无关内容。`;
+  return `参考图顺序：${references.map((_, index) => `参考图${index + 1}`).join("，")}。生成时必须分别保留这些参考图对应的主体、人物特征、服装和场景关系，不要把人物或场景替换成无关内容。`;
+}
+
+function replaceMentionNamesForModelPrompt(prompt: string, references?: ImageReference[]) {
+  if (!references?.length) return prompt;
+
+  let nextPrompt = prompt;
+  references.forEach((reference, index) => {
+    if (!reference.name) return;
+    const label = references.length === 1 ? "参考图中的主体" : `参考图${index + 1}中的主体`;
+    nextPrompt = nextPrompt.replace(new RegExp(`@${escapeRegExp(reference.name)}(?=$|[\\s，。！？；;、])`, "g"), label);
+  });
+
+  return nextPrompt.trim() || prompt;
 }
 
 function getCharacterStyleRuleText(style: "realistic" | "2d" | "3d") {
@@ -4076,8 +4237,19 @@ function isAgentActivationMessage(content: string) {
   return /已激活[。！!]*$/.test(firstLine);
 }
 
-function InlineAgentIcon({ activated = false }: { activated?: boolean }) {
-  return activated ? <RiTerminalWindowFill className="mr-1.5 inline-block h-5 w-5 align-[-3px] text-[#367cee]" /> : <RiAiIcon className="mr-1.5 inline-block h-5 w-5 align-[-3px] text-[#367cee]" />;
+function InlineAgentIcon({ activated = false, variant = "agent" }: { activated?: boolean; variant?: "agent" | "general" }) {
+  if (activated) return <RiTerminalWindowFill className="mr-1.5 inline-block h-5 w-5 align-[-3px] text-[#367cee]" />;
+  if (variant === "general") return <AiAgentLineIcon className="mr-1.5 inline-block h-5 w-5 align-[-3px] text-[#367cee]" />;
+  return <RiAiIcon className="mr-1.5 inline-block h-5 w-5 align-[-3px] text-[#367cee]" />;
+}
+
+function InlineAssistantIcon({ message, activated = false, provider }: { message: Message; activated?: boolean; provider?: "openrouter" | "byteplus" }) {
+  if (message.mode === "general" && !activated) {
+    const ModelIcon = provider === "byteplus" ? BytePlusIcon : message.textModel ? getGenerationModelIcon(message.textModel) : null;
+    return ModelIcon ? <ModelIcon className="mr-1.5 inline-block h-5 w-5 align-[-3px] text-[#367cee]" aria-hidden="true" /> : <AiAgentLineIcon className="mr-1.5 inline-block h-5 w-5 align-[-3px] text-[#367cee]" />;
+  }
+
+  return <InlineAgentIcon activated={activated} variant={message.mode === "general" ? "general" : "agent"} />;
 }
 
 function FormattedMessage({ content, leadingIcon }: { content: string; leadingIcon?: ReactNode }) {
@@ -4272,6 +4444,29 @@ function appendEditorText(element: HTMLElement, text: string) {
   });
 }
 
+function getEditorMentionRanges(value: string, validReferences: Set<string>) {
+  const names = Array.from(validReferences).filter(Boolean).sort((a, b) => b.length - a.length);
+  const ranges: Array<{ start: number; end: number; name: string }> = [];
+  if (names.length === 0) return ranges;
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== "@") continue;
+    const matchedName = names.find((name) => value.startsWith(`@${name}`, index));
+    if (!matchedName) continue;
+    const end = index + matchedName.length + 1;
+    ranges.push({ start: index, end, name: matchedName });
+    index = end - 1;
+  }
+
+  return ranges;
+}
+
+function getMentionRangeForDeletion(value: string, cursorOffset: number, direction: "backward" | "forward", validReferences: Set<string>) {
+  const probeOffset = direction === "backward" ? cursorOffset - 1 : cursorOffset;
+  if (probeOffset < 0 || probeOffset >= value.length) return undefined;
+  return getEditorMentionRanges(value, validReferences).find((range) => probeOffset >= range.start && probeOffset < range.end);
+}
+
 function getSelectionTextOffset(element: HTMLElement) {
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0) return getEditableText(element).length;
@@ -4397,20 +4592,20 @@ function renderEditorContent(element: HTMLElement, value: string, validReference
 
   if (!value) return;
 
-  value.split(/(@[^@\s，。！？；;、]+)/g).forEach((part) => {
-    if (!part) return;
+  let cursor = 0;
+  getEditorMentionRanges(value, validReferences).forEach((range) => {
+    if (range.start > cursor) appendEditorText(element, value.slice(cursor, range.start));
 
-    if (part.startsWith("@") && validReferences.has(part.slice(1))) {
-      const mention = document.createElement("span");
-      mention.className = "text-[#4f7cff]";
-      mention.dataset.mention = "true";
-      mention.textContent = part;
-      element.append(mention);
-      return;
-    }
-
-    appendEditorText(element, part);
+    const mention = document.createElement("span");
+    mention.className = "text-[#4f7cff]";
+    mention.dataset.mention = "true";
+    mention.contentEditable = "false";
+    mention.textContent = value.slice(range.start, range.end);
+    element.append(mention);
+    cursor = range.end;
   });
+
+  if (cursor < value.length) appendEditorText(element, value.slice(cursor));
 
   if (value.endsWith("\n")) {
     const trailingBreak = document.createElement("br");
@@ -4563,6 +4758,23 @@ function PlainMentionEditor({
         if (disabled) {
           event.preventDefault();
           return;
+        }
+
+        if ((event.key === "Backspace" || event.key === "Delete") && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          const element = event.currentTarget;
+          const selection = window.getSelection();
+          const hasRangeSelection = Boolean(selection?.rangeCount && element.contains(selection.getRangeAt(0).commonAncestorContainer) && selection.getRangeAt(0).toString().length > 0);
+          if (!hasRangeSelection) {
+            const currentText = getEditableText(element);
+            const cursorOffset = getSelectionTextOffset(element);
+            const mentionRange = getMentionRangeForDeletion(currentText, cursorOffset, event.key === "Backspace" ? "backward" : "forward", validReferences);
+            if (mentionRange) {
+              event.preventDefault();
+              const nextText = `${currentText.slice(0, mentionRange.start)}${currentText.slice(mentionRange.end)}`;
+              commitInput(nextText, mentionRange.start, { syncDom: true });
+              return;
+            }
+          }
         }
 
         if (event.key !== "Enter") return;
@@ -5831,6 +6043,7 @@ function getDownloadName(asset: AssetItem) {
 }
 
 export function ChatWorkbench() {
+  const workspaceInstanceIdRef = useRef(createClientId());
   const [mode, setMode] = useState<WorkMode>("agent");
   const [agentModelTier, setAgentModelTier] = useState<AgentModelTier>("normal");
   const selectedModel: ModelName = agentModelTier === "advanced" ? ADVANCED_CHAT_MODEL : DEFAULT_CHAT_MODEL;
@@ -5840,22 +6053,26 @@ export function ChatWorkbench() {
   const assetScrollTopByFilterRef = useRef<Partial<Record<AssetFilter, number>>>({});
   const previousAssetFilterRef = useRef<AssetFilter>(assetFilter);
   const [selectedRatios, setSelectedRatios] = useState<Record<WorkMode, string>>({
+    general: ratioOptions[0],
     agent: ratioOptions[0],
     image: ratioOptions[0],
     video: ratioOptions[0],
   });
   const [selectedResolutions, setSelectedResolutions] = useState<Record<WorkMode, string>>({
+    general: imageResolutionOptions[0],
     agent: imageResolutionOptions[0],
     image: imageResolutionOptions[0],
     video: videoResolutionOptions[0],
   });
   const [selectedStyle] = useState(styleOptions[0]);
   const [selectedDurations, setSelectedDurations] = useState<Record<WorkMode, string>>({
+    general: durationOptions[0],
     agent: durationOptions[0],
     image: durationOptions[0],
     video: durationOptions[0],
   });
   const [selectedImageCounts, setSelectedImageCounts] = useState<Record<WorkMode, string>>({
+    general: imageCountOptions[0],
     agent: imageCountOptions[0],
     image: imageCountOptions[0],
     video: imageCountOptions[0],
@@ -5864,6 +6081,13 @@ export function ChatWorkbench() {
     image: DEFAULT_IMAGE_MODEL,
     video: DEFAULT_VIDEO_MODEL,
   });
+  const [selectedGeneralModels, setSelectedGeneralModels] = useState<Record<"chat" | "image" | "video", ModelName>>({
+    chat: frontendConversationModels[0].id,
+    image: DEFAULT_IMAGE_MODEL,
+    video: DEFAULT_VIDEO_MODEL,
+  });
+  const [enabledGeneralChatModelIds, setEnabledGeneralChatModelIds] = useState<string[]>(frontendConversationModels.map((model) => model.id));
+  const [generalModelProviders, setGeneralModelProviders] = useState<Record<string, "openrouter" | "byteplus">>({});
   const [enabledGenerationModelIds, setEnabledGenerationModelIds] = useState<Record<"image" | "video", string[]>>({
     image: imageGenerationModels.map((model) => model.id),
     video: videoGenerationModels.map((model) => model.id),
@@ -5897,6 +6121,8 @@ export function ChatWorkbench() {
   const [userPhoneInput, setUserPhoneInput] = useState("");
   const [isEditingUserPhone, setIsEditingUserPhone] = useState(false);
   const [currentUserAvatarUrl, setCurrentUserAvatarUrl] = useState("");
+  const [currentUserIsAdmin, setCurrentUserIsAdmin] = useState(false);
+  const [currentUserGeneralModeEnabled, setCurrentUserGeneralModeEnabled] = useState(false);
   const [isUploadingUserAvatar, setIsUploadingUserAvatar] = useState(false);
   const [userLanguage, setUserLanguage] = useState<UserLanguage>("简体中文");
   const [notifyOnGenerationComplete, setNotifyOnGenerationComplete] = useState(true);
@@ -5938,6 +6164,7 @@ export function ChatWorkbench() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [workspaceSite, setWorkspaceSite] = useState<WorkspaceSite>("other");
   const [modelInfoSessionId, setModelInfoSessionId] = useState("");
+  const [activeTypingMessageIds, setActiveTypingMessageIds] = useState<Set<string>>(() => new Set());
   const [completedTypingMessageIds, setCompletedTypingMessageIds] = useState<Set<string>>(() => new Set());
   const [intentMemoryRules, setIntentMemoryRules] = useState<IntentMemoryRule[]>([]);
   const [feedbackLogs, setFeedbackLogs] = useState<FeedbackLogEntry[]>([]);
@@ -5979,6 +6206,8 @@ export function ChatWorkbench() {
   const [previewScale, setPreviewScale] = useState(1);
   const [isReversePromptingPreview, setIsReversePromptingPreview] = useState(false);
   const [previewPromptError, setPreviewPromptError] = useState<{ assetId: string; message: string } | null>(null);
+  const [isSubmittingBytePlusAsset, setIsSubmittingBytePlusAsset] = useState(false);
+  const [bytePlusAssetError, setBytePlusAssetError] = useState<{ assetId: string; message: string } | null>(null);
   const [previewPromptCopyState, setPreviewPromptCopyState] = useState<"idle" | "success" | "error">("idle");
   const [previewFitMode, setPreviewFitMode] = useState<"fit" | "actual">("fit");
   const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
@@ -6031,6 +6260,8 @@ export function ChatWorkbench() {
   const dragUploadDepthRef = useRef(0);
   const workspaceSaveTimerRef = useRef<number | null>(null);
   const userProfileSaveTimerRef = useRef<number | null>(null);
+  const workspaceInstanceCheckFailuresRef = useRef(0);
+  const authCheckFailuresRef = useRef(0);
   const typingScrollFrameRef = useRef<number | null>(null);
   const copyFeedbackTimerRef = useRef<number | null>(null);
   const inputTipTimerRef = useRef<number | null>(null);
@@ -6057,12 +6288,12 @@ export function ChatWorkbench() {
   const selectedRatio = mode === "video" ? (selectedRatios.video === "智能比例" ? "智能比例" : normalizeVideoRatioForModel(selectedGenerationModels.video, selectedRatios.video, selectedResolutions.video)) : selectedRatios[mode];
   const selectedResolution = mode === "image" ? normalizeImageResolutionForModel(selectedGenerationModels.image, selectedRatios.image === "智能比例" ? "智能比例" : selectedResolutions.image) : mode === "video" ? (selectedRatios.video === "智能比例" ? "720p" : normalizeVideoResolutionForModel(selectedGenerationModels.video, selectedResolutions.video)) : selectedResolutions[mode];
   const selectedImageCount = selectedImageCounts[mode];
-  const selectedGenerationModel = mode === "agent" ? selectedModel : selectedGenerationModels[mode];
+  const selectedGenerationModel = mode === "general" ? selectedGeneralModels.chat : mode === "agent" ? selectedModel : selectedGenerationModels[mode];
   const currentUploadRule = useMemo(() => getUploadRule({ mode, modelId: selectedGenerationModel, transportMode: "local-base64" }), [mode, selectedGenerationModel]);
   const currentMaxReferenceImages = currentUploadRule.image.maxCount;
   const uploadAcceptValue = useMemo(() => getUploadAcceptValue(currentUploadRule), [currentUploadRule]);
   const supportedUploadTypeLabel = useMemo(() => getSupportedUploadTypeLabel(currentUploadRule), [currentUploadRule]);
-  const selectedGenerationModelLabel = mode === "agent" ? "" : getGenerationModelLabel(mode, selectedGenerationModel);
+  const selectedGenerationModelLabel = mode === "image" || mode === "video" ? getGenerationModelLabel(mode, selectedGenerationModel) : "";
   const currentDurationOptions = getVideoDurationOptions(selectedGenerationModels.video);
   const selectedVideoDuration = currentDurationOptions.includes(selectedDurations.video) ? selectedDurations.video : currentDurationOptions[0];
   const isSceneGeneration = assetGenerateType === "scene_image";
@@ -6099,6 +6330,8 @@ export function ChatWorkbench() {
 
     setCurrentUserId(profile.id?.trim() || "");
     setCurrentUserEmail(profile.email);
+    setCurrentUserIsAdmin(Boolean(profile.isAdmin));
+    setCurrentUserGeneralModeEnabled(Boolean(profile.generalModeEnabled));
     setCurrentUserHasPassword(Boolean(profile.hasPassword));
     setCurrentUserNickname(nickname);
     setUserNicknameInput(nickname);
@@ -6114,6 +6347,10 @@ export function ChatWorkbench() {
     setGeneratedVideoCount(profile.generatedVideoCount ?? 0);
     setCurrentUserCredits(profile.credits ?? 0);
   }, []);
+
+  useEffect(() => {
+    if (!currentUserGeneralModeEnabled && mode === "general") setMode("agent");
+  }, [currentUserGeneralModeEnabled, mode]);
 
   const logoutUser = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" }).catch(() => null);
@@ -6456,6 +6693,11 @@ export function ChatWorkbench() {
   const previewPromptText = previewHasUsablePrompt ? previewAsset?.sourcePrompt.trim() ?? "" : "";
   const canReversePreviewPrompt = Boolean(previewAsset && !isVideoAsset(previewAsset) && previewIsUploadedAsset && !previewHasUsablePrompt);
   const previewPromptErrorText = previewPromptError && previewPromptError.assetId === previewAssetId ? previewPromptError.message : "";
+  const previewBytePlusErrorText = bytePlusAssetError && bytePlusAssetError.assetId === previewAssetId ? bytePlusAssetError.message : "";
+  const previewBytePlusStatusText = previewAsset?.bytePlusAssetStatus === "Active" ? "审核通过" : previewAsset?.bytePlusAssetStatus === "Failed" ? "审核失败" : previewAsset?.bytePlusAssetStatus === "Processing" ? "审核中" : "未提交";
+  const canReviewBytePlusAsset = Boolean(previewAsset && !isVideoAsset(previewAsset) && (previewAsset.type === "character_image" || previewAsset.type === "shot_image" || isConversationUploadedAsset(previewAsset)));
+  const canSubmitBytePlusAsset = Boolean(ENABLE_BYTEPLUS_ASSET_REVIEW && canReviewBytePlusAsset && previewAsset && !previewAsset.bytePlusAssetId);
+  const canRefreshBytePlusAsset = Boolean(ENABLE_BYTEPLUS_ASSET_REVIEW && canReviewBytePlusAsset && previewAsset && previewAsset.bytePlusAssetId && previewAsset.bytePlusAssetStatus !== "Active");
   const validReferenceNames = getValidReferenceNames(assets, activeUploadedImages, activeConversationImageReferences);
   const hasAnyConversationRunning = resolvingSessionIds.size > 0 || sessions.some((session) => getSessionPendingRequests(session).length > 0) || Boolean(modelInfoSessionId);
   const hasAnyAssetGenerating = assetGenerateJobs.some((job) => job.result.status === "generating");
@@ -6500,7 +6742,7 @@ export function ChatWorkbench() {
   const activePendingRequests = getSessionPendingRequests(activeSession);
   const activePendingRequestCount = activePendingRequests.length;
   const activeHasMaxPendingRequests = activePendingRequestCount >= MAX_SESSION_PENDING_REQUESTS;
-  const isThinking = activeIsResolving || activePendingRequests.some((request) => request.mode === "agent") || modelInfoSessionId === activeSession?.id;
+  const isThinking = activeIsResolving || activePendingRequests.some((request) => request.mode === "agent" || request.mode === "general") || modelInfoSessionId === activeSession?.id;
   const isMainInputDisabled = isThinking || isInputPromptOptimizing;
   const activeIsSending = activeSession ? sendingSessionIds.has(activeSession.id) : false;
 
@@ -7169,6 +7411,49 @@ export function ChatWorkbench() {
     if (chargedCredits > 0) addSessionUsage(sessionId, { credits: chargedCredits });
   }, [addSessionUsage]);
 
+  const ensureSessionMemorySummary = useCallback(async (session: WorkSession, model: ModelName, requestId: string) => {
+    if (!shouldUpdateMemorySummary(session)) return session;
+
+    const sourceMessages = getSummarySourceMessages(session);
+    if (sourceMessages.length === 0) return session;
+
+    try {
+      const response = await fetch("/api/conversation-memory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          previousSummary: session.memorySummary?.content,
+          messages: sourceMessages,
+          conversationId: session.id,
+          conversationTitle: session.title,
+          requestId,
+        }),
+      });
+      const data = await readJson<{ summary?: string; usage?: UsageMeta; credit?: CreditMeta }>(response);
+      const summary = data.summary?.trim();
+      if (!summary) return session;
+
+      addSessionUsage(session.id, data.usage);
+      applyCreditResult(session.id, data.credit);
+
+      const nonSystemMessages = session.messages.filter((message) => message.role !== "system");
+      const nextMemorySummary: SessionMemorySummary = {
+        content: summary,
+        updatedAt: Date.now(),
+        summarizedMessageId: nonSystemMessages[nonSystemMessages.length - 1]?.id,
+        summarizedTokenEstimate: estimateMessageTokens(nonSystemMessages),
+      };
+      const nextSession = { ...session, memorySummary: nextMemorySummary };
+
+      setSessions((current) => current.map((item) => item.id === session.id ? { ...item, memorySummary: nextMemorySummary } : item));
+      return nextSession;
+    } catch (error) {
+      console.error("[conversation-memory] summary failed", { sessionId: session.id, requestId, error });
+      return session;
+    }
+  }, [addSessionUsage, applyCreditResult]);
+
   const reversePreviewPrompt = useCallback(async () => {
     if (!previewAsset || isVideoAsset(previewAsset) || isReversePromptingPreview) return;
     if (!isUploadedAsset(previewAsset) || (previewAsset.sourcePrompt.trim() && previewAsset.sourcePrompt !== "资产库上传")) return;
@@ -7217,6 +7502,59 @@ export function ChatWorkbench() {
     }
   }, [activeSession, activeSessionIdValue, addSessionUsage, applyCreditResult, isReversePromptingPreview, previewAsset, showInputTip]);
 
+  const applyBytePlusAssetUpdate = useCallback((assetId: string, patch: Partial<AssetItem>) => {
+    setPreviewAsset((current) => current && current.id === assetId ? { ...current, ...patch } : current);
+    setAssets((current) => current.map((asset) => asset.id === assetId ? { ...asset, ...patch } : asset));
+  }, []);
+
+  const submitBytePlusAsset = useCallback(async () => {
+    if (!previewAsset || isVideoAsset(previewAsset) || isSubmittingBytePlusAsset) return;
+
+    setIsSubmittingBytePlusAsset(true);
+    setBytePlusAssetError(null);
+    try {
+      const response = await fetch("/api/byteplus-assets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: previewAsset.url, name: previewAsset.name }),
+      });
+      const data = await readJson<{ id?: string; groupId?: string; status?: AssetItem["bytePlusAssetStatus"] }>(response);
+      if (!data.id) throw new Error("火山没有返回素材 ID");
+      applyBytePlusAssetUpdate(previewAsset.id, {
+        bytePlusAssetId: data.id,
+        bytePlusAssetGroupId: data.groupId,
+        bytePlusAssetStatus: data.status ?? "Processing",
+        bytePlusAssetError: undefined,
+        bytePlusAssetUpdatedAt: Date.now(),
+      });
+    } catch (error) {
+      setBytePlusAssetError({ assetId: previewAsset.id, message: toUserErrorMessage(error, "提交素材审核失败") });
+    } finally {
+      setIsSubmittingBytePlusAsset(false);
+    }
+  }, [applyBytePlusAssetUpdate, isSubmittingBytePlusAsset, previewAsset]);
+
+  const refreshBytePlusAsset = useCallback(async () => {
+    if (!previewAsset?.bytePlusAssetId || isSubmittingBytePlusAsset) return;
+
+    setIsSubmittingBytePlusAsset(true);
+    setBytePlusAssetError(null);
+    try {
+      const response = await fetch(`/api/byteplus-assets?id=${encodeURIComponent(previewAsset.bytePlusAssetId)}`, { cache: "no-store" });
+      const data = await readJson<{ asset?: { Status?: AssetItem["bytePlusAssetStatus"]; Error?: { Message?: string } } }>(response);
+      const status = data.asset?.Status ?? previewAsset.bytePlusAssetStatus ?? "Processing";
+      applyBytePlusAssetUpdate(previewAsset.id, {
+        bytePlusAssetStatus: status,
+        bytePlusAssetError: data.asset?.Error?.Message,
+        bytePlusAssetUpdatedAt: Date.now(),
+      });
+    } catch (error) {
+      setBytePlusAssetError({ assetId: previewAsset.id, message: toUserErrorMessage(error, "刷新素材状态失败") });
+    } finally {
+      setIsSubmittingBytePlusAsset(false);
+    }
+  }, [applyBytePlusAssetUpdate, isSubmittingBytePlusAsset, previewAsset]);
+
   const addActiveUploadedImages = useCallback((images: UploadedImage[], options?: { draftBase?: string; draftSuffix?: string; insertReferenceText?: boolean }) => {
     if (images.length === 0) return;
 
@@ -7261,6 +7599,13 @@ export function ChatWorkbench() {
   }, [activeSessionId]);
 
   const markTypingComplete = useCallback((messageId: string) => {
+    setActiveTypingMessageIds((current) => {
+      if (!current.has(messageId)) return current;
+
+      const next = new Set(current);
+      next.delete(messageId);
+      return next;
+    });
     setCompletedTypingMessageIds((current) => {
       if (current.has(messageId)) return current;
 
@@ -7331,27 +7676,36 @@ export function ChatWorkbench() {
           if (!parsedInputSettings) return;
           const storedImageModel = parsedInputSettings.selectedGenerationModels?.image;
           const storedVideoModel = parsedInputSettings.selectedGenerationModels?.video;
+          const storedGeneralChatModel = parsedInputSettings.selectedGeneralModels?.chat;
+          const storedGeneralImageModel = parsedInputSettings.selectedGeneralModels?.image;
+          const storedGeneralVideoModel = parsedInputSettings.selectedGeneralModels?.video;
           const nextImageModel = storedImageModel && isGenerationModelOption("image", storedImageModel) ? storedImageModel : DEFAULT_IMAGE_MODEL;
           const nextVideoModel = storedVideoModel && isGenerationModelOption("video", storedVideoModel) ? storedVideoModel : DEFAULT_VIDEO_MODEL;
+          const nextGeneralModels = {
+            chat: storedGeneralChatModel && frontendConversationModels.some((model) => model.id === storedGeneralChatModel) ? storedGeneralChatModel : frontendConversationModels[0].id,
+            image: storedGeneralImageModel && isGenerationModelOption("image", storedGeneralImageModel) ? storedGeneralImageModel : DEFAULT_IMAGE_MODEL,
+            video: storedGeneralVideoModel && isGenerationModelOption("video", storedGeneralVideoModel) ? storedGeneralVideoModel : DEFAULT_VIDEO_MODEL,
+          };
           const nextImageResolution = normalizeImageResolutionForModel(nextImageModel, parsedInputSettings.selectedResolutions?.image);
           const nextVideoResolution = normalizeVideoResolutionForModel(nextVideoModel, parsedInputSettings.selectedResolutions?.video);
           if (isWorkMode(parsedInputSettings.mode)) setMode(parsedInputSettings.mode);
           if (parsedInputSettings.agentModelTier === "normal" || parsedInputSettings.agentModelTier === "advanced") setAgentModelTier(parsedInputSettings.agentModelTier);
           setSelectedRatios((current) => ({
-            ...mergeValidModeSettings(current, parsedInputSettings.selectedRatios, { agent: ratioOptions, image: ratioOptions, video: ["智能比例", ...getSupportedVideoRatios(nextVideoModel)] }),
+            ...mergeValidModeSettings(current, parsedInputSettings.selectedRatios, { general: ratioOptions, agent: ratioOptions, image: ratioOptions, video: ["智能比例", ...getSupportedVideoRatios(nextVideoModel)] }),
             video: parsedInputSettings.selectedRatios?.video === "智能比例" ? "智能比例" : normalizeVideoRatioForModel(nextVideoModel, parsedInputSettings.selectedRatios?.video, nextVideoResolution),
           }));
           setSelectedResolutions((current) => ({
-            ...mergeValidModeSettings(current, parsedInputSettings.selectedResolutions, { agent: imageResolutionOptions, image: getSupportedImageResolutions(nextImageModel), video: getSupportedVideoResolutions(nextVideoModel) }),
+            ...mergeValidModeSettings(current, parsedInputSettings.selectedResolutions, { general: imageResolutionOptions, agent: imageResolutionOptions, image: getSupportedImageResolutions(nextImageModel), video: getSupportedVideoResolutions(nextVideoModel) }),
             image: nextImageResolution,
             video: nextVideoResolution,
           }));
-          setSelectedDurations((current) => mergeValidModeSettings(current, parsedInputSettings.selectedDurations, { agent: durationOptions, image: durationOptions, video: getVideoDurationOptions(parsedInputSettings.selectedGenerationModels?.video ?? DEFAULT_VIDEO_MODEL) }));
-          setSelectedImageCounts((current) => mergeValidModeSettings(current, parsedInputSettings.selectedImageCounts, { agent: imageCountOptions, image: imageCountOptions, video: imageCountOptions }));
+          setSelectedDurations((current) => mergeValidModeSettings(current, parsedInputSettings.selectedDurations, { general: durationOptions, agent: durationOptions, image: durationOptions, video: getVideoDurationOptions(parsedInputSettings.selectedGenerationModels?.video ?? DEFAULT_VIDEO_MODEL) }));
+          setSelectedImageCounts((current) => mergeValidModeSettings(current, parsedInputSettings.selectedImageCounts, { general: imageCountOptions, agent: imageCountOptions, image: imageCountOptions, video: imageCountOptions }));
           setSelectedGenerationModels(() => ({
             image: nextImageModel,
             video: nextVideoModel,
           }));
+          setSelectedGeneralModels(nextGeneralModels as Record<"chat" | "image" | "video", ModelName>);
         };
 
         const applyWorkspaceState = (state: WorkspaceStatePayload, storageMode: WorkspaceStorageMode) => {
@@ -7384,15 +7738,11 @@ export function ChatWorkbench() {
         };
 
         try {
-          const meRequest = fetch("/api/auth/me", { cache: "no-store" });
-          const workspaceRequest = fetch("/api/workspace-state?summary=1", { cache: "no-store" });
-          const meResponse = await meRequest;
-          const meData = (await meResponse.json().catch(() => ({}))) as { user?: CurrentUserProfile | null };
+          const { data: meData } = await fetchJsonWithRetry<{ user?: CurrentUserProfile | null }>("/api/auth/me", { cache: "no-store" });
 
           if (typeof meData.user?.email === "string") {
             applyCurrentUserProfile(meData.user);
-            const workspaceResponse = await workspaceRequest;
-            const workspaceData = await readJson<{ state?: WorkspaceStatePayload | null }>(workspaceResponse);
+            const { data: workspaceData } = await fetchJsonWithRetry<{ state?: WorkspaceStatePayload | null }>("/api/workspace-state?summary=1", { cache: "no-store" });
             applyWorkspaceState(workspaceData.state ?? {}, "user");
           } else {
             window.location.replace("/");
@@ -7415,7 +7765,7 @@ export function ChatWorkbench() {
     const loadModelAvailability = async () => {
       try {
         const response = await fetch("/api/model-availability", { cache: "no-store" });
-        const data = (await response.json()) as { imageModels?: string[]; assetImageModels?: string[]; videoModels?: string[]; agentImageModels?: string[]; agentVideoModels?: string[] };
+        const data = (await response.json()) as { generalModels?: string[]; generalModelProviders?: Record<string, "openrouter" | "byteplus">; imageModels?: string[]; assetImageModels?: string[]; videoModels?: string[]; agentImageModels?: string[]; agentVideoModels?: string[] };
         if (cancelled) return;
         const next = {
           image: Array.isArray(data.imageModels) ? data.imageModels : [],
@@ -7432,10 +7782,19 @@ export function ChatWorkbench() {
           image: next.image.includes(current.image) ? current.image : next.image[0] ?? current.image,
           video: next.video.includes(current.video) ? current.video : next.video[0] ?? current.video,
         }));
+        setSelectedGeneralModels((current) => ({
+          chat: Array.isArray(data.generalModels) && data.generalModels.includes(current.chat) ? current.chat : Array.isArray(data.generalModels) ? data.generalModels[0] as ModelName | undefined ?? current.chat : current.chat,
+          image: next.image.includes(current.image) ? current.image : next.image[0] as ModelName | undefined ?? current.image,
+          video: next.video.includes(current.video) ? current.video : next.video[0] as ModelName | undefined ?? current.video,
+        }));
+        setEnabledGeneralChatModelIds(Array.isArray(data.generalModels) ? data.generalModels : []);
+        setGeneralModelProviders(data.generalModelProviders && typeof data.generalModelProviders === "object" ? data.generalModelProviders : {});
         setCharacterGenerateModel((current) => nextAssetImageModels.includes(current) ? current : nextAssetImageModels[0] ?? current);
       } catch {
         if (!cancelled) {
           setEnabledGenerationModelIds({ image: [], video: [] });
+          setEnabledGeneralChatModelIds([]);
+          setGeneralModelProviders({});
           setEnabledAgentGenerationModelIds({ image: [], video: [] });
           setEnabledAssetImageModelIds([]);
         }
@@ -7451,13 +7810,62 @@ export function ChatWorkbench() {
     if (!isLoaded || workspaceStorageMode !== "user") return;
     let cancelled = false;
 
+    const checkWorkspaceInstance = async (claim = false) => {
+      try {
+        const response = await fetch("/api/auth/workspace-instance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({ instanceId: workspaceInstanceIdRef.current, claim }),
+        });
+        const data = (await response.json().catch(() => ({}))) as { active?: boolean };
+        if (cancelled) return;
+        if (response.status === 401 || (response.ok && data.active !== true)) {
+          window.location.replace("/");
+          return;
+        }
+        if (!response.ok) {
+          workspaceInstanceCheckFailuresRef.current += 1;
+          return;
+        }
+        workspaceInstanceCheckFailuresRef.current = 0;
+      } catch {
+        if (!cancelled) workspaceInstanceCheckFailuresRef.current += 1;
+      }
+    };
+
+    void checkWorkspaceInstance(true);
+    const instanceInterval = window.setInterval(() => void checkWorkspaceInstance(false), 2000);
+    const onFocus = () => void checkWorkspaceInstance(false);
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(instanceInterval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [isLoaded, workspaceStorageMode]);
+
+  useEffect(() => {
+    if (!isLoaded || workspaceStorageMode !== "user") return;
+    let cancelled = false;
+
     const checkAuth = async () => {
       try {
         const response = await fetch("/api/auth/me", { cache: "no-store" });
         const data = (await response.json().catch(() => ({}))) as { user?: CurrentUserProfile | null };
-        if (!cancelled && !data.user?.email) window.location.replace("/");
+        if (cancelled) return;
+        if (response.status === 401 || (response.ok && !data.user?.email)) {
+          window.location.replace("/");
+          return;
+        }
+        if (!response.ok) {
+          authCheckFailuresRef.current += 1;
+          return;
+        }
+        authCheckFailuresRef.current = 0;
       } catch {
-        if (!cancelled) window.location.replace("/");
+        if (!cancelled) authCheckFailuresRef.current += 1;
       }
     };
 
@@ -7560,6 +7968,7 @@ export function ChatWorkbench() {
         selectedDurations,
         selectedImageCounts,
         selectedGenerationModels,
+        selectedGeneralModels,
       },
       intentMemoryRules: intentMemoryRules.slice(0, MAX_INTENT_MEMORY_RULES),
       feedbackLogs: feedbackLogs.slice(0, MAX_FEEDBACK_LOGS),
@@ -7577,7 +7986,7 @@ export function ChatWorkbench() {
     return () => {
       if (workspaceSaveTimerRef.current !== null) window.clearTimeout(workspaceSaveTimerRef.current);
     };
-  }, [activePanel, activeSessionId, agentModelTier, assetFilter, assetGenerateJobs, assetScrollTopByFilter, assets, feedbackLogs, intentMemoryRules, isLoaded, mode, nextConversationNumber, selectedDurations, selectedGenerationModels, selectedImageCounts, selectedRatios, selectedResolutions, sessions, workflowItems, workspaceStorageMode]);
+  }, [activePanel, activeSessionId, agentModelTier, assetFilter, assetGenerateJobs, assetScrollTopByFilter, assets, feedbackLogs, intentMemoryRules, isLoaded, mode, nextConversationNumber, selectedDurations, selectedGeneralModels, selectedGenerationModels, selectedImageCounts, selectedRatios, selectedResolutions, sessions, workflowItems, workspaceStorageMode]);
 
   useEffect(() => {
     if (!isLoaded || workspaceStorageMode !== "user") return;
@@ -7981,7 +8390,7 @@ export function ChatWorkbench() {
   };
 
   const renderModelMenu = () => {
-    if (mode === "agent") return null;
+    if (mode === "agent" || mode === "general") return null;
 
     const options = generationModelOptions[mode].filter((option) => enabledGenerationModelIds[mode].includes(option.id));
     const SelectedModelIcon = getGenerationModelIcon(selectedGenerationModel);
@@ -8041,6 +8450,79 @@ export function ChatWorkbench() {
                     <span className={`min-w-0 truncate text-[13px] ${isGoldModel ? "text-[#b8860b]" : ""}`}>{option.label}</span>
                   </span>
                   {option.id === selectedGenerationModel ? <RiCheckLine className="ml-2 h-[18px] w-[18px] shrink-0 text-[#111111]" aria-hidden="true" /> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderGeneralModelMenu = (kind: "chat" | "image" | "video", title: string) => {
+    const menuName = kind === "chat" ? "generalChatModel" : kind === "image" ? "generalImageModel" : "generalVideoModel";
+    const options: readonly (ConversationModel | GenerationModel)[] = kind === "chat"
+      ? frontendConversationModels.filter((option) => enabledGeneralChatModelIds.includes(option.id))
+      : generationModelOptions[kind].filter((option) => enabledGenerationModelIds[kind].includes(option.id));
+    const getGeneralChatIcon = (modelId: string) => generalModelProviders[modelId] === "byteplus" ? BytePlusIcon : getGenerationModelIcon(modelId) ?? RiChat3Line;
+    const selectedId = selectedGeneralModels[kind];
+    const selectedLabel = kind === "chat" ? getConversationModelLabel(selectedId) : getGenerationModelLabel(kind, selectedId);
+    const SelectedModelIcon = kind === "chat" ? getGeneralChatIcon(selectedId) : getGenerationModelIcon(selectedId);
+    const selectedIsGold = kind === "chat" ? isGoldConversationModel(selectedId) : isGoldGenerationModel(selectedId);
+
+    return (
+      <div className="relative min-w-0" onClick={(event) => event.stopPropagation()}>
+        <button
+          type="button"
+          disabled={isMainInputDisabled}
+          onClick={() => {
+            const shouldClose = openControlMenu === menuName;
+            closeAllPopupMenus();
+            if (!shouldClose) setOpenControlMenu(menuName);
+          }}
+          className={`${toolButtonClassName} ${openControlMenu === menuName ? toolButtonActiveClassName : ""} w-full min-w-0 justify-start whitespace-nowrap px-2.5 max-[820px]:justify-center`}
+        >
+          <span className="flex min-w-0 flex-1 flex-nowrap items-center gap-2">
+            {SelectedModelIcon ? <SelectedModelIcon className="h-[18px] w-[18px] shrink-0 text-[#777777]" aria-hidden="true" /> : <AiGenerate3dIcon />}
+            <span className={`min-w-0 flex-1 truncate whitespace-nowrap font-medium max-[820px]:hidden ${selectedIsGold ? "text-[#b8860b]" : "text-[#777777]"}`}>{selectedLabel}</span>
+            <RiArrowDownSLine className="h-3.5 w-3.5 shrink-0 text-[#8a8a8a] max-[820px]:hidden" aria-hidden="true" />
+          </span>
+        </button>
+
+        {openControlMenu === menuName ? (
+          <div className="absolute bottom-full left-0 z-[70] mb-2 w-[300px] rounded-[12px] bg-white p-2 shadow-[0_18px_40px_rgba(0,0,0,0.12)]">
+            <div className="px-2 pb-2 text-[12px] font-medium text-[#a0a0a0]">{title}</div>
+            {options.length === 0 ? <div className="px-2 py-6 text-center text-[13px] text-[#999999]">暂无可用模型</div> : options.map((option) => {
+              const ModelIcon = kind === "chat" ? getGeneralChatIcon(option.id) : getGenerationModelIcon(option.id);
+              const isGoldModel = kind === "chat" ? isGoldConversationModel(option.id) : isGoldGenerationModel(option.id);
+
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedGeneralModels((current) => ({ ...current, [kind]: option.id }));
+                    if (kind === "image") {
+                      setSelectedResolutions((current) => ({ ...current, general: normalizeImageResolutionForModel(option.id, current.general) }));
+                    } else if (kind === "video") {
+                      setSelectedDurations((current) => {
+                        const durationOptionsForModel = getVideoDurationOptions(option.id);
+                        return { ...current, general: durationOptionsForModel.includes(current.general) ? current.general : durationOptionsForModel[0] };
+                      });
+                    }
+                    setOpenControlMenu("");
+                  }}
+                  className={
+                    option.id === selectedId
+                      ? "my-[3px] flex h-11 w-full items-center justify-between rounded-[8px] bg-[#f5f5f5] px-3 text-left text-[14px] font-medium text-[#111111]"
+                      : "my-[3px] flex h-11 w-full items-center justify-between rounded-[8px] px-3 text-left text-[14px] text-[#555555] hover:bg-[#f7f7f7]"
+                  }
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    {ModelIcon ? <ModelIcon className="h-4.5 w-4.5 shrink-0 text-[#555555]" aria-hidden="true" /> : <AiGenerate3dIcon />}
+                    <span className={`min-w-0 truncate text-[13px] ${isGoldModel ? "text-[#b8860b]" : ""}`}>{option.label}</span>
+                  </span>
+                  {option.id === selectedId ? <RiCheckLine className="ml-2 h-[18px] w-[18px] shrink-0 text-[#111111]" aria-hidden="true" /> : null}
                 </button>
               );
             })}
@@ -8532,6 +9014,16 @@ export function ChatWorkbench() {
   };
 
   const appendAssistantMessage = useCallback((sessionId: string, payload: Partial<Message> & Pick<Message, "content">) => {
+    const messageId = createClientId();
+    const shouldTypeMessage = Boolean(payload.content.trim()) && payload.mode !== "image" && payload.mode !== "video" && !payload.error;
+    if (shouldTypeMessage) {
+      setActiveTypingMessageIds((current) => {
+        const next = new Set(current);
+        next.add(messageId);
+        return next;
+      });
+    }
+
     setSessions((current) =>
       current.map((session) =>
         session.id === sessionId
@@ -8543,7 +9035,7 @@ export function ChatWorkbench() {
                 messages: [
                   ...session.messages,
                   {
-                    id: createClientId(),
+                    id: messageId,
                     role: "assistant",
                     content: payload.content,
                     suggestions: normalizeMessageSuggestions(payload.suggestions),
@@ -8559,6 +9051,7 @@ export function ChatWorkbench() {
                     videos: payload.videos,
                     videoPrompts: payload.videoPrompts,
                     videoDimensionsMap: payload.videoDimensionsMap,
+                    textModel: payload.textModel,
                     statusText: payload.statusText,
                     pendingImageCount: payload.pendingImageCount,
                     failedImageCount: payload.failedImageCount,
@@ -9025,7 +9518,8 @@ export function ChatWorkbench() {
             headers: { "Content-Type": "application/json" },
             signal: abortController.signal,
             body: JSON.stringify({
-              model: selectedModel,
+              model: pendingRequest.model,
+              mode: pendingRequest.mode === "general" ? "general" : "agent",
               messages: pendingRequest.messages,
               conversationId: sessionId,
               conversationTitle,
@@ -9041,31 +9535,42 @@ export function ChatWorkbench() {
           appendAssistantMessage(sessionId, {
             content: plan.clarifyQuestion?.trim() || "我需要再确认一下你的目标：你想让我继续聊创意、生成图片，还是生成视频？",
             suggestions: plan.suggestions,
-            mode: "agent",
+            mode: pendingRequest.mode === "general" ? "general" : "agent",
             requestId: pendingRequest.id,
+            textModel: pendingRequest.mode === "general" ? pendingRequest.model : undefined,
           });
           return;
         }
 
-        const generationMode: WorkMode = plan.intent === "image" || plan.intent === "video" ? plan.intent : "agent";
-        let agentEnabledModels = enabledAgentGenerationModelIds;
+        const generationMode: WorkMode = plan.intent === "image" || plan.intent === "video" ? plan.intent : pendingRequest.mode === "general" ? "general" : "agent";
+        let availableMediaModels = pendingRequest.mode === "general" ? enabledGenerationModelIds : enabledAgentGenerationModelIds;
         if (generationMode === "image" || generationMode === "video") {
           try {
             const response = await fetch("/api/model-availability", { cache: "no-store" });
-            const data = (await response.json()) as { agentImageModels?: string[]; agentVideoModels?: string[] };
-            agentEnabledModels = {
-              image: Array.isArray(data.agentImageModels) ? data.agentImageModels : [],
-              video: Array.isArray(data.agentVideoModels) ? data.agentVideoModels : [],
-            };
-            setEnabledAgentGenerationModelIds(agentEnabledModels);
+            const data = (await response.json()) as { imageModels?: string[]; videoModels?: string[]; agentImageModels?: string[]; agentVideoModels?: string[] };
+            availableMediaModels = pendingRequest.mode === "general"
+              ? {
+                  image: Array.isArray(data.imageModels) ? data.imageModels : [],
+                  video: Array.isArray(data.videoModels) ? data.videoModels : [],
+                }
+              : {
+                  image: Array.isArray(data.agentImageModels) ? data.agentImageModels : [],
+                  video: Array.isArray(data.agentVideoModels) ? data.agentVideoModels : [],
+                };
+            if (pendingRequest.mode === "general") setEnabledGenerationModelIds(availableMediaModels);
+            else setEnabledAgentGenerationModelIds(availableMediaModels);
           } catch {}
 
-          if (agentEnabledModels[generationMode].length === 0) {
+          if (availableMediaModels[generationMode].length === 0) {
             appendSystemMessage(sessionId, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: generationMode });
             return;
           }
         }
-        const generationModel = getAgentGenerationModel(agentModelTier, generationMode, selectedGenerationModels, { sourceText, session: sessions.find((session) => session.id === sessionId), feedbackLogs, enabledModels: agentEnabledModels });
+        const generationModel = pendingRequest.mode === "general" && generationMode === "general"
+          ? pendingRequest.model
+          : pendingRequest.mode === "general" && (generationMode === "image" || generationMode === "video")
+          ? (availableMediaModels[generationMode].includes(pendingRequest.selectedMediaModels?.[generationMode] ?? "") ? pendingRequest.selectedMediaModels?.[generationMode] : availableMediaModels[generationMode][0]) as ModelName
+          : getAgentGenerationModel(agentModelTier, generationMode, selectedGenerationModels, { sourceText, session: sessions.find((session) => session.id === sessionId), feedbackLogs, enabledModels: availableMediaModels });
         const agentSettings = getAgentGenerationSettingsFromPlan(plan, sourceText, generationMode, generationModel);
         const agentPrompt = generationMode === "image" || generationMode === "video" ? getAgentPromptFromPlan(plan, sourceText, generationMode) : undefined;
         const plannedItemPrompts = agentPrompt ? getAgentItemPromptsFromPlan(plan, sourceText, generationMode) : undefined;
@@ -9079,7 +9584,7 @@ export function ChatWorkbench() {
           ...pendingRequest,
           mode: generationMode,
           model: generationModel,
-          promptModel: generationMode === "image" || generationMode === "video" ? selectedModel : undefined,
+          promptModel: generationMode === "image" || generationMode === "video" ? pendingRequest.model : undefined,
           prompt: agentPrompt,
           originalPrompt: agentPrompt,
           settings: generationMode === "agent" ? undefined : agentSettings,
@@ -9188,8 +9693,8 @@ export function ChatWorkbench() {
           });
         }
 
-        if (pendingRequest.mode === "agent") {
-          appendAssistantMessage(sessionId, { content: prompt, suggestions: data.suggestions, mode: pendingRequest.mode, requestId: pendingRequest.id });
+        if (pendingRequest.mode === "agent" || pendingRequest.mode === "general") {
+          appendAssistantMessage(sessionId, { content: prompt, suggestions: data.suggestions, mode: pendingRequest.mode, requestId: pendingRequest.id, textModel: pendingRequest.mode === "general" ? pendingRequest.model : undefined });
         }
       }
 
@@ -9304,11 +9809,12 @@ export function ChatWorkbench() {
           const settings = itemSettings ?? pendingRequest.settings;
 
           if (!taskId) {
+          const modelVideoPrompt = replaceMentionNamesForModelPrompt(videoPrompt, pendingRequest.imageReferences);
           const taskResponse = await fetch("/api/video", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             signal: abortController.signal,
-            body: JSON.stringify({ prompt: withReferenceHint(videoPrompt), model: pendingRequest.model, referenceImages: pendingRequest.referenceImages, settings, conversationId: sessionId, conversationTitle, requestId: videoRequestId, metadata: pendingRequest.agentGenerated ? { creditSource: "agent_video_generation" } : undefined }),
+            body: JSON.stringify({ prompt: withReferenceHint(modelVideoPrompt), model: pendingRequest.model, referenceImages: pendingRequest.referenceImages, settings, conversationId: sessionId, conversationTitle, requestId: videoRequestId, metadata: pendingRequest.agentGenerated ? { creditSource: "agent_video_generation" } : undefined }),
           });
 
           const taskData = await readJson<{ id?: string; polling_url?: string; pollingUrl?: string; usage?: UsageMeta }>(taskResponse);
@@ -9487,7 +9993,7 @@ export function ChatWorkbench() {
       requestAbortControllersRef.current.delete(pendingRequest.id);
       stoppedRequestIdsRef.current.delete(pendingRequest.id);
     }
-  }, [addGeneratedAssets, addSessionUsage, agentModelTier, appendAssistantMessage, appendImagesToAssistantMessage, appendSystemMessage, appendVideoToAssistantMessage, applyCreditResult, autoSaveHistory, clearPendingRequest, enabledAgentGenerationModelIds, feedbackLogs, finalizeAssistantImageFailures, markAssistantImageFailure, markAssistantVideoFailure, notifyGenerationCompleteOnce, reserveMediaSystemNames, selectedGenerationModels, selectedModel, sessions, updateAssistantMessageByRequestId, updatePendingRequest]);
+  }, [addGeneratedAssets, addSessionUsage, agentModelTier, appendAssistantMessage, appendImagesToAssistantMessage, appendSystemMessage, appendVideoToAssistantMessage, applyCreditResult, autoSaveHistory, clearPendingRequest, enabledAgentGenerationModelIds, ensureSessionMemorySummary, feedbackLogs, finalizeAssistantImageFailures, markAssistantImageFailure, markAssistantVideoFailure, notifyGenerationCompleteOnce, reserveMediaSystemNames, selectedGenerationModels, selectedModel, sessions, updateAssistantMessageByRequestId, updatePendingRequest]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -9507,10 +10013,11 @@ export function ChatWorkbench() {
     const submitMode = forcedMode ?? mode;
     const modeForSettings: WorkMode = submitMode === "agent" ? mode : submitMode;
     let generationModelsForSubmit = selectedGenerationModels;
+    let generalModelsForSubmit = selectedGeneralModels;
     let enabledModelsForSubmit = enabledGenerationModelIds;
     const availableUploadedImages = isSuggestionSend ? [] : activeUploadedImages;
     const availableUploadedFiles = isSuggestionSend ? [] : activeUploadedFiles;
-    const submitUploadRule = getUploadRule({ mode: submitMode, modelId: submitMode === "agent" ? selectedModel : generationModelsForSubmit[submitMode], transportMode: "local-base64" });
+    const submitUploadRule = getUploadRule({ mode: submitMode, modelId: submitMode === "general" ? generalModelsForSubmit.chat : submitMode === "agent" ? selectedModel : generationModelsForSubmit[submitMode], transportMode: "local-base64" });
     if (availableUploadedImages.length > submitUploadRule.image.maxCount) {
       showInputTip(`当前模型最多支持 ${submitUploadRule.image.maxCount} 张参考图，不能上传更多图片`);
       return;
@@ -9532,15 +10039,17 @@ export function ChatWorkbench() {
       showInputTip("有图片上传失败，请删除后重新上传");
       return;
     }
-    if ((!rawText && availableUploadedImages.length === 0 && availableUploadedFiles.length === 0) || !activeSession || (submitMode !== "agent" && activeHasMaxPendingRequests) || sendingSessionIdsRef.current.has(activeSession.id)) return;
+    if ((!rawText && availableUploadedImages.length === 0 && availableUploadedFiles.length === 0) || !activeSession || (submitMode !== "agent" && submitMode !== "general" && activeHasMaxPendingRequests) || sendingSessionIdsRef.current.has(activeSession.id)) return;
     if (workspaceStorageMode === "user" && currentUserCredits <= 0) {
       showInputTip("积分不足，请充值后再使用模型");
       return;
     }
 
-    if (submitMode === "image" || submitMode === "video") {
-      const isCurrentModelAvailable = enabledModelsForSubmit[submitMode].includes(generationModelsForSubmit[submitMode]);
-      if (enabledModelsForSubmit[submitMode].length === 0 || !isCurrentModelAvailable) {
+    const availabilityMode = submitMode === "image" || submitMode === "video" ? submitMode : undefined;
+    if (availabilityMode) {
+      const modelForAvailability = submitMode === "general" ? generalModelsForSubmit[availabilityMode] : generationModelsForSubmit[availabilityMode];
+      const isCurrentModelAvailable = enabledModelsForSubmit[availabilityMode].includes(modelForAvailability);
+      if (enabledModelsForSubmit[availabilityMode].length === 0 || !isCurrentModelAvailable) {
         try {
           const response = await fetch("/api/model-availability", { cache: "no-store" });
           const data = (await response.json()) as { imageModels?: string[]; assetImageModels?: string[]; videoModels?: string[]; agentImageModels?: string[]; agentVideoModels?: string[] };
@@ -9557,32 +10066,45 @@ export function ChatWorkbench() {
             image: refreshedModels.image.includes(generationModelsForSubmit.image) ? generationModelsForSubmit.image : refreshedModels.image[0] as ModelName | undefined ?? generationModelsForSubmit.image,
             video: refreshedModels.video.includes(generationModelsForSubmit.video) ? generationModelsForSubmit.video : refreshedModels.video[0] as ModelName | undefined ?? generationModelsForSubmit.video,
           };
+          const nextGeneralModels = {
+            chat: generalModelsForSubmit.chat,
+            image: refreshedModels.image.includes(generalModelsForSubmit.image) ? generalModelsForSubmit.image : refreshedModels.image[0] as ModelName | undefined ?? generalModelsForSubmit.image,
+            video: refreshedModels.video.includes(generalModelsForSubmit.video) ? generalModelsForSubmit.video : refreshedModels.video[0] as ModelName | undefined ?? generalModelsForSubmit.video,
+          };
           enabledModelsForSubmit = refreshedModels;
           generationModelsForSubmit = nextSelectedModels;
+          generalModelsForSubmit = nextGeneralModels;
           setEnabledGenerationModelIds(refreshedModels);
           setEnabledAgentGenerationModelIds(refreshedAgentModels);
           setEnabledAssetImageModelIds(refreshedAssetImageModels);
           setSelectedGenerationModels(nextSelectedModels);
+          if (submitMode === "general") setSelectedGeneralModels(nextGeneralModels);
           setCharacterGenerateModel((current) => refreshedAssetImageModels.includes(current) ? current : refreshedAssetImageModels[0] as ModelName | undefined ?? current);
         } catch {}
       }
     }
 
-    if ((submitMode === "image" || submitMode === "video") && enabledModelsForSubmit[submitMode].length === 0) {
-      appendSystemMessage(activeSession.id, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: submitMode });
+    if (availabilityMode && enabledModelsForSubmit[availabilityMode].length === 0) {
+      appendSystemMessage(activeSession.id, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: availabilityMode });
       return;
     }
-    if (submitMode === "image" && !enabledModelsForSubmit.image.includes(generationModelsForSubmit.image)) {
-      appendSystemMessage(activeSession.id, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: submitMode });
+    if (availabilityMode === "image" && !enabledModelsForSubmit.image.includes(submitMode === "general" ? generalModelsForSubmit.image : generationModelsForSubmit.image)) {
+      appendSystemMessage(activeSession.id, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: availabilityMode });
       return;
     }
-    if (submitMode === "video" && !enabledModelsForSubmit.video.includes(generationModelsForSubmit.video)) {
-      appendSystemMessage(activeSession.id, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: submitMode });
+    if (availabilityMode === "video" && !enabledModelsForSubmit.video.includes(submitMode === "general" ? generalModelsForSubmit.video : generationModelsForSubmit.video)) {
+      appendSystemMessage(activeSession.id, { content: "连接不到模型，请联系管理员！", error: "连接不到模型，请联系管理员！", mode: availabilityMode });
       return;
     }
 
     const sessionId = activeSession.id;
     setSessionSending(sessionId, true);
+    let sessionForSend = activeSession;
+    sessionForSend = await ensureSessionMemorySummary(
+      activeSession,
+      submitMode === "general" ? generalModelsForSubmit.chat : selectedModel,
+      createClientId(),
+    );
     let sendUploadedImages = availableUploadedImages;
 
     try {
@@ -9593,7 +10115,7 @@ export function ChatWorkbench() {
 
     const explicitImageReferences = getOrderedExplicitImageReferences(rawText, assets, sendUploadedImages, activeConversationImageReferences);
     const uploadedImageReferences = sendUploadedImages.map((image) => ({ name: getUploadedImageReferenceName(image, sendUploadedImages), url: image.url }));
-    const recentReferenceImages = explicitImageReferences.length > 0 || uploadedImageReferences.length > 0 ? [] : getRecentReferenceImages(activeSession.messages, rawText);
+    const recentReferenceImages = explicitImageReferences.length > 0 || uploadedImageReferences.length > 0 ? [] : getRecentReferenceImages(sessionForSend.messages, rawText);
     const recentImageReferences = recentReferenceImages.map((url, index) => ({ name: `图片${index + 1}`, url }));
     const sourceImageReferences = explicitImageReferences.length > 0 ? explicitImageReferences : uploadedImageReferences.length > 0 ? uploadedImageReferences : recentImageReferences;
     if (sourceImageReferences.filter((reference, index, array) => Boolean(reference.url) && array.findIndex((item) => item.url === reference.url) === index).length > currentMaxReferenceImages) {
@@ -9603,16 +10125,26 @@ export function ChatWorkbench() {
     const namedImageReferences: ImageReference[] = sourceImageReferences
       .filter((reference, index, array) => Boolean(reference.url) && array.findIndex((item) => item.url === reference.url) === index)
       .slice(0, currentMaxReferenceImages);
+    if (submitMode === "general" && namedImageReferences.length > 0 && !conversationModelSupportsImages(generalModelsForSubmit.chat)) {
+      showInputTip("当前对话模型不支持图片，请切换 Seed、Gemini、GPT-4o、GPT-5.4 或 GPT-5.5");
+      setSessionSending(sessionId, false);
+      return;
+    }
     const referenceImages = namedImageReferences.map((reference) => reference.url);
+    const modelReferenceImages = namedImageReferences.map((reference) => {
+      const matchedAsset = assets.find((asset) => normalizeMediaUrlForMatch(asset.url) === normalizeMediaUrlForMatch(reference.url));
+      if (matchedAsset?.bytePlusAssetStatus === "Active" && matchedAsset.bytePlusAssetId) return `asset://${matchedAsset.bytePlusAssetId}`;
+      return reference.url;
+    });
     const referencedAssets = getReferencedAssets(rawText, assets);
     const displayImageReferences = (namedImageReferences.length > 0 ? namedImageReferences : referenceImages.map((url, index) => ({ name: `图片${index + 1}`, url }))).slice(0, currentMaxReferenceImages);
     const text = rawText || getImageOnlyPrompt(submitMode);
     const userMessage: Message = { id: createClientId(), role: "user", content: rawText, createdAt: nowTimestamp(), images: referenceImages.length > 0 ? referenceImages : undefined, imageReferences: displayImageReferences.length > 0 ? displayImageReferences : undefined, uploadedFiles: availableUploadedFiles.length > 0 ? availableUploadedFiles : undefined };
     const payloadUserMessage: Message = { ...userMessage, content: text };
-    const messagesWithoutSuggestions = activeSession.messages.map((message) => (message.suggestions ? { ...message, suggestions: undefined } : message));
+    const messagesWithoutSuggestions = sessionForSend.messages.map((message) => (message.suggestions ? { ...message, suggestions: undefined } : message));
     const optimisticMessages = [...messagesWithoutSuggestions, payloadUserMessage];
     const visibleOptimisticMessages = [...messagesWithoutSuggestions, userMessage];
-    const isDirectGenerationMode = submitMode !== "agent";
+    const isDirectGenerationMode = submitMode === "image" || submitMode === "video";
     const visibleMessages = isDirectGenerationMode ? activeSession.messages : visibleOptimisticMessages;
     addUploadedImagesToAssets(sessionId, sendUploadedImages, text);
 
@@ -9632,7 +10164,8 @@ export function ChatWorkbench() {
       ),
     );
 
-    if (isModelInfoQuestion(text)) {
+    if (submitMode !== "general" && isModelIdentityQuestion(text)) {
+      const textModel = selectedModel;
       const selectedModelLabel = agentModelTier === "advanced" ? "GPT-5.4" : "Seed 2.0 Lite";
       setSessions((current) =>
         current.map((session) =>
@@ -9654,7 +10187,7 @@ export function ChatWorkbench() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: selectedModel,
+            model: textModel,
             mode: "agent",
             messages: [{ role: "user", content: "请返回一次模型探测结果。" }],
             conversationId: sessionId,
@@ -9667,8 +10200,8 @@ export function ChatWorkbench() {
         applyCreditResult(sessionId, data.credit);
         appendAssistantMessage(sessionId, {
           content: data.model
-            ? `前端入口：${selectedModelLabel}（${selectedModel}）。后台实际模型：${getActualTextModelLabel(data.model)}（${data.model}）。`
-            : `前端入口：${selectedModelLabel}（${selectedModel}）。本次没有返回后台实际模型。`,
+            ? `前端入口：${selectedModelLabel}（${textModel}）。后台实际模型：${getActualTextModelLabel(data.model)}（${data.model}）。`
+            : `前端入口：${selectedModelLabel}（${textModel}）。本次没有返回后台实际模型。`,
           suggestions: DEFAULT_AGENT_SUGGESTIONS,
           mode: "agent",
         });
@@ -9690,7 +10223,7 @@ export function ChatWorkbench() {
     }
 
     if (submitMode === "agent") {
-      const payloadMessages = toAgentPayloadMessages(optimisticMessages, referenceImages.length > 0);
+      const payloadMessages = toAgentPayloadMessages(optimisticMessages, referenceImages.length > 0, sessionForSend.memorySummary);
       if (referencedAssets.length > 0) {
         const lastUserMessage = [...payloadMessages].reverse().find((message) => message.role === "user");
         if (lastUserMessage) {
@@ -9733,9 +10266,54 @@ export function ChatWorkbench() {
       return;
     }
 
+    if (submitMode === "general") {
+      const payloadMessages = toGeneralPayloadMessages(optimisticMessages, generalModelsForSubmit.chat, sessionForSend.memorySummary);
+      if (referencedAssets.length > 0) {
+        const lastUserMessage = [...payloadMessages].reverse().find((message) => message.role === "user");
+        if (lastUserMessage) lastUserMessage.content = `${lastUserMessage.content}${getAssetReferencesText(referencedAssets)}`;
+      }
+
+      const pendingRequest: PendingGeneration = {
+        id: createClientId(),
+        model: generalModelsForSubmit.chat,
+        mode: "general",
+        messages: payloadMessages,
+        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+        imageReferences: displayImageReferences.length > 0 ? displayImageReferences : undefined,
+        sourceText: text,
+        referenceHint: getReferenceHint(namedImageReferences),
+        selectedMediaModels: {
+          image: generalModelsForSubmit.image,
+          video: generalModelsForSubmit.video,
+        },
+        needsIntentResolution: true,
+      };
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === sessionId
+            ? {
+                ...session,
+                title: session.title === "新对话" ? getSessionTitle(text) : session.title,
+                updatedAt: Date.now(),
+                messages: visibleMessages,
+                pendingRequest: undefined,
+                pendingRequests: [...getSessionPendingRequests(session), pendingRequest],
+                draftInput: "",
+                uploadedFiles: [],
+                uploadedImages: [],
+              }
+            : session,
+        ),
+      );
+
+      setSessionSending(sessionId, false);
+      void runGeneration(sessionId, pendingRequest);
+      return;
+    }
+
     const generationMode: WorkMode = submitMode;
 
-    const payloadMessages = toChatPayloadMessages(optimisticMessages);
+    const payloadMessages = applyMemorySummaryToPayload(toChatPayloadMessages(optimisticMessages), sessionForSend.memorySummary);
     if (referencedAssets.length > 0) {
       const lastUserMessage = [...payloadMessages].reverse().find((message) => message.role === "user");
       if (lastUserMessage) {
@@ -9745,7 +10323,7 @@ export function ChatWorkbench() {
 
     const isAgentAutoGeneration = false;
     const assetTargetType = normalizedSuggestion?.assetTargetType ?? getAssetTypeFromText(text, generationMode);
-    const generationModel = isAgentAutoGeneration ? getAgentGenerationModel(agentModelTier, generationMode, generationModelsForSubmit, { sourceText: text, session: activeSession, feedbackLogs, enabledModels: enabledModelsForSubmit }) : generationMode === "image" ? generationModelsForSubmit.image : generationMode === "video" ? generationModelsForSubmit.video : selectedModel;
+    const generationModel = isAgentAutoGeneration ? getAgentGenerationModel(agentModelTier, generationMode, generationModelsForSubmit, { sourceText: text, session: activeSession, feedbackLogs, enabledModels: enabledModelsForSubmit }) : generationMode === "image" ? generationModelsForSubmit.image : generationModelsForSubmit.video;
     const agentSettings = isAgentAutoGeneration ? getAgentGenerationSettings(text, generationMode, generationModel) : undefined;
     const generationResolution = agentSettings?.resolution ?? (generationMode === "image" ? normalizeImageResolutionForModel(generationModel, selectedResolutions[modeForSettings]) : generationMode === "video" ? (selectedRatios.video === "智能比例" ? "720p" : normalizeVideoResolutionForModel(generationModel, selectedResolutions.video)) : selectedResolutions[modeForSettings]);
     const generationRatio = agentSettings?.ratio ?? (generationMode === "video" ? (selectedRatios.video === "智能比例" ? "智能比例" : normalizeVideoRatioForModel(generationModel, selectedRatios.video, generationResolution)) : selectedRatios[modeForSettings]);
@@ -9759,7 +10337,7 @@ export function ChatWorkbench() {
       originalPrompt: generationMode === "image" || generationMode === "video" ? text : undefined,
       preserveOriginalInput: false,
       assetTargetType: assetTargetType === "other" ? undefined : assetTargetType,
-      referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+      referenceImages: (generationMode === "video" && generationModel.startsWith("byteplus:video.") ? modelReferenceImages : referenceImages).length > 0 ? (generationMode === "video" && generationModel.startsWith("byteplus:video.") ? modelReferenceImages : referenceImages) : undefined,
       imageReferences: displayImageReferences.length > 0 ? displayImageReferences : undefined,
       referenceHint: getReferenceHint(namedImageReferences),
       agentGenerated: isAgentAutoGeneration,
@@ -9838,7 +10416,7 @@ export function ChatWorkbench() {
 
   const stopAgentThinking = () => {
     if (!activeSession) return;
-    const agentRequests = getSessionPendingRequests(activeSession).filter((request) => request.mode === "agent");
+    const agentRequests = getSessionPendingRequests(activeSession).filter((request) => request.mode === "agent" || request.mode === "general");
     if (agentRequests.length === 0) return;
 
     agentRequests.forEach((request) => {
@@ -9853,7 +10431,7 @@ export function ChatWorkbench() {
               ...session,
               updatedAt: Date.now(),
               pendingRequest: undefined,
-              pendingRequests: getSessionPendingRequests(session).filter((request) => request.mode !== "agent"),
+              pendingRequests: getSessionPendingRequests(session).filter((request) => request.mode !== "agent" && request.mode !== "general"),
               messages: [
                 ...session.messages,
                 {
@@ -10161,6 +10739,24 @@ export function ChatWorkbench() {
         setCopyFeedback((current) => (current?.messageId === message.id ? null : current));
         copyFeedbackTimerRef.current = null;
       }, 1000);
+    }
+  }, []);
+
+  const copyUserMessageText = useCallback(async (message: Message) => {
+    const showCopyFeedback = (state: "success" | "error") => {
+      setCopyFeedback({ messageId: message.id, state });
+      if (copyFeedbackTimerRef.current !== null) window.clearTimeout(copyFeedbackTimerRef.current);
+      copyFeedbackTimerRef.current = window.setTimeout(() => {
+        setCopyFeedback((current) => (current?.messageId === message.id ? null : current));
+        copyFeedbackTimerRef.current = null;
+      }, 1000);
+    };
+
+    try {
+      await navigator.clipboard.writeText(message.content);
+      showCopyFeedback("success");
+    } catch {
+      showCopyFeedback("error");
     }
   }, []);
 
@@ -11199,6 +11795,12 @@ export function ChatWorkbench() {
                 <RiSettingsLine className="h-[18px] w-[18px] text-[#777777]" aria-hidden="true" />
                 <span style={{ fontSize: 13 }}>设置</span>
               </button>
+              {currentUserIsAdmin ? (
+                <button type="button" onClick={() => { setIsUserMenuOpen(false); window.open("/admin", "_blank", "noopener,noreferrer"); }} className="mx-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-[6px] px-2 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#e9e9e9]">
+                  <RiTerminalWindowFill className="h-[18px] w-[18px] text-[#777777]" aria-hidden="true" />
+                  <span style={{ fontSize: 13 }}>后台管理</span>
+                </button>
+              ) : null}
               <div className="mt-2 overflow-hidden rounded-b-[12px] border-t border-[#e7e7e7] bg-[#f4f4f4]">
                 <button type="button" onClick={() => void logoutUser()} className="flex h-14 w-full items-center gap-3 px-3 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#eeeeee]">
                   <RiLogoutBoxRLine className="h-[18px] w-[18px] text-[#777777]" aria-hidden="true" />
@@ -11409,7 +12011,7 @@ export function ChatWorkbench() {
 
                 const lastMessage = messages[messages.length - 1];
                 const activeSuggestionMessageId = lastMessage?.role === "assistant" && (lastMessage.mode === "agent" || isAgentGeneratedMedia(lastMessage)) ? lastMessage.id : "";
-                const isAssistantMessageComplete = message.role !== "assistant" || message.mode === "image" || message.mode === "video" || completedTypingMessageIds.has(message.id);
+                const isAssistantMessageComplete = message.role !== "assistant" || message.mode === "image" || message.mode === "video" || !activeTypingMessageIds.has(message.id) || completedTypingMessageIds.has(message.id);
                 const messageType = getMessageType(message);
                 const reaction = messageReactions[message.id];
                 const issueFeedback = messageIssueFeedback[message.id];
@@ -11463,7 +12065,7 @@ export function ChatWorkbench() {
                 };
 
                 return (
-                <div key={message.id} className={message.role === "user" ? "flex justify-end" : "flex justify-start"}>
+                <div key={message.id} className={message.role === "user" ? "group flex justify-end" : "flex justify-start"}>
                   <div className={message.role === "user" ? "max-w-[92%]" : isAgentMediaMessage ? "flex w-full max-w-full" : "flex max-w-full"}>
                     {false && message.role === "assistant" ? (
                       <div className="mt-3 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[#e5ddff] bg-[#f1ecff] text-[#6d4aff]">
@@ -11472,6 +12074,7 @@ export function ChatWorkbench() {
                     ) : null}
                     <div className={message.role === "user" ? "flex min-w-0 flex-col items-end" : isAgentMediaMessage ? "min-w-0 w-full" : "min-w-0"}>
                     {message.role !== "user" || message.content.trim() ? (
+                      <>
                       <div
                         className={
                           message.role === "user"
@@ -11482,13 +12085,27 @@ export function ChatWorkbench() {
                         }
                       >
                         {message.role === "assistant" ? (
-                        message.mode === "agent" || isAgentMediaMessage ? (
-                          isAgentMediaMessage ? <><InlineAgentIcon activated={isAgentActivationMessage(message.content)} /><ReferencedTextContent content={message.content} references={mediaPromptReferences} /></> : <TypewriterFormattedMessage messageId={message.id} content={message.content} isComplete={isAssistantMessageComplete} onComplete={markTypingComplete} onTick={keepTypingInPlace} leadingIcon={<InlineAgentIcon activated={isAgentActivationMessage(message.content)} />} />
+                        message.mode === "agent" || message.mode === "general" || isAgentMediaMessage ? (
+                          isAgentMediaMessage ? <><InlineAssistantIcon message={message} activated={isAgentActivationMessage(message.content)} provider={message.textModel ? generalModelProviders[message.textModel] : undefined} /><ReferencedTextContent content={message.content} references={mediaPromptReferences} /></> : <TypewriterFormattedMessage messageId={message.id} content={message.content} isComplete={isAssistantMessageComplete} onComplete={markTypingComplete} onTick={keepTypingInPlace} leadingIcon={<InlineAssistantIcon message={message} activated={isAgentActivationMessage(message.content)} provider={message.textModel ? generalModelProviders[message.textModel] : undefined} />} />
                         ) : message.mode === "image" || message.mode === "video" ? <MediaPromptBlock message={message} references={mediaPromptReferences} onUsePrompt={(item) => void copyPrompt(item)} copyState={copyFeedback?.messageId === message.id ? copyFeedback.state : undefined} displayImageUrl={displayedMessageImages[0]} variantIndex={selectedImageVariantIndex} variantCount={imageVariantCount} onPreviousVariant={() => setImageVariantIndex(selectedImageVariantIndex - 1)} onNextVariant={() => setImageVariantIndex(selectedImageVariantIndex + 1)} /> : <TypewriterFormattedMessage messageId={message.id} content={message.content} isComplete={isAssistantMessageComplete} onComplete={markTypingComplete} onTick={keepTypingAtBottom} />
                         ) : (
                         <UserMessageContent content={message.content} references={userImageReferences} />
                         )}
                       </div>
+                      {message.role === "user" && message.content.trim() ? (
+                        <div className="mt-1 flex items-center justify-end gap-2 text-[12px] text-[#b0b0b0] opacity-0 transition-opacity group-hover:opacity-100">
+                          <span>{formatMessageTime(message.createdAt)}</span>
+                          <button
+                            type="button"
+                            onClick={() => void copyUserMessageText(message)}
+                            className="inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[#9a9a9a] transition hover:bg-[#f2f2f2] hover:text-[#555555]"
+                            aria-label="复制用户消息"
+                          >
+                            {copyFeedback?.messageId === message.id && copyFeedback.state === "success" ? <RiCheckLine className="h-3.5 w-3.5" aria-hidden="true" /> : <RiCheckboxMultipleBlankLine className="h-3.5 w-3.5" aria-hidden="true" />}
+                          </button>
+                        </div>
+                      ) : null}
+                      </>
                     ) : null}
 
                     {message.role === "user" ? (
@@ -11599,7 +12216,7 @@ export function ChatWorkbench() {
                     {message.role === "assistant" && isAssistantMessageComplete ? (
                       <>
                         <div className={message.mode === "image" || message.mode === "video" ? "mt-2 flex flex-wrap items-center gap-1.5" : "mt-3 flex flex-wrap items-center gap-1.5"}>
-                          {message.mode === "agent" && messageType === "text" ? (
+                          {(message.mode === "agent" || message.mode === "general") && messageType === "text" ? (
                             <FeedbackButton label={copyFeedback?.messageId === message.id ? (copyFeedback.state === "success" ? "已复制" : "无法复制") : "复制"} state={copyFeedback?.messageId === message.id ? copyFeedback.state : "idle"} onClick={() => void copyMessage(message)}>
                               <RiCheckboxMultipleBlankLine className="h-4.5 w-4.5" aria-hidden="true" />
                             </FeedbackButton>
@@ -11898,7 +12515,7 @@ export function ChatWorkbench() {
               </div>
             </div>
             <div className="mt-3 flex flex-nowrap items-center justify-between gap-3 pb-0.5">
-              <div className={`flex min-w-max flex-nowrap items-center gap-2 text-[12px] transition ${isMainInputDisabled ? "pointer-events-none opacity-45 grayscale-[0.15]" : ""}`}>
+              <div className={`flex ${mode === "general" ? "min-w-0 flex-1" : "min-w-max"} flex-nowrap items-center gap-2 text-[12px] transition ${isMainInputDisabled ? "pointer-events-none opacity-45 grayscale-[0.15]" : ""}`}>
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -11939,7 +12556,7 @@ export function ChatWorkbench() {
                   {openControlMenu === "mode" ? (
                     <div className="absolute bottom-full left-0 z-[70] mb-2 w-[220px] rounded-[12px] bg-white p-2 shadow-[0_18px_40px_rgba(0,0,0,0.12)]">
                       <div className="px-2 pb-2 text-[12px] font-medium text-[#a0a0a0]">创作类型</div>
-                      {modeOptions.map((option) => (
+                      {modeOptions.filter((option) => option.value !== "general" || currentUserGeneralModeEnabled).map((option) => (
                         <button
                           key={option.value}
                           type="button"
@@ -12029,7 +12646,15 @@ export function ChatWorkbench() {
                   </div>
                 ) : null}
 
-                {mode !== "agent" ? (
+                {mode === "general" ? (
+                  <div className="grid min-w-0 flex-1 grid-cols-3 gap-2">
+                    {renderGeneralModelMenu("chat", "选择对话模型")}
+                    {renderGeneralModelMenu("image", "选择图片模型")}
+                    {renderGeneralModelMenu("video", "选择视频模型")}
+                  </div>
+                ) : null}
+
+                {mode !== "agent" && mode !== "general" ? (
                   <>
                     {renderModelMenu()}
                     {renderImageSettingsMenu()}
@@ -12041,7 +12666,7 @@ export function ChatWorkbench() {
               <button
                 type="button"
                 onClick={() => isThinking ? stopAgentThinking() : void sendMessage()}
-                disabled={!isThinking && (isInputPromptOptimizing || hasUploadingInputs || hasFailedUploadInputs || (mode !== "agent" && activeHasMaxPendingRequests) || activeIsSending || (!activeInput.trim() && activeUploadedImages.length === 0 && activeUploadedFiles.length === 0))}
+                disabled={!isThinking && (isInputPromptOptimizing || hasUploadingInputs || hasFailedUploadInputs || (mode !== "agent" && mode !== "general" && activeHasMaxPendingRequests) || activeIsSending || (!activeInput.trim() && activeUploadedImages.length === 0 && activeUploadedFiles.length === 0))}
                 className={`inline-flex h-9 w-9 shrink-0 items-center justify-center whitespace-nowrap rounded-[10px] bg-[#111111] text-white transition hover:bg-[#000000] disabled:cursor-not-allowed disabled:bg-[#d7d7d7] disabled:text-white ${isThinking ? "yinzao-stop-shimmer" : ""}`}
                 aria-label={isThinking ? "停止思考" : "发送"}
               >
@@ -12980,6 +13605,27 @@ export function ChatWorkbench() {
                   </div>
                   {previewPromptErrorText ? <div className="mt-1.5 text-[14px] leading-6 text-red-500">{previewPromptErrorText}</div> : null}
                   <div className="mt-1.5 text-[14px] leading-6 text-[#333333]">{previewHasUsablePrompt ? previewAsset.sourcePrompt : "暂无提示词"}</div>
+                  {ENABLE_BYTEPLUS_ASSET_REVIEW && canReviewBytePlusAsset ? (
+                    <div className="mt-4 rounded-[10px] border border-[#e6e2dc] bg-white/58 p-3 text-[13px] text-[#555555]">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="font-medium text-[#333333]">火山素材审核</div>
+                          <div className="mt-1 text-[12px] text-[#8b8b8b]">{previewBytePlusStatusText}{previewAsset.bytePlusAssetId ? ` · ${previewAsset.bytePlusAssetId}` : ""}</div>
+                        </div>
+                        {canSubmitBytePlusAsset ? (
+                          <button type="button" disabled={isSubmittingBytePlusAsset} onClick={() => void submitBytePlusAsset()} className="inline-flex h-7 shrink-0 items-center rounded-[6px] bg-[#367cee] px-2.5 text-[12px] font-medium text-white transition hover:bg-[#2f6fd4] disabled:cursor-not-allowed disabled:opacity-55">
+                            {isSubmittingBytePlusAsset ? "提交中" : "提交审核"}
+                          </button>
+                        ) : canRefreshBytePlusAsset ? (
+                          <button type="button" disabled={isSubmittingBytePlusAsset} onClick={() => void refreshBytePlusAsset()} className="inline-flex h-7 shrink-0 items-center rounded-[6px] bg-[#111111] px-2.5 text-[12px] font-medium text-white transition hover:bg-[#252525] disabled:cursor-not-allowed disabled:opacity-55">
+                            {isSubmittingBytePlusAsset ? "刷新中" : "刷新状态"}
+                          </button>
+                        ) : null}
+                      </div>
+                      {previewAsset.bytePlusAssetStatus === "Active" ? <div className="mt-2 text-[12px] text-[#367cee]">视频生成会优先使用 asset:// 素材 ID。</div> : null}
+                      {previewAsset.bytePlusAssetError || previewBytePlusErrorText ? <div className="mt-2 text-[12px] leading-5 text-red-500">{previewBytePlusErrorText || previewAsset.bytePlusAssetError}</div> : null}
+                    </div>
+                  ) : null}
                 </div>
               </aside>
             </div>

@@ -1,5 +1,6 @@
 import { createUserSession, generateUserId, hashVerificationCode, isValidEmail, jsonError, normalizeEmail } from "@/lib/auth";
 import { getCreditSettings, grantCredits } from "@/lib/credits";
+import { getLoginAuditData } from "@/lib/login-audit";
 import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
@@ -45,9 +46,10 @@ export async function POST(request: Request) {
     return jsonError("用户名错误！请联系管理员！");
   }
 
+  const loginAuditData = await getLoginAuditData(request);
   const user = existingUser
-    ? await prisma.user.update({ where: { id: existingUser.id }, data: { lastLoginAt: new Date() } })
-    : await prisma.user.create({ data: { id: await generateUserId(), email, nickname: email, credits: 0, lastLoginAt: new Date() } });
+    ? await prisma.user.update({ where: { id: existingUser.id }, data: loginAuditData })
+    : await prisma.user.create({ data: { id: await generateUserId(), email, nickname: email, credits: 0, ...loginAuditData } });
 
   if (!existingUser) {
     const creditSettings = await getCreditSettings();

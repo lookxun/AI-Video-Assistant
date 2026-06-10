@@ -1,4 +1,5 @@
 import { createUserSession, isValidEmail, jsonError, normalizeEmail, verifyPassword } from "@/lib/auth";
+import { getLoginAuditData } from "@/lib/login-audit";
 import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
@@ -30,7 +31,7 @@ export async function POST(request: Request) {
     return jsonError("密码不正确");
   }
 
-  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+  await prisma.user.update({ where: { id: user.id }, data: await getLoginAuditData(request) });
   await createUserSession(user.id);
 
   return Response.json({ user: { email: user.email, hasPassword: true } });

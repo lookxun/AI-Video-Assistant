@@ -31,6 +31,31 @@ function Test-Ready {
   }
 }
 
+function Invoke-LoggedCommand {
+  param(
+    [string]$Command,
+    [string]$FailureMessage
+  )
+
+  Add-Content -LiteralPath $log -Value ""
+  Add-Content -LiteralPath $log -Value "> $Command"
+
+  $process = Start-Process cmd.exe `
+    -WorkingDirectory $root `
+    -WindowStyle Hidden `
+    -Wait `
+    -PassThru `
+    -ArgumentList "/c $Command >> start-project.log 2>&1"
+
+  if ($process.ExitCode -ne 0) {
+    Add-Content -LiteralPath $log -Value $FailureMessage
+    Start-Process notepad.exe $log
+    return $false
+  }
+
+  return $true
+}
+
 $createdNew = $false
 $mutex = New-Object System.Threading.Mutex($true, "YinzaoStartProjectMutex", [ref]$createdNew)
 if (-not $createdNew) {
@@ -47,6 +72,15 @@ try {
   }
 
   Set-Content -LiteralPath $log -Value "Starting Yinzao dev server..." -Encoding UTF8
+
+  if (-not (Invoke-LoggedCommand "docker compose up -d" "Failed to start local PostgreSQL. Please start Docker Desktop and try again.")) {
+    exit
+  }
+
+  if (-not (Invoke-LoggedCommand "npx prisma migrate deploy" "Failed to apply database migrations. Please check start-project.log.")) {
+    exit
+  }
+
   Start-Process cmd.exe `
       -WorkingDirectory $root `
       -WindowStyle Hidden `

@@ -40,6 +40,8 @@ export type AdminSystemSettings = {
 };
 
 const DEFAULT_MODEL_PROVIDER_PREFERENCES: Record<string, "openrouter" | "byteplus"> = {
+  "general.seed-2-0-lite": "openrouter",
+  "general.seed-2-0-pro": "openrouter",
   "chat.seed-2-0-lite": "openrouter",
   "chat.advanced": "openrouter",
   "prompt.priority": "openrouter",
@@ -57,6 +59,8 @@ const DEFAULT_MODEL_PROVIDER_PREFERENCES: Record<string, "openrouter" | "byteplu
 };
 
 const DEFAULT_BYTEPLUS_MODEL_SELECTIONS: Record<string, string> = {
+  "general.seed-2-0-lite": "ep-20260518173102-9mtk6",
+  "general.seed-2-0-pro": "ep-20260514173614-jbcb4",
   "chat.seed-2-0-lite": "ep-20260518173102-9mtk6",
   "chat.advanced": "ep-20260514173614-jbcb4",
   "prompt.priority": "ep-20260514173614-jbcb4",
@@ -227,6 +231,12 @@ export function isAgentVideoModelEnabled(modelId: string) {
   if (modelId === "bytedance/seedance-2.0-fast") return isOpenRouterPreferenceEnabled("agent-video.seedance-2-0-fast");
   if (modelId === "bytedance/seedance-2.0") return isOpenRouterPreferenceEnabled("agent-video.seedance-2-0");
   return !isOpenRouterOnlyDisabled("Agent 自动生成策略", "备选视频", modelId);
+}
+
+export function isGeneralTextModelEnabled(modelId: string) {
+  if (modelId === "bytedance-seed/seed-2.0-lite") return getModelProviderPreference("general.seed-2-0-lite") === "openrouter" || isBytePlusPreferenceEnabled("general.seed-2-0-lite");
+  if (modelId === "byteplus:chat.seed-2-0-pro") return isBytePlusPreferenceEnabled("general.seed-2-0-pro");
+  return !isOpenRouterOnlyDisabled("通用模式 / Agent 规划 / 意图识别", "", modelId);
 }
 
 export function isTextModelEnabled(modelId: string, source: "chat" | "prompt" = "chat") {

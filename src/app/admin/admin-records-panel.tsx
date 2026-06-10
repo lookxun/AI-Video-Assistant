@@ -72,6 +72,7 @@ function mediaItemToFlowItem(item: AdminMediaItem, index: number, creditLookup?:
     errorText: item.isDeleted ? "用户已删除" : undefined,
     deletedAtLabel: item.deletedAtLabel,
     credits: creditItem?.credits ?? 0,
+    expectedCredits: creditItem?.expectedCredits,
     totalTokens: creditItem?.totalTokens ?? 0,
     usd: creditItem?.usd ?? 0,
     cny: creditItem?.cny ?? 0,
@@ -80,6 +81,8 @@ function mediaItemToFlowItem(item: AdminMediaItem, index: number, creditLookup?:
     parameters: isUpload ? item.type === "image" ? "对话流上传" : "对话流上传文件" : [item.model, item.ratio, [item.size, item.resolution].filter((value) => value && value !== "-").join(" "), item.type === "video" ? item.duration : ""].filter((value) => value && value !== "-").join(" | "),
     isUploadRecord: isUpload,
     isChargeDisabled: creditItem?.isChargeDisabled,
+    isCreditMissing: !isUpload && !creditItem,
+    isCostUnavailable: Boolean(creditItem && !creditItem.isChargeDisabled && creditItem.status !== "failed" && creditItem.credits === 0 && creditItem.usd === 0 && creditItem.cny === 0),
     isReversePrompt: item.isReversePrompt,
     promptText: item.prompt,
     createdAtLabel: item.createdAtTs ? new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(item.createdAtTs)) : "-",
@@ -213,12 +216,12 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
             <tr>
               <th className="w-[44px] border-b border-[#eeeeee] py-3 pl-6 pr-0 font-medium" />
               <th className="w-[135px] border-b border-[#eeeeee] py-3 pl-2 pr-3 font-medium">ID号</th>
-              <th className="border-b border-[#eeeeee] px-3 py-3 font-medium">用户</th>
-              <th className="w-[152px] border-b border-[#eeeeee] px-3 py-3 text-right font-medium">历史对话</th>
-              <th className="w-[152px] border-b border-[#eeeeee] px-3 py-3 text-right font-medium">图片生成</th>
-              <th className="w-[152px] border-b border-[#eeeeee] px-3 py-3 text-right font-medium">视频生成</th>
-              <th className="w-[152px] border-b border-[#eeeeee] px-3 py-3 text-right font-medium">上传图片</th>
-              <th className="w-[152px] border-b border-[#eeeeee] py-3 pl-3 pr-8 text-right font-medium">上传文件</th>
+              <th className="w-[290px] border-b border-[#eeeeee] px-4 py-3 font-medium">用户</th>
+              <th className="w-[152px] border-b border-[#eeeeee] px-4 py-3 text-left font-medium">历史对话</th>
+              <th className="w-[152px] border-b border-[#eeeeee] px-4 py-3 text-left font-medium">图片生成</th>
+              <th className="w-[152px] border-b border-[#eeeeee] px-4 py-3 text-left font-medium">视频生成</th>
+              <th className="w-[152px] border-b border-[#eeeeee] px-4 py-3 text-left font-medium">上传图片</th>
+              <th className="w-[152px] border-b border-[#eeeeee] py-3 pl-4 pr-8 text-left font-medium">上传文件</th>
             </tr>
           </thead>
           <tbody>
@@ -239,7 +242,7 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
                       </button>
                     </td>
                     <td className="border-b border-[#f2f2f2] py-3 pl-2 pr-3 font-mono text-[12px] text-[#777777]">{user.id}</td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3">
+                    <td className="border-b border-[#f2f2f2] px-4 py-3">
                       <div className="flex items-center gap-3">
                         <UserAvatar user={user} />
                         <div className="min-w-0">
@@ -248,11 +251,11 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
                         </div>
                       </div>
                     </td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3 text-right font-medium">{formatNumber(user.conversationCount)}</td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3 text-right font-medium">{formatNumber(imageGenerationCount)}</td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3 text-right font-medium">{formatNumber(videoGenerationCount)}</td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3 text-right font-medium">{formatNumber(uploadImageCount)}</td>
-                    <td className="border-b border-[#f2f2f2] py-3 pl-3 pr-8 text-right font-medium">{formatNumber(uploadFileCount)}</td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium">{formatNumber(user.conversationCount)}</td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium">{formatNumber(imageGenerationCount)}</td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium">{formatNumber(videoGenerationCount)}</td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium">{formatNumber(uploadImageCount)}</td>
+                    <td className="border-b border-[#f2f2f2] py-3 pl-4 pr-8 text-left font-medium">{formatNumber(uploadFileCount)}</td>
                   </tr>
                   {isExpanded ? (
                     <tr className="bg-[#fbfbfb]">

@@ -26,6 +26,7 @@ export function toUserErrorMessage(value: unknown, fallback = "请求失败，�
   if (/timeout|timed out|etimedout|aborted/.test(lower)) return withErrorCode("请求超时，请稍后重试。");
   if (/network|fetch failed|econnreset|enotfound|socket|curl|schannel|closed abruptly|close_notify|command failed/.test(lower)) return withErrorCode("网络连接异常，请稍后重试。");
   if (/maximum call stack size exceeded|call stack|rangeerror|typeerror|referenceerror/.test(lower)) return withErrorCode("任务失败，请联系管理员！");
+  if (/copyright|copyright restrictions|related to copyright|版权/.test(lower)) return withErrorCode("输出视频可能涉及版权限制，平台拒绝生成。");
   if (/sensitive|privacyinformation|real person|privacy|真人|隐私|敏感/.test(lower)) return withErrorCode("参考图可能包含真人或隐私敏感信息，平台拒绝生成。请换一张参考图后重试。");
   if (/unsupported size|invalid option|invalid parameter|not valid/.test(lower)) return withErrorCode("当前模型不支持这组参数，请换比例、分辨率或模型后重试。");
   if (/internal server error|server error|500/.test(lower)) return withErrorCode("平台服务临时异常，请稍后重试。");

@@ -4,11 +4,7 @@ import { Fragment, useMemo, useRef, useState, useTransition, type ReactNode } fr
 import { RiArrowDownSLine, RiArrowRightSLine, RiCloseLine, RiInformation2Line, RiQuillPenAiLine, RiSearchLine } from "react-icons/ri";
 import { useBodyScrollLock } from "@/components/use-body-scroll-lock";
 import { AdminHoverImagePreview } from "./admin-hover-image-preview";
-
-function getMediaThumbnailUrl(url: string) {
-  if (!url.startsWith("/generated/")) return url;
-  return `/api/media-thumbnail?url=${encodeURIComponent(url)}`;
-}
+import { fallbackAdminImageToOriginal, getAdminMediaSourceUrl, getAdminMediaThumbnailUrl } from "./admin-media-url";
 
 function getLocalVideoPosterUrl(url: string) {
   const userVideoMatch = url.match(/^\/generated\/users\/([^/]+)\/videos\//);
@@ -36,6 +32,7 @@ export type AdminCreditUser = {
   id: string;
   userEmail: string;
   nickname: string | null;
+  avatarUrl?: string | null;
   currentCredits: number;
   giftedCredits: number;
   signupGiftedCredits: number;
@@ -73,6 +70,7 @@ export type AdminCreditFlowItem = {
   url: string;
   status?: "success" | "failed";
   credits: number;
+  expectedCredits?: number;
   totalTokens: number;
   usd: number;
   cny: number;
@@ -83,6 +81,8 @@ export type AdminCreditFlowItem = {
   deletedAtLabel?: string;
   isUploadRecord?: boolean;
   isChargeDisabled?: boolean;
+  isCreditMissing?: boolean;
+  isCostUnavailable?: boolean;
   isReversePrompt?: boolean;
   promptText?: string;
   createdAtLabel: string;
@@ -98,9 +98,11 @@ export type AdminCreditConversationDetail = {
   updatedAtLabel: string;
   updatedAtTs?: number;
   chatCredits: number;
+  chatExpectedCredits?: number;
   chatUsd?: number;
   chatCny?: number;
   planCredits: number;
+  planExpectedCredits?: number;
   planUsd?: number;
   planCny?: number;
   chatChargeDisabled?: boolean;
@@ -265,6 +267,20 @@ function CreditStatCard({ label, value, tone = "default" }: { label: string; val
   );
 }
 
+function CreditUserAvatar({ user }: { user: AdminCreditUser }) {
+  if (user.avatarUrl) {
+    return (
+      <div className="h-9 w-9 overflow-hidden rounded-full bg-[#f1f1f1]">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={user.avatarUrl} alt={user.nickname || user.userEmail} className="h-full w-full object-cover" />
+      </div>
+    );
+  }
+
+  const initial = (user.nickname || user.userEmail || "用").trim().slice(0, 1).toUpperCase();
+  return <div className="flex h-9 w-9 items-center justify-center rounded-full border border-[#dfe7f4] bg-[#edf4ff] text-[13px] font-semibold text-[#367cee]">{initial}</div>;
+}
+
 function CreditAmountStatCard({ usd, cny }: { usd: number; cny: number }) {
   return (
     <div className="flex min-h-[98px] flex-col rounded-[14px] border border-[#eeeeee] bg-white p-4">
@@ -367,10 +383,10 @@ export function CreditFlowDialog({ user, onClose }: { user: AdminCreditUser; onC
                       <div className="px-4 py-3 text-right">折算人民币</div>
                     </div>
                     <div className="divide-y divide-[#eeeeee]">
-                      <CreditFlowRow label="对话积分" credits={activeConversation.chatCredits} usd={activeConversation.chatUsd ?? 0} cny={activeConversation.chatCny ?? 0} isChargeDisabled={activeConversation.chatChargeDisabled} />
-                      <CreditFlowRow label="规划积分" credits={activeConversation.planCredits} usd={activeConversation.planUsd ?? 0} cny={activeConversation.planCny ?? 0} isChargeDisabled={activeConversation.planChargeDisabled} />
+                      <CreditFlowRow label="对话积分" credits={activeConversation.chatCredits} expectedCredits={activeConversation.chatExpectedCredits} usd={activeConversation.chatUsd ?? 0} cny={activeConversation.chatCny ?? 0} isChargeDisabled={activeConversation.chatChargeDisabled} />
+                      <CreditFlowRow label="规划积分" credits={activeConversation.planCredits} expectedCredits={activeConversation.planExpectedCredits} usd={activeConversation.planUsd ?? 0} cny={activeConversation.planCny ?? 0} isChargeDisabled={activeConversation.planChargeDisabled} />
                       {activeConversation.mediaItems.map((item) => (
-                        <CreditFlowRow key={item.id} label={item.displayName} mediaName={item.mediaName} credits={item.credits} usd={item.usd} cny={item.cny} meta={formatMetaWithTime(item.parameters, item.createdAtLabel)} errorText={item.errorText} deletedAtLabel={item.deletedAtLabel} mediaUrl={item.url} mediaKind={item.kind} status={item.status} isUploadRecord={item.isUploadRecord} isChargeDisabled={item.isChargeDisabled} isReversePrompt={item.isReversePrompt} promptText={item.promptText} />
+                        <CreditFlowRow key={item.id} label={item.displayName} mediaName={item.mediaName} credits={item.credits} expectedCredits={item.expectedCredits} usd={item.usd} cny={item.cny} meta={formatMetaWithTime(item.parameters, item.createdAtLabel)} errorText={item.errorText} deletedAtLabel={item.deletedAtLabel} mediaUrl={item.url} mediaKind={item.kind} status={item.status} isUploadRecord={item.isUploadRecord} isChargeDisabled={item.isChargeDisabled} isCreditMissing={item.isCreditMissing} isCostUnavailable={item.isCostUnavailable} isReversePrompt={item.isReversePrompt} promptText={item.promptText} />
                       ))}
                       {activeConversation.mediaItems.length === 0 ? <div className="px-4 py-8 text-center text-[13px] text-[#999999]">该对话暂无图片或视频积分</div> : null}
                     </div>
@@ -385,9 +401,10 @@ export function CreditFlowDialog({ user, onClose }: { user: AdminCreditUser; onC
   );
 }
 
-function CreditFlowRow({ label, mediaName, credits, usd, cny, meta, errorText, deletedAtLabel, mediaUrl, mediaKind, status = "success", isUploadRecord, isChargeDisabled, isReversePrompt, promptText, showPromptCopyColumn }: { label: string; mediaName?: string; credits: number; usd: number; cny: number; meta?: string; errorText?: string; deletedAtLabel?: string; mediaUrl?: string; mediaKind?: "image" | "video" | "file"; status?: "success" | "failed"; isUploadRecord?: boolean; isChargeDisabled?: boolean; isReversePrompt?: boolean; promptText?: string; showPromptCopyColumn?: boolean }) {
+function CreditFlowRow({ label, mediaName, credits, expectedCredits, usd, cny, meta, errorText, deletedAtLabel, mediaUrl, mediaKind, status = "success", isUploadRecord, isChargeDisabled, isCreditMissing, isCostUnavailable, isReversePrompt, promptText, showPromptCopyColumn }: { label: string; mediaName?: string; credits: number; expectedCredits?: number; usd: number; cny: number; meta?: string; errorText?: string; deletedAtLabel?: string; mediaUrl?: string; mediaKind?: "image" | "video" | "file"; status?: "success" | "failed"; isUploadRecord?: boolean; isChargeDisabled?: boolean; isCreditMissing?: boolean; isCostUnavailable?: boolean; isReversePrompt?: boolean; promptText?: string; showPromptCopyColumn?: boolean }) {
   const isDeleted = errorText === "用户已删除";
-  const creditsLabel = isUploadRecord ? "--" : isChargeDisabled && credits === 0 ? "0（扣分关闭）" : credits === 0 ? "0（扣分异常）" : `-${credits.toLocaleString("en-US")}`;
+  const safeExpectedCredits = Math.max(0, Math.floor(expectedCredits ?? credits));
+  const creditsLabel = isUploadRecord ? "--" : isChargeDisabled && credits === 0 ? "0（扣分关闭）" : isCreditMissing && credits === 0 ? "0（扣分异常）" : (isCostUnavailable || credits === 0) && status !== "failed" ? "0（未返回成本）" : credits === 0 ? "0" : `-${credits.toLocaleString("en-US")}${safeExpectedCredits > credits ? ` / 应扣${safeExpectedCredits.toLocaleString("en-US")}` : ""}`;
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const gridClassName = showPromptCopyColumn ? "grid-cols-[minmax(0,1.6fr)_110px_150px]" : "grid-cols-[minmax(0,1.6fr)_110px_110px_110px]";
 
@@ -410,13 +427,13 @@ function CreditFlowRow({ label, mediaName, credits, usd, cny, meta, errorText, d
             <div className="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded-[6px] bg-[#e8e8e8]">
               {getLocalVideoPosterUrl(mediaUrl) ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={getMediaThumbnailUrl(getLocalVideoPosterUrl(mediaUrl) ?? mediaUrl)} alt={label} className="h-full w-full object-cover" />
-              ) : <video src={mediaUrl} className="h-full w-full object-cover" muted />}
+                <img src={getAdminMediaThumbnailUrl(getLocalVideoPosterUrl(mediaUrl) ?? mediaUrl)} onError={(event) => fallbackAdminImageToOriginal(event.currentTarget, mediaUrl)} alt={label} className="h-full w-full object-cover" />
+              ) : <video src={getAdminMediaSourceUrl(mediaUrl)} className="h-full w-full object-cover" muted />}
             </div>
           ) : (
             <AdminHoverImagePreview src={mediaUrl} alt={label} wrapperClassName="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded-[6px] bg-[#e8e8e8]">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={getMediaThumbnailUrl(mediaUrl)} alt={label} className="h-full w-full object-cover" />
+              <img src={getAdminMediaThumbnailUrl(mediaUrl)} onError={(event) => fallbackAdminImageToOriginal(event.currentTarget, mediaUrl)} alt={label} className="h-full w-full object-cover" />
             </AdminHoverImagePreview>
           )
         ) : status === "failed" ? (
@@ -517,7 +534,7 @@ export function CreditCategoryDialog({ title, user, categories, initialCategoryI
                     </div>
                     <div className="divide-y divide-[#eeeeee]">
                       {activeCategory.items.map((item) => (
-                        <CreditFlowRow key={item.id} label={item.displayName} mediaName={item.mediaName} credits={item.credits} usd={item.usd} cny={item.cny} meta={formatMetaWithTime(item.parameters, item.createdAtLabel)} errorText={item.errorText} deletedAtLabel={item.deletedAtLabel} mediaUrl={item.url} mediaKind={item.kind} status={item.status} isUploadRecord={item.isUploadRecord} isChargeDisabled={item.isChargeDisabled} isReversePrompt={item.isReversePrompt} promptText={item.promptText} showPromptCopyColumn={showPromptCopyColumn} />
+                        <CreditFlowRow key={item.id} label={item.displayName} mediaName={item.mediaName} credits={item.credits} expectedCredits={item.expectedCredits} usd={item.usd} cny={item.cny} meta={formatMetaWithTime(item.parameters, item.createdAtLabel)} errorText={item.errorText} deletedAtLabel={item.deletedAtLabel} mediaUrl={item.url} mediaKind={item.kind} status={item.status} isUploadRecord={item.isUploadRecord} isChargeDisabled={item.isChargeDisabled} isCreditMissing={item.isCreditMissing} isCostUnavailable={item.isCostUnavailable} isReversePrompt={item.isReversePrompt} promptText={item.promptText} showPromptCopyColumn={showPromptCopyColumn} />
                       ))}
                       {activeCategory.items.length === 0 ? <div className="px-4 py-8 text-center text-[13px] text-[#999999]">当前分类暂无积分明细</div> : null}
                     </div>
@@ -776,7 +793,7 @@ export function AdminCreditsPanel({ settings, stats, rows }: { settings: AdminCr
 
       <section className="mt-3 min-w-[1180px] overflow-hidden rounded-[10px] border border-[#eeeeee] bg-white shadow-[0_10px_28px_rgba(0,0,0,0.04)]">
         <table className="w-full min-w-[1180px] border-separate border-spacing-0 text-left text-[13px]">
-          <thead className="bg-[#fafafa] text-[#777777]"><tr><th className="w-[44px] border-b border-[#eeeeee] py-3 pl-6 pr-0 font-medium" /><th className="w-[135px] border-b border-[#eeeeee] py-3 pl-2 pr-3 font-medium">ID号</th><th className="border-b border-[#eeeeee] px-3 py-3 font-medium">用户</th><th className="w-[190px] border-b border-[#eeeeee] px-3 py-3 text-right font-medium">当前积分</th><th className="w-[190px] border-b border-[#eeeeee] px-3 py-3 text-right font-medium">已赠送积分</th><th className="w-[190px] border-b border-[#eeeeee] px-3 py-3 text-right font-medium">已消耗积分</th><th className="w-[150px] border-b border-[#eeeeee] px-3 py-3 text-right font-medium">最后积分变动时间</th><th className="w-[106px] border-b border-[#eeeeee] py-3 pl-3 pr-8 font-medium" /></tr></thead>
+          <thead className="bg-[#fafafa] text-[#777777]"><tr><th className="w-[44px] border-b border-[#eeeeee] py-3 pl-6 pr-0 font-medium" /><th className="w-[135px] border-b border-[#eeeeee] py-3 pl-2 pr-4 font-medium">ID号</th><th className="w-[290px] border-b border-[#eeeeee] px-4 py-3 font-medium">用户</th><th className="w-[160px] border-b border-[#eeeeee] px-4 py-3 text-left font-medium">当前积分</th><th className="w-[160px] border-b border-[#eeeeee] px-4 py-3 text-left font-medium">已赠送积分</th><th className="w-[160px] border-b border-[#eeeeee] px-4 py-3 text-left font-medium">已消耗积分</th><th className="w-[170px] border-b border-[#eeeeee] px-4 py-3 text-left font-medium">最后积分变动时间</th><th className="w-[106px] border-b border-[#eeeeee] py-3 pl-4 pr-8 font-medium" /></tr></thead>
           <tbody>
             {pagedRows.map((row) => {
               const isExpanded = expandedUserIds.has(row.id);
@@ -789,12 +806,12 @@ export function AdminCreditsPanel({ settings, stats, rows }: { settings: AdminCr
                         {isExpanded ? <RiArrowDownSLine className="h-5 w-5" /> : <RiArrowRightSLine className="h-5 w-5" />}
                       </button>
                     </td>
-                    <td className="border-b border-[#f2f2f2] py-3 pl-2 pr-3 font-mono text-[12px] text-[#777777]">{row.id}</td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3"><div className="truncate text-[13px] font-medium text-[#222222]">{row.userEmail}</div><div className="mt-0.5 truncate text-[12px] text-[#888888]">{row.nickname || "未设置昵称"}</div></td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3 text-right font-medium text-[#222222]">{row.currentCredits.toLocaleString("en-US")}</td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3 text-right font-medium text-[#18a058]">{formatSignedCredits(row.giftedCredits)}</td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3 text-right font-medium text-red-500">-{row.consumedCredits.toLocaleString("en-US")}</td>
-                    <td className="border-b border-[#f2f2f2] px-3 py-3 text-right text-[#777777]">{row.lastActiveLabel}</td>
+                    <td className="border-b border-[#f2f2f2] py-3 pl-2 pr-4 font-mono text-[12px] text-[#777777]">{row.id}</td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3"><div className="flex items-center gap-3"><CreditUserAvatar user={row} /><div className="min-w-0"><div className="truncate text-[13px] font-medium text-[#222222]">{row.userEmail}</div><div className="mt-0.5 truncate text-[12px] text-[#888888]">{row.nickname || "未设置昵称"}</div></div></div></td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium text-[#222222]">{row.currentCredits.toLocaleString("en-US")}</td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium text-[#18a058]">{formatSignedCredits(row.giftedCredits)}</td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium text-red-500">-{row.consumedCredits.toLocaleString("en-US")}</td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left text-[#777777]">{row.lastActiveLabel}</td>
                     <td className="border-b border-[#f2f2f2] py-3 pl-3 pr-8 text-right">
                       <button type="button" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); setAdjustPopover({ user: row, top: rect.top + rect.height / 2, left: Math.max(12, rect.left - 240) }); setAdjustAmount(""); }} className="h-7 whitespace-nowrap rounded-[7px] border border-[#e7e7e7] bg-white px-2.5 text-[#555555] transition hover:border-[#367cee] hover:text-[#367cee]"><span style={{ fontSize: 12 }}>调积分</span></button>
                     </td>

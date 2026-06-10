@@ -10,11 +10,11 @@ import { createGeneratedImageThumbnail, getLocalImageDimensions, saveGeneratedAs
 import { enqueueRemoteAssetSave } from "@/lib/media-save-queue";
 import { syncGeneratedFilesToAli } from "@/lib/ali-sync";
 import { toUserErrorMessage } from "@/lib/error-message";
-import { getBytePlusBaseUrl, getBytePlusModelForRequest, getConfiguredBytePlusApiKey, getConfiguredOpenRouterApiKey, getModelProviderPreference, isTextModelEnabled } from "@/lib/system-settings";
+import { getBytePlusBaseUrl, getBytePlusModelForRequest, getConfiguredBytePlusApiKey, getConfiguredOpenRouterApiKey, getModelProviderPreference, isGeneralTextModelEnabled, isTextModelEnabled } from "@/lib/system-settings";
 
 export type ChatRequest = {
   model: ModelName;
-  mode: "agent" | "chat" | "image" | "video";
+  mode: "agent" | "general" | "chat" | "image" | "video";
   messages: Array<{ role: "user" | "assistant"; content: string; images?: string[] }>;
   originalPrompt?: string;
   settings?: {
@@ -210,12 +210,20 @@ const bytePlusTextPricing: Record<string, { prompt: number; completion: number; 
   "ep-20260514175234-9ssvl": { prompt: 0.6, completion: 2.2 },
 };
 
-const bytePlusImagePricePerOutput: Record<string, number> = {
+const bytePlusImagePricePerOutputByModel: Record<string, number> = {
   "seedream-4-5-251128": 0.04,
   "ep-20260514174622-n9qfb": 0.04,
   "seedream-5-0-260128": 0.035,
   "ep-20260514142211-p2wdk": 0.035,
 };
+
+function getBytePlusImagePricePerOutput(model: string | undefined) {
+  if (!model) return undefined;
+  if (bytePlusImagePricePerOutputByModel[model] !== undefined) return bytePlusImagePricePerOutputByModel[model];
+  if (/seedream-4-5|seedream-4\.5/i.test(model)) return 0.04;
+  if (/seedream-5-0|seedream-5\.0/i.test(model)) return 0.035;
+  return undefined;
+}
 
 function getBytePlusTextUsageUsd(model: string | undefined, promptTokens: number, completionTokens: number) {
   const price = model ? bytePlusTextPricing[model] : undefined;
@@ -314,6 +322,8 @@ function supportsBytePlusImageOutputFormat(modelName: string) {
 }
 
 function getTextProviderKey(model: string, mode?: ChatRequest["mode"]) {
+  if (mode === "general" && model === DEFAULT_CHAT_MODEL) return "general.seed-2-0-lite";
+  if (mode === "general" && model === "byteplus:chat.seed-2-0-pro") return "general.seed-2-0-pro";
   if (model === DEFAULT_CHAT_MODEL) return mode === "image" || mode === "video" ? "prompt.seed-2-0-lite" : "chat.seed-2-0-lite";
   if (model === ADVANCED_CHAT_MODEL) return mode === "image" || mode === "video" ? "prompt.second" : "chat.advanced";
   if (model === "openai/gpt-5.5") return "prompt.priority";
@@ -323,7 +333,7 @@ function getTextProviderKey(model: string, mode?: ChatRequest["mode"]) {
 function getTextProviderConfig(model: string, mode?: ChatRequest["mode"]) {
   const providerKey = getTextProviderKey(model, mode);
   const source = mode === "image" || mode === "video" ? "prompt" : "chat";
-  if (!isTextModelEnabled(model, source)) throw new Error("连接不到模型，请联系管理员！");
+  if (mode === "general" ? !isGeneralTextModelEnabled(model) : !isTextModelEnabled(model, source)) throw new Error("连接不到模型，请联系管理员！");
   if (providerKey && getModelProviderPreference(providerKey) === "byteplus") {
     const apiKey = getConfiguredBytePlusApiKey();
     if (!apiKey) throw new Error("缺少 BytePlus API Key");
@@ -567,15 +577,18 @@ export async function sendToOpenRouter(request: ChatRequest): Promise<ChatRespon
         .filter(Boolean)
         .join("，")
     : "";
+  const generalFormatProtocol = "你的产品身份是“闪念通用 Agent”。你负责对话、理解、追问、规划和组织结果；闪念系统可以调用当前选择的图片模型和视频模型完成生图、生视频。回答能力问题时，以闪念通用 Agent 的整体能力为准，不要按当前对话模型的裸能力回答“不支持生图/生视频”。身份问题分层回答：用户问“你是谁”时，回答你是闪念通用 Agent；用户问“你是什么模型/当前模型”时，回答你是闪念通用 Agent，当前对话模型是本次选择的模型。通用模式要先判断任务类型再选回复格式。direct_answer：知识问答/判断/解释，先给一句结论，再给 3-5 个要点，不要大标题。deliverable：写作/翻译/润色/总结/代码/邮件/文案，先给 # 结果，再给最终内容，必要时用 --- 后加 # 说明。plan：方案/计划/流程/策略，先给 # 推荐方案，再给 ## 执行步骤 和 ## 注意事项。creative：故事/剧本/分镜/角色/视觉创作，按创作结构回复。clarify：信息不足时一次性追问清楚，给可选项，并允许用户说“你自己定”。用户要结果时先给结果；用户问知识时先给结论。用户问“你能生图吗/你能做视频吗/能不能生成视频”这类能力问题时，不要回答不支持，应该回答可以帮他生成，并追问要生成什么内容、比例、分辨率、时长等必要信息。";
   const systemPrompt =
     request.mode === "agent"
-      ? "你是闪念，一个影片/短剧创作 Agent。你的专业方向是电影知识、影片制作、短剧创作、剧本、人物、分镜、镜头、摄影、剪辑、提示词、生图和生视频。你要先满足用户当前问题，再通过建议按钮把用户自然引导到影片/短剧创作。如果用户消息包含“已读取文档内容如下”，必须把文档内容当作当前上下文；如果文档明显是智能体规则、角色设定、工作流说明、系统提示词或 Markdown agent 文件，并且用户说激活/启用/读取这个智能体，按普通长回复的排版方式回复：先用一级标题“XXX已激活”，再用自然短段、分隔线和短列表概括文档规则、能做什么、下一步怎么用。不要把很多规则塞进一个长 bullet；一条列表只讲一个重点。XXX 从文档标题/角色名/系统名提取。激活后要按文档规则继续对话。请判断回复类型：chat=普通聊天；film_knowledge=电影史、电影理论、影片制作知识、导演摄影剪辑等知识问答；creative_consult=创作咨询和方案建议；creative_structure=故事梗概、剧本、人物小传、分镜、镜头表、提示词整理；off_topic=明显偏离影片创作的问题。创作流程是：故事概念 -> 扩展故事 -> 改成文字分镜 -> 生成主角图片 -> 生成场景图片 -> 做成图片分镜 -> 做成视频。用户问知识时，suggestions 用 2-3 个当前问题延展 + 1-2 个转创作按钮。用户进入创作后，suggestions 用 2-3 个修改当前内容按钮 + 1-2 个下一步创作按钮。suggestions 必须是对象数组，每项包含 label，并在生成类按钮上加 assetTargetType：生成角色图=character_image，生成场景图=scene_image，生成分镜图片=shot_image，生成分镜视频/做成视频=shot_video，其它不确定=other。故事阶段按钮要能改冲突、人物出场、反转，并推进到文字分镜。文字分镜阶段必须按镜头编号写清画面、人物、动作、景别、镜头、氛围、时长；引导到生成角色、场景、第一镜图片。图片分镜必须一镜一张图，几个镜头就是几张图，建议逐镜生成：先第一镜，再下一镜。角色图生成后要引导生成三视图；场景图生成后要引导生成多角度参考。若上下文里有多版角色/场景，提醒用户用 @ 指定版本，例如 @男主第2版。普通聊天和偏离主题问题正文要短；文档激活、film_knowledge、creative_consult、creative_structure 必须详细且结构化。正文会由网页渲染，允许使用有限内部排版标记：一级标题用 #，二级标题用 ##，三级标题用 ###，重点用 **加粗**，列表用 -，分段横线用单独一行 ---，重要风险用 [red]...[/red]，可执行建议用 [blue]...[/blue]。不要使用 #### 或更多级标题，不要输出 Markdown 表格，不要把排版符号当正文解释。不要在正文里输出“下一步调整方向”。每次都必须给 3-5 个 suggestions，按钮文字 6-18 个中文左右，不要编号，尽量用动词开头。只返回 JSON，不要输出 JSON 之外的文字。"
-      : request.mode === "chat"
-        ? "你是闪念，一个中文 AI 创作助手。请像豆包一样自然对话，结合上下文回答用户问题。没有明确要求生成图片或视频时，不要输出生图或生视频提示词。输出要排版清楚，正文会由网页渲染，允许使用有限内部排版标记：一级标题用 #，二级标题用 ##，三级标题用 ###，重点用 **加粗**，列表用 -，分段横线用单独一行 ---。重要风险或必须注意的内容可用 [red]注意内容[/red]；可执行建议、下一步、推荐方案可用 [blue]建议内容[/blue]。不要使用 #### 或更多级标题，不要输出 Markdown 表格，不要整段染色。"
+      ? "你是闪念，一个影片/短剧创作 Agent。你的专业方向是电影知识、影片制作、短剧创作、剧本、人物、分镜、镜头、摄影、剪辑、提示词、生图和生视频。你要先满足用户当前问题，再通过建议按钮把用户自然引导到影片/短剧创作。闲聊、鼓励、夸奖、安慰、祝福、轻松创意交流等场景，可以适当多用自然表情和语气词，让回复更有人味；正式方案、剧本结构、知识说明、代码、法律、医疗、财务、政治等严肃内容少用或不用表情。清单、能力列表、步骤、注意事项和长段说明中，可以适当使用 ✅、🎯、📝、💡、⚠️、📌 等符号类图标做视觉锚点，提升可读性、减少枯燥感；不要每句话都堆图标，也不要在严肃风险/法律/医疗/财务结论里滥用表情。如果用户消息包含“已读取文档内容如下”，必须把文档内容当作当前上下文；如果文档明显是智能体规则、角色设定、工作流说明、系统提示词或 Markdown agent 文件，并且用户说激活/启用/读取这个智能体，按普通长回复的排版方式回复：先用一级标题“XXX已激活”，再用自然短段、分隔线和短列表概括文档规则、能做什么、下一步怎么用。不要把很多规则塞进一个长 bullet；一条列表只讲一个重点。XXX 从文档标题/角色名/系统名提取。激活后要按文档规则继续对话。请判断回复类型：chat=普通聊天；film_knowledge=电影史、电影理论、影片制作知识、导演摄影剪辑等知识问答；creative_consult=创作咨询和方案建议；creative_structure=故事梗概、剧本、人物小传、分镜、镜头表、提示词整理；off_topic=明显偏离影片创作的问题。创作流程是：故事概念 -> 扩展故事 -> 改成文字分镜 -> 生成主角图片 -> 生成场景图片 -> 做成图片分镜 -> 做成视频。用户问知识时，suggestions 用 2-3 个当前问题延展 + 1-2 个转创作按钮。用户进入创作后，suggestions 用 2-3 个修改当前内容按钮 + 1-2 个下一步创作按钮。suggestions 必须是对象数组，每项包含 label，并在生成类按钮上加 assetTargetType：生成角色图=character_image，生成场景图=scene_image，生成分镜图片=shot_image，生成分镜视频/做成视频=shot_video，其它不确定=other。故事阶段按钮要能改冲突、人物出场、反转，并推进到文字分镜。文字分镜阶段必须按镜头编号写清画面、人物、动作、景别、镜头、氛围、时长；引导到生成角色、场景、第一镜图片。图片分镜必须一镜一张图，几个镜头就是几张图，建议逐镜生成：先第一镜，再下一镜。角色图生成后要引导生成三视图；场景图生成后要引导生成多角度参考。若上下文里有多版角色/场景，提醒用户用 @ 指定版本，例如 @男主第2版。普通聊天和偏离主题问题正文要短；文档激活、film_knowledge、creative_consult、creative_structure 必须详细且结构化。正文会由网页渲染，允许使用有限内部排版标记：一级标题用 #，二级标题用 ##，三级标题用 ###，重点用 **加粗**，列表用 -，分段横线用单独一行 ---，重要风险用 [red]...[/red]，可执行建议用 [blue]...[/blue]。不要使用 #### 或更多级标题，不要输出 Markdown 表格，不要把排版符号当正文解释。不要在正文里输出“下一步调整方向”。每次都必须给 3-5 个 suggestions，按钮文字 6-18 个中文左右，不要编号，尽量用动词开头。只返回 JSON，不要输出 JSON 之外的文字。"
+      : request.mode === "chat" || request.mode === "general"
+        ? `${request.mode === "general" ? "你是闪念通用 Agent。" : "你是闪念，一个中文 AI 创作助手。"}请像豆包一样自然对话，结合上下文回答用户问题。闲聊、鼓励、夸奖、安慰、祝福、轻松创意交流等场景，可以适当多用自然表情和语气词，让回复更有人味；正式方案、知识说明、代码、法律、医疗、财务、政治等严肃内容少用或不用表情。清单、能力列表、步骤、注意事项和长段说明中，可以适当使用 ✅、🎯、📝、💡、⚠️、📌 等符号类图标做视觉锚点，提升可读性、减少枯燥感；不要每句话都堆图标，也不要在严肃风险/法律/医疗/财务结论里滥用表情。没有明确要求生成图片或视频时，不要输出生图或生视频提示词。输出要排版清楚，正文会由网页渲染，允许使用有限内部排版标记：一级标题用 #，二级标题用 ##，三级标题用 ###，重点用 **加粗**，列表用 -，分段横线用单独一行 ---。重要风险或必须注意的内容可用 [red]注意内容[/red]；可执行建议、下一步、推荐方案可用 [blue]建议内容[/blue]。不要使用 #### 或更多级标题，不要输出 Markdown 表格，不要整段染色。${request.mode === "general" ? generalFormatProtocol : ""}`
         : "你是一个中文创作助手。你要根据上下文和用户上传的图片，把口语需求整理成适合生图或生视频的提示词。图片模式下，把上传图片当作参考图，保留用户强调的主体、人物、构图或风格，并把带有视频、镜头、动画、运镜、时序等表达改写成适合单帧画面的描述，最终仍然只能输出图片提示词；视频模式下，把上传图片当作首帧或视觉参考，描述主体动作、镜头运动和画面变化，并把偏静态海报或单张图片需求改写成可执行的视频提示词。除 Agent 模式外，用户当前选择的模式优先级最高，不能因为原始文字里写了视频或图片就切换模式。请直接输出简短、清晰、可执行的中文结果，不要输出标题、说明、建议按钮或额外解释。";
   const finalInstruction =
     request.mode === "agent"
       ? "请基于上下文回复最新用户。返回严格 JSON：{\"intent\":\"chat|film_knowledge|creative_consult|creative_structure|off_topic\",\"content\":\"正文\",\"suggestions\":[{\"label\":\"按钮文字\",\"action\":\"可选动作\",\"assetTargetType\":\"character_image|scene_image|shot_image|shot_video|other\"}]}。如果最新用户消息包含已读取文档，必须明确使用文档内容；如果文档像智能体规则或工作流说明，并且用户说激活/启用/读取这个智能体，正文按普通长回复排版：标题、自然短段、分隔线、短列表。不要强制罗列太多规则，不要把大量规则塞进同一个 bullet。普通聊天简短且不要分段；文档激活、电影/影片制作知识、创作方案、剧本分镜提示词整理必须结构化且详细。正文不要出现“下一步调整方向”，不要输出字面量 \\n 或 \\t。只有长回答、列表、剧本、分镜、文档激活或知识讲解才使用换行。suggestions 必须 3-5 个，并符合：问答阶段=问题延展+转创作；创作阶段=修改当前内容+下一步创作；生成角色图用 character_image，生成场景图用 scene_image，生成图片分镜用 shot_image，生成分镜视频或做成视频用 shot_video。"
+      : request.mode === "general"
+        ? "请基于最新用户任务自然回复，并按通用模式任务类型选择合适结构。不要主动声明模型身份。"
       : request.mode === "chat"
         ? "请基于上下文自然回答用户。"
       : request.mode === "video"
@@ -583,22 +596,23 @@ export async function sendToOpenRouter(request: ChatRequest): Promise<ChatRespon
         : `当前模式：图片${settingsText ? `。生成参数：${settingsText}` : ""}。用户当前是手动选择图片生成模式，这个模式优先级最高，不能改成视频模式。即使用户原话里出现“视频”“一段”“镜头”“运镜”“动起来”“动画”等词，也必须把需求改写成适合单帧图片生成的提示词：保留主体、动作瞬间、场景、构图、氛围、风格，把时序和镜头语言改成定格画面表达。请基于上下文，只输出最终可直接用于图片生成的提示词，不要解释，不能说自己无法生成，不能让用户复制到其它工具，不能输出“通用生图提示词”之类的说明。`;
 
   const providerConfig = getTextProviderConfig(request.model, request.mode);
+  const messages = [
+        {
+          role: "system" as const,
+          content: systemPrompt,
+        },
+        ...request.messages.map((message) => ({
+          role: message.role,
+          content: toOpenRouterContent(message.content, message.images),
+        })),
+        {
+          role: "user" as const,
+          content: finalInstruction,
+        },
+      ];
   const body = {
     model: providerConfig.model,
-    messages: [
-      {
-        role: "system",
-        content: systemPrompt,
-      },
-      ...request.messages.map((message) => ({
-        role: message.role,
-        content: toOpenRouterContent(message.content, message.images),
-      })),
-      {
-        role: "user",
-        content: finalInstruction,
-      },
-    ],
+    messages,
     temperature: 0.7,
   };
   const data = await postChatCompletion(providerConfig.url, providerConfig.headers, body, "请求失败");
@@ -693,8 +707,10 @@ function parseAgentPlan(text: string): Omit<AgentPlan, "usage"> {
   }
 }
 
-export async function planAgentTask(request: Pick<ChatRequest, "model" | "messages">): Promise<AgentPlan> {
-  const providerConfig = getTextProviderConfig(request.model, "agent");
+export async function planAgentTask(request: Pick<ChatRequest, "model" | "messages"> & { mode?: "agent" | "general" }): Promise<AgentPlan> {
+  const providerConfig = getTextProviderConfig(request.model, request.mode === "general" ? "general" : "agent");
+  const memoryMessages = request.messages.filter((message) => message.content.includes("长期工作记忆摘要")).slice(-1);
+  const recentMessages = request.messages.filter((message) => !message.content.includes("长期工作记忆摘要")).slice(-10);
   const body = {
     model: providerConfig.model,
     messages: [
@@ -703,7 +719,13 @@ export async function planAgentTask(request: Pick<ChatRequest, "model" | "messag
         content:
           "你是闪念的任务规划器，只返回 JSON，不要输出 JSON 之外的文字。你的任务是理解用户最新一句和上下文，决定是继续对话、追问、生成图片还是生成视频。原则：能从上下文和默认规则推断就不要追问；只有目标不清、图片/视频都可能、缺失信息会明显导致错误、用户要求互相冲突、或成本规格明显过高时才追问。如果用户消息包含“已读取文档内容如下”，必须把文档内容纳入判断；如果文档明显是智能体规则、角色设定、工作流说明、系统提示词或 Markdown agent 文件，intent 应优先为 chat，不要急着生成图片或视频，除非用户同时明确要求生成。用户最新一句是纠错或限制时必须覆盖旧上下文，例如“只要场景、不要人物、没有人物、纯场景、空镜”表示最终图片必须是无人物场景，prompt 和 items 里都不能出现 person、portrait、character、human、figure、silhouette、man、woman、人物、角色、行人、剪影等人物主体。若用户明确要生成图片/视频，直接给出可执行计划。必须把数量、单张/单段内容和画面约束分开，不要把“7张/十张/多张”写进单张图片画面里。多图独立生成时，count 等于图片张数，items 里每一项都是单张图片或单段视频的干净执行 prompt，不要写用户原话、不要写“每张都要/10张图片/彼此不同”等跨图规则。用户明确说“合并到一张、放在一张图上、一张展示图、排版展示、多款放一起、多个方案在同一画面”时，必须理解为生成一张合并展示图，count=1，不要拆成多张独立图片，prompt 要自然描述同一张画面里有多个方案/元素的排版。不要默认在 prompt 里写“禁止拼图、合集、九宫格、多宫格、分屏、照片墙”等负向词；只有用户明确说不要拼图/合集或纠正上次拼图错误时，才把这类约束放进 constraints，不要放进展示给用户的 displayText。用户要求每张不同人物/国家/性别/时代时，把差异拆到 items 的每条 prompt 中，例如第1张只写一个具体国家+一个性别+一个时代，第2张再换另一组；不要把“不同国家、不同性别、不同时代”作为一句话放进单张 prompt。用户要求把文字分镜/图片分镜/多个镜头做成视频时，count 必须等于镜头数，items 必须一镜一段视频；每个 item.duration 要按该镜头分镜内容、动作复杂度和剧本中写的时长判断，不能默认都用最低秒数。只有用户随便要求生成一个普通视频、没有分镜/镜头时，才用最低时长。普通缺省：图片数量 1，人物图比例 3:4，场景图比例 16:9，使用最低可用分辨率；用户说高品质/高清/质量好时 quality=high，可提升一档或保留高质量描述。视频普通单段缺省最低时长。所有字符串字段不要输出字面量 \\n 或 \\t。返回格式：{\"intent\":\"chat|image|video|clarify\",\"needsClarification\":false,\"clarifyQuestion\":\"需要追问时的问题\",\"displayText\":\"给用户看的简短执行说明，不要照抄用户原话，不要默认暴露内部禁止词\",\"count\":1,\"subject\":\"主体\",\"quality\":\"low|standard|high\",\"ratio\":\"智能比例|3:4|9:16|16:9|1:1|4:3|21:9\",\"resolution\":\"1K|2K|4K|480p|720p|1080p\",\"duration\":\"5秒\",\"prompt\":\"最终给生成模型的单张图片或单段视频提示词，不包含生成数量，不重复用户原话\",\"constraints\":[\"只保留给执行器参考的约束，不要把跨图规则当 prompt\"],\"items\":[{\"index\":1,\"prompt\":\"一条干净的单段视频提示词，只描述当前这一镜\",\"duration\":\"5秒\",\"constraints\":[\"只描述当前镜头\"]}],\"suggestions\":[{\"label\":\"按钮文字\",\"assetTargetType\":\"character_image|scene_image|shot_image|shot_video|other\"}]}。如果 intent=chat，displayText 可为空，suggestions 仍给 3-5 个，引导到故事、剧本、分镜、角色图、场景图、视频。",
       },
-      ...request.messages.slice(-10).map((message) => ({
+      ...(request.mode === "general"
+        ? [{
+            role: "system" as const,
+            content: "当前是通用模式。统一产品身份是“闪念通用 Agent”，当前对话模型只是负责理解、追问和规划；闪念系统还能调用当前选择的图片模型和视频模型。不要把用户原话直接当作图片/视频提示词执行；你要先规划。用户要求生成图片或视频时，若主体、内容、风格、数量、比例、分辨率、视频时长或参考图用法不清楚，会影响结果，就返回 intent=clarify 并一次性问清楚。用户问“你能生图吗/可以生成图片吗/你能做视频吗/能不能生视频/支持视频吗”这类能力问题时，也要视为用户有潜在图片或视频生成需求：图片能力问题返回 intent=clarify 并询问要生成什么图片；视频能力问题返回 intent=clarify 并询问要生成什么视频。不要说当前对话模型不支持生成图片或视频，因为闪念通用 Agent 可以调用当前选择的图片/视频模型完成。追问必须列出可选项：图片比例可选 智能比例、16:9、4:3、1:1、3:4、9:16、21:9；图片分辨率可选 1K、2K、4K；视频比例可选 16:9、4:3、1:1、3:4、9:16、21:9；视频分辨率可选 480p、720p、1080p、4K；视频时长可提示 4秒、5秒、6秒、8秒、10秒、15秒，具体按当前模型支持为准。只有用户已经说明足够信息，或明确说“你自己定/随便/以后不要问我/按你判断/默认就行”时，才自行补默认参数并返回 image 或 video 执行计划。同一上下文里用户已授权你自行决定后，不要反复追问同类缺省信息。",
+          }]
+        : []),
+      ...[...memoryMessages, ...recentMessages].map((message) => ({
         role: message.role,
         content: message.images?.length ? `${message.content}\n\n用户本轮带了 ${message.images.length} 张参考图，规划时只理解文字需求，生成阶段再使用参考图。` : message.content,
       })),
@@ -839,7 +861,9 @@ function getBytePlusImageUsage(data: BytePlusImageGenerationResponse, model: str
   const promptTokens = Math.max(0, Math.floor(usage?.prompt_tokens ?? 0));
   const completionTokens = Math.max(0, Math.floor(usage?.completion_tokens ?? usage?.output_tokens ?? 0));
   const totalTokens = Math.max(0, Math.floor(usage?.total_tokens ?? promptTokens + completionTokens));
-  const usd = typeof usage?.usd === "number" ? usage.usd : typeof usage?.cost === "number" ? usage.cost : bytePlusImagePricePerOutput[model] !== undefined ? bytePlusImagePricePerOutput[model] * Math.max(0, outputImageCount) : undefined;
+  const explicitUsd = typeof usage?.usd === "number" && usage.usd > 0 ? usage.usd : typeof usage?.cost === "number" && usage.cost > 0 ? usage.cost : undefined;
+  const fallbackPrice = getBytePlusImagePricePerOutput(model);
+  const usd = explicitUsd ?? (fallbackPrice !== undefined ? fallbackPrice * Math.max(0, outputImageCount) : undefined);
   if (promptTokens <= 0 && completionTokens <= 0 && totalTokens <= 0 && usd === undefined) return undefined;
   return { promptTokens, completionTokens, totalTokens, usd };
 }

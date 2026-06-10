@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomInt, scrypt as scryptCallback, timingSafeEqual } from "crypto";
 import { resolve4, resolve6, resolveMx } from "dns/promises";
 import { promisify } from "util";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { prisma } from "@/lib/prisma";
 
 const scrypt = promisify(scryptCallback);
@@ -100,7 +100,35 @@ export async function createUserSession(userId: string) {
   setAuthCookie(cookieStore, token, sessionMaxAgeSeconds);
 }
 
+function getCookieHeaderValues(rawCookieHeader: string, name: string) {
+  return rawCookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(`${name}=`))
+    .map((part) => part.slice(name.length + 1))
+    .filter((value) => value.length > 0);
+}
+
+function getAuthCookieCandidates(cookieStore: Awaited<ReturnType<typeof cookies>>, rawCookieHeader: string) {
+  const values = cookieStore
+    .getAll(authCookieName)
+    .map((cookie) => cookie.value)
+    .filter((value) => value.length > 0);
+
+  return Array.from(new Set([...values, ...getCookieHeaderValues(rawCookieHeader, authCookieName)]));
+}
+
 function setAuthCookie(cookieStore: Awaited<ReturnType<typeof cookies>>, token: string, maxAge: number) {
+  if (authCookieDomain) {
+    cookieStore.set(authCookieName, "", {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
+      path: "/",
+      maxAge: 0,
+    });
+  }
+
   cookieStore.set(authCookieName, token, {
     httpOnly: true,
     sameSite: "lax",
@@ -119,43 +147,60 @@ async function clearAuthCookie() {
     secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
     path: "/",
     maxAge: 0,
+  });
+
+  cookieStore.set(authCookieName, "", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production" && !forceInsecureAuthCookie,
+    path: "/",
+    maxAge: 0,
     ...(authCookieDomain ? { domain: authCookieDomain } : {}),
   });
 }
 
-export async function getCurrentUser() {
+export async function getCurrentSession() {
   const cookieStore = await cookies();
-  const token = cookieStore.get(authCookieName)?.value;
-  if (!token) return null;
+  const rawCookieHeader = (await headers()).get("cookie") ?? "";
+  const tokens = getAuthCookieCandidates(cookieStore, rawCookieHeader);
+  if (tokens.length === 0) return null;
 
-  const session = await prisma.session.findUnique({
-    where: { tokenHash: hashSessionToken(token) },
+  const tokenByHash = new Map(tokens.map((token) => [hashSessionToken(token), token]));
+  const sessions = await prisma.session.findMany({
+    where: { tokenHash: { in: Array.from(tokenByHash.keys()) } },
     include: { user: true },
   });
+  const now = new Date();
+  const session = sessions.find((item) => item.expiresAt > now && !item.user.disabled) ?? null;
 
-  if (!session || session.expiresAt <= new Date()) {
-    if (session) await prisma.session.delete({ where: { id: session.id } }).catch(() => null);
-    await clearAuthCookie();
-    return null;
+  const expiredSessionIds = sessions.filter((item) => item.expiresAt <= now).map((item) => item.id);
+  if (expiredSessionIds.length > 0) {
+    await prisma.session.deleteMany({ where: { id: { in: expiredSessionIds } } }).catch(() => null);
   }
 
-  if (session.user.disabled) {
-    await prisma.session.deleteMany({ where: { userId: session.user.id } }).catch(() => null);
+  if (!session) {
     await clearAuthCookie();
     return null;
   }
 
   await prisma.session.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } }).catch(() => null);
-  if (authCookieDomain) setAuthCookie(cookieStore, token, sessionMaxAgeSeconds);
-  return session.user;
+  const token = tokenByHash.get(session.tokenHash);
+  if (authCookieDomain && token) setAuthCookie(cookieStore, token, sessionMaxAgeSeconds);
+  return session;
+}
+
+export async function getCurrentUser() {
+  const session = await getCurrentSession();
+  return session?.user ?? null;
 }
 
 export async function clearCurrentSession() {
   const cookieStore = await cookies();
-  const token = cookieStore.get(authCookieName)?.value;
+  const rawCookieHeader = (await headers()).get("cookie") ?? "";
+  const tokens = getAuthCookieCandidates(cookieStore, rawCookieHeader);
 
-  if (token) {
-    await prisma.session.delete({ where: { tokenHash: hashSessionToken(token) } }).catch(() => null);
+  if (tokens.length > 0) {
+    await prisma.session.deleteMany({ where: { tokenHash: { in: tokens.map(hashSessionToken) } } }).catch(() => null);
   }
 
   await clearAuthCookie();

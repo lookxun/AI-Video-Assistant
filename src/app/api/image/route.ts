@@ -8,6 +8,7 @@ import { getExpectedImageDimensions } from "@/lib/models";
 import { isAgentImageModelEnabled, isAssetImageModelEnabled, isConversationImageModelEnabled } from "@/lib/system-settings";
 import { validateReferenceImageCount } from "@/lib/upload-rules";
 import type { Prisma } from "@prisma/client";
+import { appendUploadRuleFeedbackLog } from "@/lib/upload-rule-feedback-log";
 
 function getRequestedImageCount(value: unknown) {
   const count = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 1;
@@ -25,6 +26,20 @@ function getCreditSource(metadata: Prisma.InputJsonValue | undefined) {
 function pickImageDimensions(dimensions: Record<string, { width: number; height: number }> | undefined, urls: string[]) {
   if (!dimensions) return dimensions;
   return Object.fromEntries(urls.map((url) => [url, dimensions[url]]).filter((item): item is [string, { width: number; height: number }] => Boolean(item[1])));
+}
+
+function getImageCreditParameterMetadata(settings: { ratio?: string; resolution?: string } | undefined, dimensions: Record<string, { width: number; height: number }> | undefined): Prisma.InputJsonObject {
+  const sizes = Object.values(dimensions ?? {}).map((item) => `${item.width}x${item.height}`).filter(Boolean);
+  return {
+    settings: {
+      ratio: settings?.ratio ?? "",
+      resolution: settings?.resolution ?? "",
+    },
+    ratio: settings?.ratio ?? "",
+    resolution: settings?.resolution ?? "",
+    size: sizes[0] ?? "",
+    sizes,
+  };
 }
 
 function isSameImageDimensions(a: { width: number; height: number } | undefined, b: { width: number; height: number } | undefined) {
@@ -60,9 +75,15 @@ function getBytePlusProviderKey(modelId: string | undefined, source: string | un
   return undefined;
 }
 
+function withChargedUsage<T extends { usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number; usd?: number } }>(result: T, credit: Awaited<ReturnType<typeof chargeCredits>> | undefined) {
+  if (!credit || credit.skipped) return result;
+  return { ...result, usage: { ...(result.usage ?? {}), usd: credit.chargedUsd, cny: credit.chargedCny } };
+}
+
 export async function POST(request: Request) {
+  let body: { prompt?: string; model?: string; referenceImages?: string[]; settings?: { ratio?: string; resolution?: string }; count?: number; candidateMode?: "all" | "best"; conversationId?: string; conversationTitle?: string; requestId?: string; metadata?: Prisma.InputJsonValue } | undefined;
   try {
-    const body = (await request.json()) as { prompt?: string; model?: string; referenceImages?: string[]; settings?: { ratio?: string; resolution?: string }; count?: number; candidateMode?: "all" | "best"; conversationId?: string; conversationTitle?: string; requestId?: string; metadata?: Prisma.InputJsonValue };
+    body = (await request.json()) as { prompt?: string; model?: string; referenceImages?: string[]; settings?: { ratio?: string; resolution?: string }; count?: number; candidateMode?: "all" | "best"; conversationId?: string; conversationTitle?: string; requestId?: string; metadata?: Prisma.InputJsonValue };
     const prompt = body.prompt?.trim();
 
     if (!prompt) {
@@ -99,14 +120,43 @@ export async function POST(request: Request) {
     const providerReturnedImageCount = result.images.length;
     const deliveredImages = pickRequestedImages(result.images, result.imageDimensions, requestedImageCount, body.model, body.settings);
     if (deliveredImages.length === 0) {
+      if (referenceImages.length > 0) {
+        void appendUploadRuleFeedbackLog({
+          source: "image",
+          mode: "image",
+          model: body.model,
+          requestId: body.requestId,
+          conversationId: body.conversationId,
+          conversationTitle: body.conversationTitle,
+          error: "图片平台没有返回图片，且没有返回可用原因。",
+          referenceImageCount: referenceImages.length,
+          imageCount: referenceImages.length,
+          settings: body.settings,
+        });
+      }
       const codedError = await createCodedApiError(new Error("图片平台没有返回图片，且没有返回可用原因。"), GENERIC_MEDIA_ERROR_MESSAGE, "image-generation empty delivery");
       return NextResponse.json(codedError, { status: 502 });
     }
     const billableImageCount = deliveredImages.length;
     const deliveredImageDimensions = pickImageDimensions(result.imageDimensions, deliveredImages);
-    const credit = user ? await chargeCredits(user.id, "image", result.usage, { conversationId: body.conversationId, conversationTitle: body.conversationTitle, requestId: body.requestId, label: "图片生成", model: body.model, imageCount: billableImageCount, metadata: mergeImageCreditMetadata(body.metadata, { requestedImageCount, returnedImageCount: deliveredImages.length, providerReturnedImageCount, billableImageCount, mediaUrls: deliveredImages, allMediaUrls: deliveredImages, extraMediaUrls: [], delivered: deliveredImages.length > 0 }) }) : undefined;
-    return NextResponse.json({ ...result, images: deliveredImages, imageDimensions: deliveredImageDimensions, requestedImageCount, returnedImageCount: deliveredImages.length, providerReturnedImageCount, billableImageCount, credit });
+    const credit = user ? await chargeCredits(user.id, "image", result.usage, { conversationId: body.conversationId, conversationTitle: body.conversationTitle, requestId: body.requestId, label: "图片生成", model: body.model, imageCount: billableImageCount, metadata: mergeImageCreditMetadata(body.metadata, { ...getImageCreditParameterMetadata(body.settings, deliveredImageDimensions), requestedImageCount, returnedImageCount: deliveredImages.length, providerReturnedImageCount, billableImageCount, mediaUrls: deliveredImages, allMediaUrls: deliveredImages, extraMediaUrls: [], delivered: deliveredImages.length > 0 }) }) : undefined;
+    return NextResponse.json({ ...withChargedUsage(result, credit), images: deliveredImages, imageDimensions: deliveredImageDimensions, requestedImageCount, returnedImageCount: deliveredImages.length, providerReturnedImageCount, billableImageCount, credit });
   } catch (error) {
+    const referenceImageCount = Array.isArray(body?.referenceImages) ? body.referenceImages.length : 0;
+    if (referenceImageCount > 0) {
+      void appendUploadRuleFeedbackLog({
+        source: "image",
+        mode: "image",
+        model: body?.model,
+        requestId: body?.requestId,
+        conversationId: body?.conversationId,
+        conversationTitle: body?.conversationTitle,
+        error,
+        referenceImageCount,
+        imageCount: referenceImageCount,
+        settings: body?.settings,
+      });
+    }
     const codedError = await createCodedApiError(error, GENERIC_MEDIA_ERROR_MESSAGE, "image-generation request failed");
     return NextResponse.json(codedError, { status: 500 });
   }

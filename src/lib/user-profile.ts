@@ -35,6 +35,7 @@ export function getUserProfileFromUser(user: {
   previewWheelZoom?: boolean | null;
   previewWheelFlip?: boolean | null;
   credits?: number | null;
+  generalModeEnabled?: boolean | null;
   generatedImageCount?: number | null;
   generatedVideoCount?: number | null;
 }) {
@@ -51,6 +52,7 @@ export function getUserProfileFromUser(user: {
     previewWheelZoom: user.previewWheelZoom ?? true,
     previewWheelFlip: user.previewWheelFlip ?? true,
     credits: user.credits ?? 0,
+    generalModeEnabled: user.generalModeEnabled ?? false,
     generatedImageCount: user.generatedImageCount ?? 0,
     generatedVideoCount: user.generatedVideoCount ?? 0,
   };
