@@ -1,0 +1,12 @@
+ALTER TABLE "MediaAsset" ADD COLUMN "costSource" TEXT;
+ALTER TABLE "MediaAsset" ADD COLUMN "chargedUsd" DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE "MediaAsset" ADD COLUMN "chargedCny" DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE "MediaAsset" ADD COLUMN "chargedCredits" DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE "MediaAsset" ADD COLUMN "promptTokens" DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE "MediaAsset" ADD COLUMN "completionTokens" DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE "MediaAsset" ADD COLUMN "totalTokens" DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE "MediaAsset" ADD COLUMN "costShareCount" INTEGER;
+ALTER TABLE "MediaAsset" ADD COLUMN "costShareIndex" INTEGER;
+
+CREATE INDEX "MediaAsset_creditLedgerId_idx" ON "MediaAsset"("creditLedgerId");
+CREATE INDEX "MediaAsset_requestId_idx" ON "MediaAsset"("requestId");

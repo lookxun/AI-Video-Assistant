@@ -192,8 +192,8 @@ export function AdminHistoryDialog({ user, onClose }: { user: AdminUserRow; onCl
                   className={`w-full rounded-[10px] px-3 text-left transition ${activeConversation?.id === conversation.id ? "bg-[#ececec] py-2 text-[#111111]" : "py-1.5 text-[#666666] hover:bg-[#eeeeee] hover:text-[#111111]"}`}
                 >
                   <div className="truncate text-[13px] font-medium">
+                    {conversation.isDeleted ? <span className="mr-1 text-red-500">用户已删除</span> : null}
                     <span>{conversation.title || "新对话"}</span>
-                    {conversation.isDeleted ? <span className="ml-1 text-red-500">用户已删除</span> : null}
                   </div>
                   {activeConversation?.id === conversation.id ? <div className="mt-1 truncate text-[11px] text-[#999999]">{conversation.updatedAtLabel}</div> : null}
                 </button>
@@ -253,6 +253,7 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
               {activeMedia ? (
                 <div className="flex min-h-full flex-col">
                   <div className="relative flex min-h-[480px] flex-1 items-center justify-center bg-[#f5f5f5]">
+                    {activeMedia.isDeleted ? <div className="absolute left-3 top-3 z-10 rounded-[4px] bg-red-500 px-2 py-1 text-[12px] font-medium leading-none text-white">已删除</div> : null}
                     {activeMedia.type === "image" ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={getAdminMediaSourceUrl(activeMedia.url)} alt="生成图片" className="max-h-[560px] max-w-full object-contain" />
@@ -292,9 +293,6 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
                         ) : null}
                       </div>
                     )}
-                    {activeMedia.isDeleted ? (
-                      <div className="mt-2 text-[12px] leading-5 text-red-500">用户已删除{activeMedia.deletedAtLabel ? ` ${activeMedia.deletedAtLabel}` : ""}</div>
-                    ) : null}
                     <div className="mt-2 whitespace-pre-wrap break-words text-[14px] leading-7 text-[#111111]">
                       {activeMedia.isReversePrompt ? (
                         <span className="mr-2 inline-flex h-6 align-[1px] items-center gap-1.5 rounded-[6px] border border-[#367cee] px-2 text-[12px] font-medium leading-none text-[#367cee]">
@@ -348,7 +346,7 @@ export function AdminMediaDialog({ user, mediaType, onClose }: { user: AdminUser
                         <img src={getAdminMediaThumbnailUrl(getLocalVideoPosterUrl(item.url) ?? item.url)} onError={(event) => fallbackAdminImageToOriginal(event.currentTarget, item.url)} alt="视频封面" className="h-full w-full object-cover" />
                       ) : <video src={getAdminMediaSourceUrl(item.url)} className="h-full w-full object-cover" muted />
                     )}
-                    {item.isDeleted ? <div className="absolute inset-x-0 bottom-0 bg-red-500/88 py-1 text-center text-[12px] font-medium text-white">用户已删除</div> : null}
+                    {item.isDeleted ? <div className="absolute left-1.5 top-1.5 z-10 rounded-[4px] bg-red-500 px-1.5 py-0.5 text-[11px] font-medium leading-none text-white">已删除</div> : null}
                     <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-8 text-left text-[11px] font-medium text-white">
                       <span className="block truncate">{item.name || `${mediaType === "video" ? "视频" : "图片"}${index + 1}`}</span>
                     </div>
@@ -507,6 +505,9 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
   const [page, setPage] = useState(1);
   const [isPending, startTransition] = useTransition();
   const [expandedUserIds, setExpandedUserIds] = useState<Set<string>>(() => new Set());
+  const [detailsByUserId, setDetailsByUserId] = useState<Record<string, AdminUserRow>>({});
+  const [loadingUserIds, setLoadingUserIds] = useState<Set<string>>(() => new Set());
+  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
   const [historyUser, setHistoryUser] = useState<AdminUserRow | null>(null);
   const [mediaDialog, setMediaDialog] = useState<{ user: AdminUserRow; mediaType: "image" | "upload_image" | "video" | "asset_image" } | null>(null);
 
@@ -536,6 +537,30 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
     { key: "disabled", label: "禁用" },
   ];
 
+  async function loadUserDetail(userId: string) {
+    if (detailsByUserId[userId] || loadingUserIds.has(userId)) return;
+    setLoadingUserIds((current) => new Set(current).add(userId));
+    setDetailErrors((current) => {
+      const next = { ...current };
+      delete next[userId];
+      return next;
+    });
+    try {
+      const response = await fetch(`/admin/api/records/user-detail?userId=${encodeURIComponent(userId)}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof payload.error === "string" ? payload.error : "加载失败");
+      setDetailsByUserId((current) => ({ ...current, [userId]: payload.detail.user as AdminUserRow }));
+    } catch (error) {
+      setDetailErrors((current) => ({ ...current, [userId]: error instanceof Error ? error.message : "加载失败" }));
+    } finally {
+      setLoadingUserIds((current) => {
+        const next = new Set(current);
+        next.delete(userId);
+        return next;
+      });
+    }
+  }
+
   function toggleExpandedUser(userId: string) {
     setExpandedUserIds((current) => {
       const next = new Set(current);
@@ -543,6 +568,7 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
         next.delete(userId);
       } else {
         next.add(userId);
+        void loadUserDetail(userId);
       }
       return next;
     });
@@ -642,6 +668,10 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
               {filteredUsers.length > 0 ? (
                 pagedUsers.map((user) => {
                   const isExpanded = expandedUserIds.has(user.id);
+                  const detailUser = detailsByUserId[user.id];
+                  const expandedUser = detailUser ?? user;
+                  const isLoadingDetail = loadingUserIds.has(user.id);
+                  const detailError = detailErrors[user.id];
                   const loginPlace = getLoginPlace(user);
 
                   return (
@@ -696,41 +726,42 @@ export function AdminUsersPanel({ users, stats }: { users: AdminUserRow[]; stats
                       {isExpanded ? (
                         <tr className="bg-[#fbfbfb]">
                           <td colSpan={8} className="border-b border-[#f2f2f2] px-4 py-4">
+                            {isLoadingDetail ? <div className="px-3 py-8 text-center text-[13px] text-[#999999]">正在加载用户详情...</div> : detailError ? <div className="px-3 py-8 text-center text-[13px] text-red-500">{detailError}</div> : (
                             <div className="grid grid-cols-4 gap-[5px] px-1 py-1 text-left">
                               <div className="space-y-px">
-                                <DetailItem label="登录帐号" value={user.email} />
-                                <DetailItem label="昵称" value={user.nickname || "未设置"} />
-                                <DetailItem label="手机号" value={user.phone || "未绑定"} />
-                                <DetailItem label="密码" value={user.hasPassword ? "已设置" : "未设置"} />
-                                <DetailItem label="语言" value={user.language} />
-                                <DetailItem label="注册时间" value={user.createdAtLabel} />
-                                <DetailItem label="资料更新时间" value={user.updatedAtLabel} />
+                                <DetailItem label="登录帐号" value={expandedUser.email} />
+                                <DetailItem label="昵称" value={expandedUser.nickname || "未设置"} />
+                                <DetailItem label="手机号" value={expandedUser.phone || "未绑定"} />
+                                <DetailItem label="密码" value={expandedUser.hasPassword ? "已设置" : "未设置"} />
+                                <DetailItem label="语言" value={expandedUser.language} />
+                                <DetailItem label="注册时间" value={expandedUser.createdAtLabel} />
+                                <DetailItem label="资料更新时间" value={expandedUser.updatedAtLabel} />
                               </div>
                               <div className="space-y-px">
                                 <DetailItem label="最近登录 IP" value={loginPlace.ip} />
                                 <DetailItem label="最近登录归属地" value={loginPlace.place} />
-                                <DetailItem label="登录设备" value={user.lastLoginUserAgent || "未记录"} />
-                                <DetailItem label="Session 数" value={formatNumber(user.sessionCount)} />
-                                <DetailItem label="Session 活跃" value={user.lastSessionSeenAtLabel} />
-                                <DetailItem label="生成完成提醒" value={yesNo(user.notifyOnGenerationComplete)} />
-                                <DetailItem label="自动收入资产库" value={yesNo(user.autoSaveHistory)} />
-                                <DetailItem label="通用模式" value={user.generalModeEnabled ? "已开启" : "未开启"} />
-                                <DetailItem label="预览滚轮" value={`缩放${yesNo(user.previewWheelZoom)} / 翻页${yesNo(user.previewWheelFlip)}`} />
+                                <DetailItem label="Session 数" value={formatNumber(expandedUser.sessionCount)} />
+                                <DetailItem label="Session 活跃" value={expandedUser.lastSessionSeenAtLabel} />
+                                <DetailItem label="生成完成提醒" value={yesNo(expandedUser.notifyOnGenerationComplete)} />
+                                <DetailItem label="自动收入资产库" value={yesNo(expandedUser.autoSaveHistory)} />
+                                <DetailItem label="通用模式" value={expandedUser.generalModeEnabled ? "已开启" : "未开启"} />
+                                <DetailItem label="预览滚轮" value={`缩放${yesNo(expandedUser.previewWheelZoom)} / 翻页${yesNo(expandedUser.previewWheelFlip)}`} />
                               </div>
                               <div className="space-y-px">
-                                <DetailItem label="历史对话" value={formatNumber(user.conversationCount)} onClick={() => setHistoryUser(user)} />
-                                <DetailItem label="对话流图片" value={formatNumber(user.mediaItems.filter((item) => item.type === "image").length)} onClick={() => setMediaDialog({ user, mediaType: "image" })} />
-                                <DetailItem label="对话流视频" value={formatNumber(user.generatedVideoCount)} onClick={() => setMediaDialog({ user, mediaType: "video" })} />
-                                <DetailItem label="资产库图片" value={formatNumber(user.assetMediaItems.length)} onClick={() => setMediaDialog({ user, mediaType: "asset_image" })} />
-                                <DetailItem label="工作区保存" value={user.workspaceSaved ? user.workspaceUpdatedAtLabel : "未保存"} />
+                                <DetailItem label="历史对话" value={formatNumber(expandedUser.conversationCount)} onClick={() => setHistoryUser(expandedUser)} />
+                                <DetailItem label="对话流图片" value={formatNumber(expandedUser.mediaItems.filter((item) => item.type === "image" && !item.isUploadedAsset).length)} onClick={() => setMediaDialog({ user: expandedUser, mediaType: "image" })} />
+                                <DetailItem label="对话流视频" value={formatNumber(expandedUser.generatedVideoCount)} onClick={() => setMediaDialog({ user: expandedUser, mediaType: "video" })} />
+                                <DetailItem label="资产库图片" value={formatNumber(expandedUser.assetMediaItems.length)} onClick={() => setMediaDialog({ user: expandedUser, mediaType: "asset_image" })} />
+                                <DetailItem label="工作区保存" value={expandedUser.workspaceSaved ? expandedUser.workspaceUpdatedAtLabel : "未保存"} />
                               </div>
                               <div className="space-y-px">
-                                <DetailItem label="积分" value={formatNumber(user.credits)} />
-                                <DetailItem label="已消耗积分" value={formatNumber(user.consumedCredits)} />
-                                <DetailItem label="已消耗Token" value={formatNumber(user.consumedTokens)} />
-                                <DetailItem label="已消耗金额" value={user.consumedAmountLabel} />
+                                <DetailItem label="积分" value={formatNumber(expandedUser.credits)} />
+                                <DetailItem label="已消耗积分" value={formatNumber(expandedUser.consumedCredits)} />
+                                <DetailItem label="已消耗Token" value={formatNumber(expandedUser.consumedTokens)} />
+                                <DetailItem label="已消耗金额" value={expandedUser.consumedAmountLabel} />
                               </div>
                             </div>
+                            )}
                           </td>
                         </tr>
                       ) : null}

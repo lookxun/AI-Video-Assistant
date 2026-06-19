@@ -1,7 +1,6 @@
 import { getCurrentUser, jsonError } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { compactWorkspaceState, hasJsonChanged, isRecord, replaceLegacyMediaUrls } from "@/lib/workspace-state-cleanup";
-import { Prisma } from "@prisma/client";
+import { DEFAULT_WORKSPACE_MESSAGE_LIMIT, getWorkspaceSessionMessages, workspaceSessionRowToPayload } from "@/lib/workspace-sessions";
 
 export const runtime = "nodejs";
 
@@ -9,18 +8,20 @@ export async function GET(request: Request) {
   const user = await getCurrentUser();
   if (!user) return jsonError("请先登录", 401);
 
-  const sessionId = new URL(request.url).searchParams.get("id")?.trim() ?? "";
+  const params = new URL(request.url).searchParams;
+  const sessionId = params.get("id")?.trim() ?? "";
   if (!sessionId) return jsonError("会话ID无效");
+  const before = Number(params.get("before") ?? Number.NaN);
+  const historyOnly = params.get("historyOnly") === "1";
 
-  const workspace = await prisma.userWorkspaceState.findUnique({ where: { userId: user.id } });
-  if (!workspace?.state) return Response.json({ session: null });
-
-  const cleanState = compactWorkspaceState(replaceLegacyMediaUrls(workspace.state));
-  if (hasJsonChanged(workspace.state, cleanState)) {
-    await prisma.userWorkspaceState.update({ where: { userId: user.id }, data: { state: cleanState as Prisma.InputJsonValue } });
+  const storedSession = await prisma.workspaceSession.findFirst({
+    where: { userId: user.id, sessionId, deletedAt: null },
+    select: { sessionId: true, title: true, updatedAt: true, deletedAt: true, summaryJson: true, usageSummary: true, memorySummary: true },
+  });
+  if (storedSession) {
+    const messagePage = await getWorkspaceSessionMessages(user.id, sessionId, Number.isFinite(before) ? before : undefined, DEFAULT_WORKSPACE_MESSAGE_LIMIT);
+    if (historyOnly) return Response.json({ messages: messagePage.messages, messagesHasMore: messagePage.hasMore, messagesBeforeCursor: messagePage.nextBefore });
+    return Response.json({ session: workspaceSessionRowToPayload(storedSession, true, messagePage.messages, messagePage) });
   }
-
-  const sessions = isRecord(cleanState) && Array.isArray(cleanState.sessions) ? cleanState.sessions : [];
-  const session = sessions.find((item) => isRecord(item) && item.id === sessionId) ?? null;
-  return Response.json({ session: session && isRecord(session) ? { ...session, messagesLoaded: true } : null });
+  return Response.json({ session: null });
 }

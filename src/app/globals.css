@@ -32,6 +32,13 @@ body {
   margin: 0;
 }
 
+button:focus,
+button:focus-visible,
+[role="button"]:focus,
+[role="button"]:focus-visible {
+  outline: none;
+}
+
 html[data-flashmuse-theme="dark"] {
   color-scheme: dark;
   --background: #0f1014;

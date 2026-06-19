@@ -11,6 +11,8 @@ type VideoSettings = {
   duration?: string;
 };
 
+export type VideoReferenceMode = "reference" | "first_frame" | "last_frame" | "first_last_frame";
+
 type OpenRouterVideoImage = {
   type: "image_url";
   image_url: { url: string };
@@ -120,6 +122,22 @@ function toOpenRouterImage(url: string): OpenRouterVideoImage {
   };
 }
 
+function getBytePlusReferenceRole(index: number, mode?: VideoReferenceMode) {
+  if (mode === "first_last_frame") {
+    if (index === 0) return "first_frame";
+    if (index === 1) return "last_frame";
+  }
+  if (mode === "first_frame" && index === 0) return "first_frame";
+  return "reference_image";
+}
+
+export function getBytePlusEffectiveReferenceImages(referenceImages: string[] = [], mode?: VideoReferenceMode) {
+  const images = referenceImages.filter(Boolean);
+  if (mode === "first_last_frame") return images.slice(0, 2);
+  if (mode === "first_frame") return images.slice(0, 1);
+  return images.slice(0, 9);
+}
+
 async function getOpenRouterError(response: Response, fallback: string) {
   const text = await response.text();
 
@@ -158,8 +176,8 @@ async function postOpenRouterVideoTask(prompt: string, referenceImages: string[]
   return (await response.json()) as OpenRouterVideoTask;
 }
 
-export async function createOpenRouterVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, options?: { bytePlusProviderKey?: string }) {
-  if (getBytePlusVideoModelName(model, options?.bytePlusProviderKey)) return createBytePlusVideoTask(prompt, referenceImages, settings, model, options?.bytePlusProviderKey);
+export async function createOpenRouterVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, options?: { bytePlusProviderKey?: string; referenceMode?: VideoReferenceMode }) {
+  if (getBytePlusVideoModelName(model, options?.bytePlusProviderKey)) return createBytePlusVideoTask(prompt, referenceImages, settings, model, options?.bytePlusProviderKey, options?.referenceMode);
 
   try {
     return await postOpenRouterVideoTask(prompt, referenceImages, settings, model, { generateAudio: true });
@@ -173,7 +191,7 @@ export async function createOpenRouterVideoTask(prompt: string, referenceImages:
   }
 }
 
-async function createBytePlusVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, bytePlusProviderKey?: string) {
+async function createBytePlusVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, bytePlusProviderKey?: string, referenceMode?: VideoReferenceMode) {
   const apiKey = getConfiguredBytePlusApiKey();
   if (!apiKey) throw new Error("缺少 BytePlus API Key");
 
@@ -181,10 +199,10 @@ async function createBytePlusVideoTask(prompt: string, referenceImages: string[]
   if (!bytePlusModel) throw new Error("连接不到模型，请联系管理员！");
 
   const videoSettings = resolveVideoSettingsForModel(model, settings);
-  const images = referenceImages.filter(Boolean).slice(0, 10).map((url) => ({
+  const images = getBytePlusEffectiveReferenceImages(referenceImages, referenceMode).map((url, index) => ({
     type: "image_url",
     image_url: { url: toDataUrlIfLocalPublicAsset(url) },
-    role: "reference_image",
+    role: getBytePlusReferenceRole(index, referenceMode),
   }));
   const body = {
     model: bytePlusModel,

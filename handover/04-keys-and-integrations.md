@@ -84,7 +84,9 @@
 - BytePlus 图片已支持文生图、单图图生图、多图融合。图片响应读取 `data[].url`，usage 读取 `usage.output_tokens / usage.total_tokens`。对话流专业模式的多张图按张数并发多次单图请求，不使用官方 `max_images` 来保证张数。
 - BytePlus 官方多图 `sequential_image_generation: "auto"` 和 `sequential_image_generation_options.max_images` 只表示最多返回几张，实测不保证返回用户选的张数，因此当前普通 `2/3/4张` 不走官方批量。流式 `stream: true` 暂未接入，只记录了 SSE 格式。
 - BytePlus 视频已支持创建和查询任务。创建响应只有 `id`；查询成功响应 `status=succeeded`，视频 URL 在 `content.video_url`，usage 在 `usage.completion_tokens / usage.total_tokens`。
-- BytePlus 视频参考图片使用 `{ type: "image_url", image_url: { url }, role: "reference_image" }`。当前未接参考视频、参考音频、严格首尾帧模式、取消任务和删除任务。
+- BytePlus 视频参考图片默认使用 `{ type: "image_url", image_url: { url }, role: "reference_image" }`。2026-06-19 最终规则：用户明确说首帧时第一张图 role 为 `first_frame`；明确说首尾帧时第一张图 `first_frame`、第二张图 `last_frame`；单独说尾帧/最后一帧/以这张图结束时不再发 `last_frame`，而是普通 `reference_image`；不明确时仍默认 `reference_image`。参考视频、参考音频、取消任务和删除任务仍未接。
+- 2026-06-19 最新修正：BytePlus 官网明确 `Image to video - first frame`、`Image to video - first and last frames`、`Multimodal reference video generation` 是互斥场景，不能混用。当前实现已改为：普通参考图模式最多 9 张，全部 role=`reference_image`；首帧模式只传第 1 张 role=`first_frame`；首尾帧模式只传前 2 张，第 1 张 role=`first_frame`、第 2 张 role=`last_frame`；单独尾帧不再传 `last_frame`，一律普通参考图。多余图片前端提示并忽略，后端 `getBytePlusEffectiveReferenceImages()` 兜底强制裁剪，不能再混传普通参考图。
+- 2026-06-19 最新补充：视频诊断日志写入 `.runtime/video-diagnostics-log.jsonl`，实现位于 `src/lib/video-diagnostics-log.ts`。用于追踪 Seedance 创建、首尾帧 role 分配、自动素材审核和轮询错误。日志只记录 URL 摘要、reference kind、role、requestId、model、settings 和错误摘要，不记录完整 prompt 和完整图片 URL。
 - 2026-06-04 最新确认：Seedance 2.0 直接上传含真人脸/像真人的 AI 写实角色参考图，可能触发 `InputImageSensitiveContentDetected.PrivacyInformation`。官方 API 参考明确写 `seedance 2.0` 系列不支持直接上传含有真人人脸的参考图/视频；但 `content.image_url.url` 支持素材 ID，格式 `asset://<ASSET_ID>`，用于视频生成的预置素材及虚拟人像，可从 `素材&虚拟人像库` 获取。
 - 2026-06-04 最新确认：BytePlus 底层存在素材审核/创建机制。第三方 SeeDance 文档 `E:\project\【1】Api key\三方提供：seedance 2.0\SeeDance接入说明\AI聚合三方素材接口接入文档.pdf` 暴露了类似流程：提交 `originalUrl`、`type=1`、`fileType=1`、`thirdChannel=1` 创建素材，返回 `materialId=asset-xxxx`，轮询 `status=1/2/3`。错误响应中出现官方 `Action=CreateAsset`、`Service=ark`、`Region=cn-beijing`。用户明确不接第三方，只用 BytePlus 第一方；下一个 AI 需要找 BytePlus 获取第一方 `CreateAsset / 查询素材状态` 文档或控制台开通方式。
 - 2026-06-04 后续实现要求：先部署公网服务器，因为素材创建接口需要 BytePlus 能下载的 `originalUrl`。部署后把上传图/资产图/生成图保存为公网 HTTPS URL，再提交 BytePlus 素材&虚拟人像库审核；审核完成后保存 `assetId`，视频生成时将审核通过图片改传 `asset://assetId`。这才是处理 AI 写实真人角色图被直接上传拦截的正式方案。
@@ -272,7 +274,7 @@ BytePlus 图片尺寸实测：
 10. 当前多参考图一致性仍取决于 `bytedance-seed/seedream-4.5` 的图像编辑能力；如继续跑偏，可考虑切换支持多参考图更稳定的图片编辑模型
 11. 本机最新尺寸矩阵实测见根目录 `image-size-test-results.md`，但 2026-05-12 又补测了“只传比例”的原生尺寸，当前以只传比例结果为产品基准：Seedream 4.5 原生为 `2048x2048 / 2560x1440 / 1440x2560 / 3024x1296 / 2304x1728`；Gemini 3.1 Flash 和 Gemini 3 Pro 原生为 `1024x1024 / 1376x768 / 768x1376 / 1584x672 / 1200x896`；GPT-5.4 Image 2 原生为 `1024x1024 / 1280x720 / 720x1280 / 1568x672 / 1152x864`
 12. 本机最新实测和 OpenRouter `/api/v1/videos/models` 能力表需要区分“官方支持项”和“实际输出”。当前保留 6 个视频模型。Seedance 2.0 Fast UI 支持 `480p / 720p`；Seedance 2.0 支持 `480p / 720p / 1080p`；Kling Standard / Pro 支持 `720p`；Kling Video O1 虽官方标 `720p`，但实测输出为 1080p 尺寸，UI 显示 `1080p`；Veo 3.1 支持 `720p / 1080p / 4K`。Veo 3.1 支持 `4/6/8秒`，Kling Video O1 支持 `5/10秒`，其它 Seedance / Kling 当前按 `5/10/15秒` 展示。
-13. 视频请求不再默认首尾帧，不传 `frame_images`；参考图只传 `input_references`
+13. 视频请求不再默认首尾帧，不传 `frame_images`；默认参考图仍按普通参考图处理。2026-06-19 最终规则：明确首帧才切 `first_frame`；明确首尾帧才切 `first_frame + last_frame`；单独尾帧不切 `last_frame`，按普通 `reference_image`。
 14. 视频默认尝试有声音，当前保留模型先传 `generate_audio: true`，若音频参数失败自动重试无声音。
 15. 图片生成遇到过 Node `fetch` 调 OpenRouter `chat/completions` 偶发假 `500 Internal Server Error`，同请求用 `curl` 成功；当前 `src/lib/openrouter.ts` 已增加 `curlPostJson` 兜底，不要轻易删除
 16. 图片返回格式可能是 `choices[0].message.images[].image_url.url` 或 `data:image/jpeg;base64,...`；当前已兼容多种结构并通过 `saveGeneratedAsset` 保存到 `public/generated/images`

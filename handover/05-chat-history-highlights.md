@@ -2,6 +2,134 @@
 
 这个文件用于保留和用户对话中的重要结论，帮助下一个 AI 接手时不丢上下文。
 
+## 2026-06-20 本轮关键交接：其它账号资产新表迁移完成
+
+- 用户要求现在开始“整理并验证资产新表迁移流程，然后逐账号迁移资产库”，随后要求“迁移线上所有其它账号，然后提交 GitHub”。本轮新增正式迁移编排脚本：`scripts/migrate-user-media-assets.mjs` 单账号流程、`scripts/migrate-selected-media-users.mjs` 多账号逐个流程、`scripts/audit-visible-duplicate-media.mjs` 可见重复校验、`scripts/audit-user-media-cost-gaps.mjs` 成本缺口校验，以及 `scripts/README-media-assets.md`。
+- 本地先验证流程：`npx tsc --noEmit` 通过；本地 `ID_113219` 和 `ID_779117` 已迁移并核对。`ID_779117` 归档远程重复 17 条，可见重复为 0；本地成本缺口来自旧流水没有 `mediaUrls`，没有安全方式自动摊到媒体。
+- 线上已迁移除试点 `ID_636611` 外的所有 20 个有媒体账号：`ID_973447 / ID_294338 / ID_316782 / ID_911584 / ID_415958 / ID_963115 / ID_868181 / ID_315163 / ID_947011 / ID_193006 / ID_554897 / ID_332396 / ID_262993 / ID_379461 / ID_955937 / ID_847338 / ID_673536 / ID_686996 / ID_852101 / ID_953031`。3 个无媒体账号 `ID_778841 / ID_476875 / ID_164561` 无需迁移。
+- 线上每个账号完整日志在马来 `/var/www/flashmuse/.runtime/media-migration-logs/`。最终所有 20 个账号 `visibleDuplicateGroups=0`，`unmatchedLedgers=0`。也就是可见媒体没有远程/本地重复，媒体流水成本都能匹配到媒体。
+- 注意：`rebuild-media-asset-registry.mjs --dry-run` 后续仍会显示从旧 workspace/message/ledger 来源发现的原始数量，不应把它理解为“又没迁完”。迁移完成状态看 `verify-visible-media-after-merge`、`audit-visible-duplicate-media` 和 `audit-user-media-cost-gaps`。
+
+## 2026-06-20 本轮关键交接：资产新表试点、ID_636611 修复和其它账号迁移方法
+
+- 用户反馈资产库刷新慢、刷新后跳回对话模式、资产库不出来、点对话模式出不来。线上对 `ID_636611` 实测发现数据库查询很快，慢点是接口返回体太大：对话首屏约 `306KB`，因为每条消息重复带整会话 `imageDimensions/videoPosters`；资产全量约 `301KB`。已裁剪消息返回字段并改资产库分类分页，对话首屏降到约 `21KB`，分类资产接口通常几十 KB。
+- 用户反馈“资产库刷新后先跳对话模式，再过很久显示资产库”。根因是 `activePanel` 初始硬编码为 `chat`，后端返回后才恢复 `assets`。已改前端初始从 `localStorage` 的 `flashmuse-workspace-ui-state-v1` 读取最后面板、分类和滚动状态。
+- 用户反馈“对话流生成视频 113 个但没滚动条、生成图片滚动位置乱蹿”。根因是新表分页后前端仍按旧全量资产逻辑：加载 60 条但只渲染 24 条，且每次追加都按 `createdAt` 全局重排。已改为由服务端按最新生成/上传排序，前端不再全局重排；加载多少渲染多少；内容不足一屏且还有下一页时自动继续拉。
+- 用户确认当前资产库分类没有 `分镜视频` 和 `待分类/其它`。新规则：`UserAssetState.currentCategory` 只用当前产品口径，资产库三类 `character_image / scene_image / shot_image`；对话流三类 `conversation_uploads / conversation_images / conversation_videos`；未来工作流三类 `workflow_uploads / workflow_images / workflow_videos`。旧 `shot_video / other` 只能作为旧内部类型或媒体来源事实，不能作为用户资产分类。
+- 用户确认成本规则：每张图片/每个视频独立媒体数据，多图费用平摊到每张；优化提示词 token 和反推提示词 token 独立，不算对话流也不算资产库；总扣费 = 每张图片成本 + 每个视频成本 + 对话流 token + 优化提示词 token + 反推提示词 token。文本扣费仍按小数积分累计，累计够 1 分才扣。
+- 本轮给 `MediaAsset` 加成本字段，给媒体/用户状态加归档隐藏字段。`ID_636611` 迁移后可见媒体成本和媒体流水完全对齐：`usd=133.152183`、`cny=937.906716`、`credits=8779`、`promptTokens=244638`、`completionTokens=14212458`、`totalTokens=14457096`。
+- 用户发现资产库有大量相同图片/视频。只读审计确认不是本地文件重复，而是“远程临时 URL + 本地 /generated URL”被当作两条媒体。`ID_636611` 共 156 组这种重复。已用 `tmp/merge-duplicate-media.js` 合并：保留本地 URL，合并远程条的费用、token、流水、requestId、模型、参数、提示词到本地条；远程条归档隐藏，不真删。之后 `ID_636611` 可见媒体从 419 降为 263，归档重复项 156。
+- 用户指出“资产库里参数/名字不对，但去对话流打开同一媒体后再回资产库就对了”。原因是前端 `getCanonicalPreviewAsset()` 会从已加载 `WorkspaceMessage` 临时补全，但没有写回新表。本轮把这套逻辑搬到 `tmp/enrich-media-assets-from-sources.js`：按 URL 归一后，优先用对话流 `WorkspaceMessage` 补提示词/模型/比例/分辨率/尺寸/时长/宽高/messageId，再用 `CreditLedger.metadata`，最后用旧 `state.assets`。禁止写入 `-`、空值、内部强制规则等垃圾字段。
+- `ID_636611` 本轮媒体补全结果：可见媒体 263，更新 223；补模型 39、比例 104、分辨率 104、图片尺寸 64、视频时长 40、generationSettings 205、messageId 54、宽高 41、creditLedgerId 14、提示词 99、requestId 3。接口现在能返回如 `GPT-5.4 Image 2 / 16:9 / 2560 × 1440 / 2K / 生成一个美女` 和 `Seedance 2.0 / 720p / 15秒 / @场景5...`。
+- 用户要求模型只显示模型名称，不显示提供商 ID。已在 `workspace-state` 接口里把 `byteplus:video.seedance-2-0`、`openai/gpt-5.4-image-2`、`google/veo-3.1` 等映射为 `Seedance 2.0`、`GPT-5.4 Image 2`、`Veo 3.1` 等展示名。数据库仍保留原始模型 ID，前端展示读转换后的 `previewMeta.modelLabel`。
+- 用户问缩略图和视频封面是否在新表里。`MediaAsset` 有 `thumbnailUrl` 和 `posterUrl`，但之前未完全填充。本轮用 `tmp/enrich-media-thumbnails.js` 给 `ID_636611` 补齐：图片缩略图 177 个、视频封面 13 个。前端 `AssetItem` 增加 `thumbnailUrl`，资产卡片优先读 `thumbnailUrl`，没有才推导 `/api/media-thumbnail` 或本地缩略图路径。
+- 用户反馈对话流上传图片左侧数量 6，但右侧有时 0/2/5。根因是左侧按 URL 包含 `/upload_image/` 统计，右侧分页按 `currentCategory=conversation_uploads` 查；而旧迁移里上传图多是 `currentCategory=conversation_images`。已修：`conversation_uploads` 右侧也按 `mediaAsset.url contains /upload_image/` 查；`conversation_images` 排除 `/upload_image/`。
+- 迁移其它账号必须按本轮顺序，一个账号一个账号做。命令模板：`node scripts/rebuild-media-asset-registry.mjs --dry-run --user=USER_ID` -> 真实跑；`node tmp/merge-duplicate-media.js --dry-run --user=USER_ID` -> 真实跑；`node tmp/enrich-media-assets-from-sources.js --dry-run --user=USER_ID` -> 真实跑；`node tmp/enrich-media-thumbnails.js --dry-run --user=USER_ID` -> 真实跑；最后用 `tmp/verify-visible-media-after-merge.js USER_ID`、`tmp/verify-media-costs.js USER_ID`、`tmp/count-user-media-breakdown.js USER_ID`、`tmp/audit-duplicate-media-summary.js USER_ID` 核对。不要直接全量迁移。
+- 本轮所有改动已线上部署，未提交/推送 GitHub。接手后先看 `git status` 和 diff。临时脚本现在很多都在 `tmp/`，其中迁移脚本应先整理到正式 `scripts/` 后再迁其它账号，避免丢失。
+
+## 2026-06-19 本轮关键交接：资产库重构、媒体主表、线上恢复和当前卡点
+
+- 用户先反馈历史对话“加载更多”只显示一会 `加载中...` 然后消失。排查发现两个问题：第一，初始 `summary=1` 会额外塞 active session，前端用当前 sessions 长度计算 offset，导致下一页可能重复；第二，`historyOnly=1` 实际返回约 `155KB`，说明还带了 workspace state/assets，不是只查 5 条历史标题。已上线修复：`historyOnly=1` 只查 `WorkspaceSession`；刷新对话页改为 `/api/workspace-state?summary=1&panel=chat`。
+- 用户明确三大模式加载规则：对话模式、资产库、以后工作流都要独立刷新。比如资产库左侧和右侧当前分类单独加载，右侧显示统一 `加载中...` 或蓝色进度条；切换角色/场景等分类应读取当前分类内容再展示。已做第一步：资产库通过 `/api/workspace-state?assetsOnly=1` 懒加载；输入框 `@` 资产引用也会触发懒加载。未完成：真正分类级分页还没做，目前仍一次性拉全量资产。
+- 本轮出现一次严重资产缩水事故：拆分对话页加载后，前端保存时不带 `assets`，但服务端旧 PUT 没保留缺失 assets 字段，导致线上 `ID_636611` 的 `state.assets` 一度缩水到 13。已上线止血：`mergeWorkspaceAssets()` 如果 payload 没带 `assets / assetGenerateJobs`，保留 existing state。随后从可靠来源恢复到 106，并备份恢复前状态 `.runtime/migration-backups/2026-06-19T14-19-29-710Z-ID_636611-before-reliable-asset-restore.json`。
+- 用户提出并确认资产库根本方案：媒体应该有像用户 ID 一样的唯一编号；编号、文件、来源、参数、提示词、出现方式是固定事实，不应随用户分类/改名变化；名称、删除、当前分类、排序是可变用户状态。未来还会有 `工作流生成` 和 `工作流上传`。本轮按这个原理新增 `MediaAsset` 和 `UserAssetState`，迁移 `20260619223000_media_asset_registry`，并预留 `workflowId / workflowNodeId / workflow_generation / workflow_upload`。
+- 已新增并线上执行 `scripts/rebuild-media-asset-registry.mjs`。脚本扫描旧 `workspace.state.assets`、`WorkspaceMessage` 中图片/视频和 `imageReferences`、`CreditLedger.metadata` 中 `mediaUrls/originalPrompt/settings/creditSource`。线上 dry-run 和真实写入结果：24 个账号有数据；`ID_636611` 旧 assets 106，新表发现 408 个媒体：角色 36、场景 11、分镜图片 18、分镜视频 104、待分类 239。大量待分类是故意不硬猜。
+- 资产库接口已改为新表优先。`assetsOnly=1` 现在查 `UserAssetState + MediaAsset`，映射成旧前端 `AssetItem`。修过 `lockedType` 和 `librarySource` 两个兼容坑：不加 `lockedType` 会被前端按提示词重分类；不把角色/场景/分镜/分镜视频强制映射为 `asset_generation`，左侧会显示 0。
+- 当前最后状态：用户说“现在终于加载出来”，但很多封面不显示；一次加载整个资产库慢；“工作流生成视频”数量先显示 6，用户打字期间变成 7，怀疑还没加载全；再次点击资产库按钮又会重新加载。注意当前 `chat-workbench.tsx` 已改为点击资产库按钮强制 `loadWorkspaceAssets(true)`，这可能解决旧空状态，但也会导致重复加载。下个 AI 应把资产库改成分类级分页/懒加载，不要一次性拉 408+ 个。
+- 排查提醒：不要再猜。先看 Nginx `access.log` 中有没有 `GET /api/workspace-state?assetsOnly=1`，看返回大小/状态/耗时；看 `/root/.pm2/logs/flashmuse-error.log` 和 `/api/client-error`；确认浏览器是否还在旧 JS 包；确认 `assetsLoadStatus` 和前端是否把返回过滤成空。曾经用户刷新后日志里没有新的 `assetsOnly=1`，说明问题在前端没有触发请求或旧包，不是数据库 0。
+- 在线用户备注：本轮查到同一时间两个工作台在线，分别是 `ID_686996 / 312876953@qq.com / 124.240.106.22 广东佛山` 和 `ID_636611 / 12424740@qq.com / 125.120.248.223 浙江杭州`。这是不同账号，不会互相抢 workspace instance；之前误判为同一用户多标签，已更正。
+- 本轮所有改动均已线上部署但未提交 GitHub。涉及新迁移、新脚本、工作台和 workspace-state 路由，接手后必须先 `git status` 和完整 diff。临时脚本放在 `tmp/`，线上也上传到 `/var/www/flashmuse/tmp/` 过，包括 `query-history-debug.js`、`audit-asset-sources.js`、`restore-assets-from-reliable-sources.js`、`run-prisma-with-env.js`、`count-media-registry.js`、`count-legacy-assets-from-registry.js`、`active-workspace-sessions.js`。
+
+## 2026-06-19 本轮关键交接：后台优化、历史恢复和资产库未解决问题
+
+- 用户先问项目能否查“当前在线人数”。结论：能查。`Session.lastSeenAt` 表示最近登录态接口访问，`Session.activeWorkspaceSeenAt` 表示工作台页面实例心跳，更适合“当前在线”。已上线后台概览卡片：当前在线人数按最近 60 秒 `activeWorkspaceSeenAt` 去重用户，灰字 `30分钟活跃` 按最近 30 分钟 `lastSeenAt` 去重用户。线上直接查库当时为 `onlineUsers=1`。
+- 用户指出后台概览 `今日活跃 DAU` 显示 23，但后台看到今天登录约 5 人。排查线上数据：`currentDau=23` 是因为旧口径取 `lastLoginAt / Session.lastSeenAt / workspace.updatedAt / createdAt` 最大值，且 `workspaceUpdatedToday=23`。已改为 DAU/WAU/MAU 只按 `Session.lastSeenAt`，并同步改近 30 日活跃趋势和最近活跃用户 Top 10。部署后当时新口径为 `dau=4 / wau=19 / mau=22`。
+- 用户要求后台概览调整：`当前总积分余额` 卡片放到第二行第一个；`资产保存总数` 灰字合并 `图片：数量，视频：数量`；工作流如果用户不说开放就一直禁用。已部署。线上 `NEXT_PUBLIC_WORKFLOW_MODE_ENABLED` 未开启，工作流 production 继续 disabled。
+- 用户反馈生成记录大表“删除数比总数还大”。根因是总数用旧汇总字段，删除数用实际列表。已改为生成记录表总数也用实际列表：历史对话总数 `user.conversations.length`，图片生成总数 `对话流图片 + 资产生成图片`。删除数括号改为英文半角 `()`，删除数为 0 不显示。已部署。
+- 用户要求后台所有页面都按“先显示可见内容，展开再读展开内容，点详情再读详情内容”优化。已做并部署一版：设置页早返回；生成记录首屏只传摘要，展开请求 `/admin/api/records/user-detail?userId=...`；用户管理和积分管理首屏也只传摘要，展开时复用该详情接口加载完整用户详情/积分详情。后台详情接口无 Cookie 返回 403 正常。已验证 `/admin`、`/admin?tab=users`、`/admin?tab=credits`、`/admin?tab=records` 200。
+- 用户反馈线上历史对话点 `重新加载历史` 加载不出来，后来只剩一个新对话。排查确认历史没有丢，`ID_636611` 仍有 20 条可见 `WorkspaceSession`。真实问题是历史加载失败/旧页面状态时前端仍自动保存工作区，把默认“新对话”写成 active。已软删除误创建的新对话 `e7f8c21a-3999-4f3d-821a-b1d8825f2615`，恢复 active 到 `3f8f3022-3ca9-4aa2-a291-64f7751ab6b9`，并部署：初始化 workspace-state 超时 `8秒 -> 30秒`，保存 effect 只有 `workspaceLoadStatus === "loaded"` 才允许 PUT。
+- 用户随后反馈前端资产库内容消失。查明：不是服务器文件丢失，而是 `UserWorkspaceState.state.assets` 曾被前端异常 PUT 成缩水/错分类状态。对 `ID_636611` 的排查显示当时 `assets` 只剩约 20 个，历史消息里还有大量图片。已经部署服务端 `/api/workspace-state` 保护，防止 `assets` 数组缩水覆盖，且防止已有 `asset_generation / character_image / scene_image / shot_image` 被前端退成 `conversation / other`。但用户最后仍反馈资产数量、顺序、提示词和分类不对。
+- 资产库问题的排查尝试很多，必须交接清楚：曾从 `WorkspaceMessage` 历史消息恢复资产、从旧备份 `.runtime/migration-backups/2026-06-06T18-48-45-483Z-user-workspaces.json` 恢复旧资产、从消息 `imageReferences` 恢复 `场景3/4/5/6/8`、从 `CreditLedger.metadata.creditSource` 审计可靠资产。最后一次全量可靠来源检查是 `problemUsers: 0`，并批量修复了 8 个账号。但用户认为仍有错误，尤其是 `ID_636611` 的角色/场景数量、顺序、提示词，以及“对话流图片混进资产库”。下个 AI 不能把这当已解决。
+- 资产库后续必须继续查根因和真实旧状态。不要再靠提示词推断分类；要优先找更接近事故前的完整 `state.assets` 数据，或从 `CreditLedger.metadata.assetName/systemName/mediaUrls/originalPrompt/settings`、`WorkspaceMessage.imageReferences`、`.runtime/media-save-jobs.json` 和旧备份组合恢复。用户特别强调重点不是只恢复当前账号，而是查清楚哪一步导致的并更正，否则其它账号也会有问题。
+- 本轮所有上述内容都已线上部署但未提交/推送 GitHub。构建均通过，仅有既有 Turbopack/NFT tracing warning。PM2 多次重启后 online，阿里 `_next/static` 已同步清缓存。
+
+## 2026-06-19 本轮关键交接：历史加载、软删除、后台统计修复
+
+- 用户反馈：登录后在工作台关机，开机浏览器恢复工作台，但历史对话长时间不显示；刷新后又等很久才出来。排查结论：拆表接口本身快，问题更像浏览器恢复旧页面时初始化请求挂住/失败，前端没有自动重试。已本地改：`fetchJsonWithRetry()` 加默认 10 秒超时；初始化 `/api/workspace-state?summary=1` 单次 8 秒超时、最多自动重试 5 次；左侧历史区显示 `历史加载中...`，失败后显示蓝色 `重新加载历史` 按钮。未部署。
+- 用户问线上 `B_107`。线上 PM2 日志显示：`Video generation completed with no output (content may have been filtered)`，任务是 BytePlus `Seedance 2.0` 的 `cgt-20260619032158-hjgsh`。这是轮询阶段平台完成但没返回视频，内容可能被过滤；不是首尾帧参数问题，不是真人审核问题。已本地改错误文案为 `输出视频被平台过滤，未返回视频。重新生成有可能会成功。`，有 `(B_xxx)` 时保留编号。
+- 用户明确删除总原则：平台没有真正删除能力。用户侧删除只是不显示或进回收站，回收站 30 天后也只是用户侧不显示；服务器文件、数据库记录、后台数据全部保留。客服可在后台找回误删内容给用户。前端文案仍可以让用户以为已删除。已本地把 `/api/asset-delete` 改成 no-op，回收站到期不再删除文件、不再移除 workspace 资产，只隐藏。
+- 对话删除必须软删除且不能拖慢读取。已本地新增 `WorkspaceSession.deletedAt` 字段和 `[userId, deletedAt, updatedAt]` 索引，迁移 `20260619002000_workspace_session_deleted_at`。用户侧 `/api/workspace-state`、`/api/workspace-session` 只查 `deletedAt: null`，后台读取全部并标识。前端删除对话只写 `deletedAt`，不删 `WorkspaceSession`/`WorkspaceMessage`。
+- 用户指出线上后台生成记录大表数据错：历史对话全 0、视频生成全 0。查线上源码确认后台还在读旧 `user.workspace.state`，而线上已拆表。已本地改后台为合并 `UserWorkspaceState.state` 的资产/设置 + `WorkspaceSession` + `WorkspaceMessage` 的真实数据，用户管理、生成记录、积分管理共用同一套后台工作区状态。未部署。
+- 生成记录大表按用户要求，`历史对话 / 图片生成 / 视频生成 / 上传图片 / 上传文件` 五列显示为 `总数（删除数）`，括号红色。删除对话在标题最前显示红字 `用户已删除`；删除图片/视频在主图和缩略图左上角显示红色 `已删除`，参数和提示词照常显示。`对话流图片` 计数不再包含上传图片；概览图片/视频总数用拆表统计兜底。
+- 本轮还给新图片/视频流水补了恢复字段：图片 metadata 写 `originalPrompt`；视频 metadata 写 `settings / ratio / resolution / duration / originalPrompt`。旧数据如果从未保存提示词，后台无法凭空恢复；新数据以后可恢复。验证：`npx prisma generate`、`npx prisma migrate deploy`、多次 `npx tsc --noEmit` 通过。曾停止本地 dev 进程释放 Prisma DLL，接手后本地页面打不开先重新启动。
+
+## 2026-06-19 本轮关键交接：Seedance 尾帧规则、B106 和部署
+
+- 用户先问 Seedance 生视频几种模式什么情况下阻止/提示。当前最终规则已经改成：只有明确 `首帧 / 第一帧 / 从这张图开始 / 以这张图开始` 触发首帧；只有明确 `首尾帧 / 首帧和尾帧 / 第一帧和最后一帧` 触发首尾帧；单独 `尾帧 / 最后一帧 / 以这张图结束` 不再触发尾帧模式，不管有几张参考图都按普通参考图发；其它都按普通参考图发。
+- 用户要求 `首尾帧` 模式但少于 2 张参考图时，阻止后不要清空输入框。已改为前端在清空草稿/上传图之前校验：少于 2 张只提示 `首尾帧生视频需要至少两张参考图`，不发请求，不清空输入框，不清空参考图。
+- 用户问线上 `B_106` 原因。诊断日志显示它是 `referenceMode=last_frame`、1 张图 role=`last_frame` 导致火山创建阶段报参数错误：`last frame image content cannot be mixed with first frame or reference image content`，Request id `02178181407673134cac430b5ac258905380d809540adb4b6d5f8`。这不是版权风控，也不是真人审核。
+- 用户指出 B106 点重新生成后成功。继续查日志确认成功那次没有发 `last_frame`，而是普通 `reference_image`，任务 `cgt-20260619042134-rj29f` 后续轮询成功。因此最终决定：禁用单独尾帧模式，尾帧词单独出现一律普通参考图，不提示、不阻止。
+- 本轮先短暂实现过“单独尾帧提示需要同时提供首帧和尾帧”，但用户随后否定，要求“说尾帧不管有几张图都按普通参考图发”。最终代码已按这个要求部署。接手时不要恢复单独 `last_frame`，也不要再提示尾帧需要补首帧。
+- 已部署文件：`src/components/chat-workbench.tsx`、`src/app/api/video/route.ts`、`src/lib/openrouter-video.ts`。线上 build 通过，PM2 online，阿里 `_next/static` 已同步清缓存；本轮没有提交 GitHub。
+
+## 2026-06-19 本轮关键交接：仅同步交接文档和更新日志
+
+- 用户要求把本对话框内所有做的内容写入交接文档和更新日志，目的明确是让下一个 AI 保留记忆并能继续工作。
+- 本轮对话中没有新增功能需求、没有代码实现、没有部署、没有提交/推送，也没有运行类型检查或构建。实际完成事项是更新交接文档和更新日志本身。
+- 已更新的文档：`handover/00-README.md`、`handover/03-progress-and-status.md`、`handover/05-chat-history-highlights.md`、`handover/CHANGELOG.md`。
+- 接手提醒：不要因为看到本轮文档更新就误以为有新的业务代码已验证。本轮之前项目已处于 dirty worktree，继续任何工作前先检查 `git status` 和完整 diff。
+
+## 2026-06-19 本轮关键交接：线上部署、工作流禁用、Seedance 规则和日志
+
+- 用户要求把除工作流模式相关内容外的所有内容部署上线。实际执行中先准备过“不含工作流画布”的临时工作台版本；用户随后指出不用这么麻烦，可以完整部署代码但线上禁用工作流按钮。最终已改为 `WORKFLOW_MODE_ENABLED`：本地开发默认开启，线上 production 默认关闭，可用 `NEXT_PUBLIC_WORKFLOW_MODE_ENABLED=true` 线上开放。线上工作流按钮不可点并显示 `未开放`；旧 `activePanel=workflow` 会回到聊天。
+- 线上已部署历史会话/消息拆表并完成迁移：23 个用户、60 条会话迁移到 `WorkspaceSession`，57 个会话、650 条消息迁移到 `WorkspaceMessage`，二次 dry-run 为 0。后续不要再改回请求时迁移。
+- 用户问后台用户管理为什么不按最后登录排序。原因是旧代码按最近活跃时间排序，包含 workspace 保存时间。已改为按 `lastLoginAt / Session.lastSeenAt` 最近时间排序，最近登录/访问的用户排最上面。
+- 用户要求右上角使用量不再显示美元/人民币。已改为浮层只显示 `Tk`、积分、淡横线、图片数、视频数；积分在 Tk 下面，横线颜色跟“使用量”字一致但更淡，左右有缩进。
+- 用户排查 `B_103`：这不是马上能显示的创建阶段错误，而是任务 `cgt-20260619030625-cdl79` 在火山轮询阶段约 8 分钟后返回 `output video may be related to copyright restrictions`。用户排查 `B_104`：任务 `cgt-20260619032158-hjgsh`，约 4 分钟后返回同类输出版权风控；实际 prompt 没有 `<system-reminder>`。用户重生成 B104 成功，说明输出版权风控有随机性，同 prompt 不必然失败。版权错误文案已追加 `重新生成有可能会成功。`
+- 已新增 `video-diagnostics-log.jsonl` 专用日志，记录 Seedance 首帧/尾帧/首尾帧、普通参考图、自动火山审核和轮询失败/成功。下次查视频问题优先看 `.runtime/video-diagnostics-log.jsonl`，再看 PM2 日志。注意日志不要写完整 URL 和完整 prompt。
+- 用户问 `video_4_d20` 是否首帧生成。线上查询确认：任务 `cgt-20260619033138-t9mjp`，`referenceMode=first_frame`，参考图 role=`first_frame`，提示词 `@场景5 作为第一帧开始...`，生成成功。
+- 用户要求按火山官网修正 Seedance 模式。官网明确首帧、首尾帧、普通多参考图互斥，不能混用。当前最终规则：普通参考图最多 9 张；首帧只用第 1 张；首尾帧只用前 2 张；单独尾帧不再发 `last_frame`，一律普通参考图；多余图片前端提示但不阻止，后端强制裁剪。后续不要再把首帧/首尾帧和 `reference_image` 混传。
+- 本轮所有改动已部署线上并通过 build/PM2/HTTP 基础验证，但没有提交 GitHub。接手后先 `git status`，注意本地还有工作流开发代码和大量已部署未提交改动。
+
+## 2026-06-19 本轮关键交接：工作流第一版和画布操作
+
+- 用户要求继续制作工作流，并让 AI 先查看 `E:\project\clean_project_code\docs` 下另一个项目的交接文档。阅读结论：另一个项目的工作流是 `Vite + ReactFlow + FastAPI`，有完整节点系统和 3D 导演台，但不能直接整包搬到本项目。能参考思路和部分纯函数/组件，不能照搬黑色 UI、计费、上传或后端链路。
+- 用户明确说“导演台也先不要”。因此本轮没有接 `DirectorNode / DirectorStage / DirectorBindingBar`，没有引入 `three`，也没有做 3D 导演台。后续除非用户重新明确要求，否则不要主动开始导演台。
+- 用户明确要求：颜色要用我们自己的；不能影响其它任何功能；积分扣除用我们自己的；“只是借鉴他的功能代码，能用就用，不能用就改”。本轮因此选择轻量自研画布，不新增 `@xyflow/react`，避免引入大依赖影响现有工作台。
+- 当前工作流第一版：新增 `src/components/workflow-canvas.tsx`。右侧工作流不再只是空网格，而是一个可用画布。支持文本节点、图片生成节点、视频占位节点；文本节点可连到图片节点；图片节点用上游文本 + 自身提示词调用 `/api/image`，积分仍走本项目后端 `chargeCredits()`。
+- 工作流数据挂在 `workflowItems[].canvas`，并随现有 `/api/workspace-state` 保存。当前没有独立工作流表，也没有新增迁移。后续如果工作流数据变大，再考虑拆表，不要现在贸然加大改。
+- 画布交互细节：左下角有鼠标和手的图标。鼠标模式用于选择/移动节点；手模式用于移动画布。快捷键 `V` 切回鼠标；按住 `空格` 临时切到手型拖动画布；鼠标滚轮直接缩放画布。用户明确要求滚轮不用按 Ctrl。
+- 用户发现“无限画布上面有边界，节点无法往上移”，原因是第一版有 `x/y >= 24` 限制。已移除，节点现在可以拖到负坐标。
+- 用户担心画布移开后找不到节点。已加左下角“定位全部节点”按钮和快捷键 `F`。它会按节点边界自动居中找回；最多放大到 `100%`，不会自动变 `120%`；滚轮缩放接近 `100%` 会吸附到 `100%`，避免滚不到整百。
+- 用户要求切到别的分类再回工作流时保持离开前画布定位。已把每个工作流视口 `viewport: { x, y, zoom }` 存进 `WorkflowCanvasState`，切换对话/资产/工作流都能恢复最后位置。
+- 用户要求左侧“工作流模式”的 `未开放` 去掉，并不再灰态。已改为正常入口样式。
+- 用户发现点击按钮后按空格会出现很粗黑色描边。一开始只在工作流工具按钮去掉，后来用户说其它地方也有，最终在 `src/app/globals.css` 全局去掉 `button` 和 `[role="button"]` 的默认 focus outline。注意这会牺牲默认键盘焦点可见性，后续若要更规范可设计自定义蓝色 focus ring。
+- 用户要求后台去掉“登录设备”这一项。已从 `src/app/admin/admin-users-panel.tsx` 的用户详情中移除 `登录设备` 展示，但 `lastLoginUserAgent` 数据采集和接口字段仍在。
+- 本轮多次 `npx tsc --noEmit` 通过。`npm run build` 失败原因是本机拉取 Google Fonts `Geist Mono` 失败，和本轮代码无关。当前仍未部署、未提交、未推送。
+
+## 2026-06-18 本轮关键交接：侧栏折叠、工作流工作区和 Seedance 首尾帧
+
+- 用户先明确本轮不测试火山审核，火山自动审核作为部署后重点测试；当前继续只在本地做基础功能。不要因为看到火山自动审核代码就主动部署或线上测试，除非用户明确要求。
+- 用户要求工作台左侧栏点击收起后不要完全消失，而是保留 `80px` 宽度。折叠态需要保留所有入口，只改变显示方式：Logo 只显示图片，三个模式只显示图标，历史标题隐藏，新建对话只保留正方形虚线框和居中 `+`，资产库下方只显示图标，积分只显示积分图标和数量，头像只显示头像。
+- 本地已实现折叠态历史菜单：侧栏里只显示一个历史图标按钮，点击后右侧弹出历史对话菜单。菜单固定最大高度，超过内部滚动；保留加载更多、运行中状态、每条三点菜单，以及置顶/重命名/删除。用户发现二级菜单被滚动容器裁切，已改成 `portal` 独立浮层。
+- 用户指出折叠态头像菜单一开始被浏览器左侧裁掉，后又偏太右。最终已改为折叠态头像菜单左侧和头像按钮左边对齐，菜单大小不变。折叠态积分卡功能也已补回，点击会打开用户中心 `我的积分`。
+- 用户要求工作台 Logo 不再承担“切换线路”功能。当前工作台 Logo 展开态点击收起侧边栏，折叠态点击展开侧边栏；首页 Logo 的切换线路功能保留，不要误改首页。
+- 用户要求工作流模式第一版：右侧不要标题栏，整个右侧全部是工作区，网格改成参考图那种大格+小格效果，但颜色不用改。当前本地已隐藏工作流右侧标题栏，取消内容区内边距，网格铺满整个右侧工作区。
+- 用户追问图生视频里的模式，最终确认：Seedance 图生视频除了普通参考图，还要支持首帧、尾帧、首尾帧。规则是用户明确说首帧/尾帧/首尾帧才用；不明确说时仍按普通参考图或多参考图处理。
+- 当时实现：`首帧 / 第一帧 / 从这张图开始` -> 第一张参考图 role 为 `first_frame`；`尾帧 / 最后一帧 / 以这张图结束` -> 第一张参考图 role 为 `last_frame`；`首尾帧 / 首帧和尾帧` -> 第一张图 `first_frame`、第二张图 `last_frame`。注意此条已被 2026-06-19 最终规则覆盖：单独尾帧现在一律普通参考图，不再传 `last_frame`。
+- 重要风险：BytePlus 文档页面直接抓取不到具体 role 字段说明，当前按项目现有 `content[].role` 结构接入 `first_frame / last_frame`。本地已通过类型检查，但必须在线上真实调用 Seedance 2.0 / Fast 后确认字段是否正确；如果 API 报参数错误，优先校准 `src/lib/openrouter-video.ts` 里的 role 字段名，不要回滚默认普通参考图逻辑。
+- 本轮验证：多次 `npx tsc --noEmit` 通过。本轮仍未部署、未提交、未推送。本地还有 6 月 17 历史拆表和火山自动审核等未提交改动叠加，接手后先看 `git status` 和完整 diff。
+
+## 2026-06-18 本轮关键交接：火山视频真人参考图自动审核
+
+- 用户反馈显式“火山素材审核”体验不好：入口藏在资产预览里，普通用户不知道是什么，而且这个能力只影响 `Seedance 2.0 Fast / Seedance 2.0` 视频参考图真人限制，不应在资产库作为通用功能长期展示。
+- 用户最终确认方案：界面上不要显示审核按钮。用户正常使用火山视频模型生成视频；如果模型返回真人/隐私参考图错误，系统自动接管，把本次参考图提交审核；审核通过后自动用 `asset://` 再次创建视频任务。用户最多看到提示：`系统检测到真人图片，需要审核才能生成视频，此次视频生成任务会延长时间，请稍候....`。
+- 已本地实现：`/api/video` 首次遇到真人/隐私参考图错误时返回 `status: "reviewing"`；前端收到后追加蓝色、无横线的特殊系统提示，再带 `autoBytePlusAssetReview: true` 重试；后端进入自动审核、轮询 `GetAsset`，`Active` 后用 `asset://{id}` 继续创建视频任务。手动“火山素材审核”UI 已从资产预览隐藏。
+- 多参考图时不能可靠知道哪张触发真人限制，因为火山错误不提供图片索引或具体 URL。当前策略是审核本次视频任务用到的全部参考图。
+- 本地测试 B159/B160/B161 显示自动审核流程已触发，但 BytePlus 素材库下载供应商临时 TOS 参考图时报 `fetch object not found`。已修为优先把远程临时 URL 映射到本地保存队列里的 `/generated/...` 副本再提交；如果找不到本地副本，就返回通用错误，不给用户显示“临时地址失效”这类技术原因。
+- 重点提醒：这个功能本地只能测前端提示和后端分支，完整流程必须上线后测。因为 BytePlus `CreateAsset` 需要公网 HTTPS 图片 URL，本地 `/generated` 或 `localhost` 不可下载。部署后务必用线上 `https://main.venusface.com/generated/...` 真人/写实参考图，分别测 `Seedance 2.0 Fast` 和 `Seedance 2.0`：确认真人错误后提示出现、素材审核成功、资产字段写回、`asset://` 重试、视频任务继续生成。
+- 本轮只改本地，未部署、未提交、未推送。`npx tsc --noEmit` 已通过。接手后注意本地还叠加 6 月 17 历史拆表未提交改动，不要直接覆盖。
+
 ## 2026-06-15 本轮关键交接：预览下载、本地清理、部署和 GitHub 同步
 
 - 用户反馈预览页右上角下载按钮有些视频下载异常，怀疑“下载来会直接删除掉”。排查结论：下载按钮没有删除逻辑，`/api/asset-delete` 只在回收站过期清理时触发。真正风险是远程临时 URL：供应商链接可能过期、跨域导致浏览器忽略 `download`，或需要鉴权，行为不稳定。

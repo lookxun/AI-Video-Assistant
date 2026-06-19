@@ -32,8 +32,12 @@ model User {
   lastLoginLocation          String?
   lastLoginUserAgent         String?
   sessions                   Session[]
+  workspaceSessions          WorkspaceSession[]
+  workspaceMessages          WorkspaceMessage[]
   workspace                  UserWorkspaceState?
   creditLedgers              CreditLedger[]
+  mediaAssets                MediaAsset[]
+  userAssetStates            UserAssetState[]
 }
 
 model CreditSetting {
@@ -83,6 +87,146 @@ model UserWorkspaceState {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model MediaAsset {
+  id                   String   @id @default(cuid())
+  userId               String
+  mediaType            String
+  url                  String
+  normalizedUrl        String
+  posterUrl            String?
+  thumbnailUrl         String?
+  originalUrl          String?
+  storagePath          String?
+  width                Int?
+  height               Int?
+  durationSeconds      Int?
+  mimeType             String?
+  fileSize             Int?
+  sourceKind           String
+  sourceDetail         String?
+  sourcePrompt         String?
+  promptSource         String?
+  reversePrompt        String?
+  model                String?
+  modelProvider        String?
+  ratio                String?
+  resolution           String?
+  imageSize            String?
+  videoDuration        String?
+  generationSettings   Json?
+  previewMeta          Json?
+  originalFileName     String?
+  systemName           String?
+  initialName          String?
+  initialCategory      String?
+  creditLedgerId       String?
+  costSource           String?
+  chargedUsd           Float    @default(0)
+  chargedCny           Float    @default(0)
+  chargedCredits       Float    @default(0)
+  promptTokens         Float    @default(0)
+  completionTokens     Float    @default(0)
+  totalTokens          Float    @default(0)
+  costShareCount       Int?
+  costShareIndex       Int?
+  requestId            String?
+  conversationId       String?
+  messageId            String?
+  workflowId           String?
+  workflowNodeId       String?
+  legacyAssetId        String?
+  legacyLibrarySource  String?
+  archivedAt           DateTime?
+  archiveReason        String?
+  duplicateOfMediaAssetId String?
+  firstSeenAt          DateTime @default(now())
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userStates           UserAssetState[]
+
+  @@unique([userId, normalizedUrl])
+  @@index([userId, mediaType, createdAt])
+  @@index([userId, sourceKind, createdAt])
+  @@index([creditLedgerId])
+  @@index([requestId])
+  @@index([conversationId])
+  @@index([messageId])
+  @@index([workflowId])
+  @@index([userId, archivedAt])
+}
+
+model UserAssetState {
+  id                 String   @id @default(cuid())
+  userId             String
+  mediaAssetId       String
+  currentName        String?
+  currentCategory    String
+  originalCategory   String?
+  previousCategory   String?
+  userRenamed        Boolean  @default(false)
+  userRecategorized  Boolean  @default(false)
+  lockedCategory     Boolean  @default(false)
+  sortOrder          Int?
+  deletedAt          DateTime?
+  purgeAt            DateTime?
+  restoredAt         DateTime?
+  bytePlusAssetId    String?
+  bytePlusAssetGroupId String?
+  bytePlusAssetStatus String?
+  bytePlusAssetError String?
+  bytePlusAssetUpdatedAt DateTime?
+  hiddenAt           DateTime?
+  hiddenReason       String?
+  legacyAssetJson    Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaAsset         MediaAsset @relation(fields: [mediaAssetId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, mediaAssetId])
+  @@index([userId, currentCategory, deletedAt, sortOrder])
+  @@index([userId, deletedAt, updatedAt])
+  @@index([userId, hiddenAt])
+}
+
+model WorkspaceSession {
+  id            String   @id @default(cuid())
+  userId        String
+  sessionId     String
+  title         String
+  updatedAt     DateTime
+  messagesJson  Json
+  summaryJson   Json?
+  usageSummary  Json?
+  memorySummary Json?
+  deletedAt     DateTime?
+  createdAt     DateTime @default(now())
+  storedAt      DateTime @updatedAt
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sessionId])
+  @@index([userId, updatedAt])
+  @@index([userId, deletedAt, updatedAt])
+}
+
+model WorkspaceMessage {
+  id          String   @id @default(cuid())
+  userId      String
+  sessionId   String
+  messageId   String
+  role        String
+  content     String
+  createdAt   DateTime
+  messageJson Json
+  storedAt    DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sessionId, messageId])
+  @@index([userId, sessionId, createdAt])
+  @@index([userId, createdAt])
 }
 
 model EmailVerificationCode {

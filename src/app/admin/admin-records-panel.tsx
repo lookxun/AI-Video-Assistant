@@ -2,25 +2,63 @@
 
 import { Fragment, useMemo, useState } from "react";
 import { RiArrowDownSLine, RiArrowRightSLine, RiSearchLine } from "react-icons/ri";
-import { AdminHistoryDialog, AdminMediaDialog, DetailItem, SmallStat, UserAvatar, type AdminMediaItem, type AdminUserRow } from "./admin-users-panel";
+import { AdminHistoryDialog, AdminMediaDialog, DetailItem, SmallStat, type AdminMediaItem, type AdminUserRow } from "./admin-users-panel";
 import { CreditCategoryDialog, CreditFlowDialog, type AdminCreditCategoryDetail, type AdminCreditFlowItem, type AdminCreditUser } from "./admin-credits-panel";
 
 const PAGE_SIZE = 15;
+
+export type AdminRecordSummary = {
+  id: string;
+  email: string;
+  nickname: string | null;
+  avatarUrl: string | null;
+  conversationCount: number;
+  conversationDeletedCount: number;
+  imageGenerationCount: number;
+  imageGenerationDeletedCount: number;
+  videoGenerationCount: number;
+  videoGenerationDeletedCount: number;
+  uploadImageCount: number;
+  uploadImageDeletedCount: number;
+  uploadFileCount: number;
+  uploadFileDeletedCount: number;
+  latestRecordTs: number;
+};
+
+type AdminRecordDetail = {
+  user: AdminUserRow;
+  creditUser: AdminCreditUser;
+};
 
 function formatNumber(value: number) {
   return value.toLocaleString("en-US");
 }
 
-function generatedAssetImageCount(user: AdminUserRow) {
-  return user.assetMediaItems.filter((item) => !item.isUploadedAsset).length;
-}
-
 function conversationImageCount(user: AdminUserRow) {
-  return user.mediaItems.filter((item) => item.type === "image").length;
+  return user.mediaItems.filter((item) => item.type === "image" && !item.isUploadedAsset).length;
 }
 
-function assetUploadImageCount(user: AdminUserRow) {
-  return user.assetMediaItems.filter((item) => item.isUploadedAsset).length;
+function CountWithDeleted({ total, deleted }: { total: number; deleted: number }) {
+  return <span>{formatNumber(total)}{deleted > 0 ? <span className="ml-1 text-red-500">({formatNumber(deleted)})</span> : null}</span>;
+}
+
+function RecordUserAvatar({ user }: { user: AdminRecordSummary }) {
+  if (user.avatarUrl) {
+    return (
+      <div className="h-9 w-9 overflow-hidden rounded-full bg-[#f1f1f1]">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={user.avatarUrl} alt={user.nickname || user.email} className="h-full w-full object-cover" />
+      </div>
+    );
+  }
+
+  const initial = user.email.endsWith("@flashmuse.test") ? "?" : (user.nickname || user.email || "用").trim().slice(0, 1).toUpperCase();
+
+  return (
+    <div className="flex h-9 w-9 items-center justify-center rounded-full border border-[#dfe7f4] bg-[#edf4ff] text-[13px] font-semibold text-[#367cee]">
+      {initial}
+    </div>
+  );
 }
 
 function conversationUploadItems(creditUser: AdminCreditUser | undefined, kind: "image" | "file") {
@@ -100,15 +138,6 @@ function workspaceAssetGeneratedImageItems(user: AdminUserRow, creditUser: Admin
   return user.assetMediaItems.filter((item) => item.type === "image" && !item.isUploadedAsset).map((item, index) => mediaItemToFlowItem(item, index, creditLookup));
 }
 
-function latestRecordTime(user: AdminUserRow, creditUser: AdminCreditUser | undefined) {
-  const historyTimes = user.conversations.map((item) => item.updatedAtTs ?? 0);
-  const generatedImageTimes = [...user.mediaItems, ...user.assetMediaItems].filter((item) => item.type === "image" && !item.isUploadedAsset).map((item) => item.createdAtTs ?? 0);
-  const generatedVideoTimes = user.mediaItems.filter((item) => item.type === "video").map((item) => item.createdAtTs ?? 0);
-  const uploadImageTimes = [...conversationUploadItems(creditUser, "image"), ...assetUploadItems(creditUser)].map((item) => item.createdAtTs);
-  const uploadFileTimes = conversationUploadItems(creditUser, "file").map((item) => item.createdAtTs);
-  return Math.max(0, ...historyTimes, ...generatedImageTimes, ...generatedVideoTimes, ...uploadImageTimes, ...uploadFileTimes);
-}
-
 function makeUploadCategories(creditUser: AdminCreditUser | undefined) {
   return [
     makeUploadCategory("conversation-upload-images", "对话流上传图片列表", conversationUploadItems(creditUser, "image"))[0],
@@ -125,10 +154,13 @@ function makeGeneratedCategories(user: AdminUserRow, creditUser: AdminCreditUser
   ];
 }
 
-export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]; creditRows: AdminCreditUser[] }) {
+export function AdminRecordsPanel({ summaries }: { summaries: AdminRecordSummary[] }) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [expandedUserIds, setExpandedUserIds] = useState<Set<string>>(() => new Set());
+  const [detailsByUserId, setDetailsByUserId] = useState<Record<string, AdminRecordDetail>>({});
+  const [loadingUserIds, setLoadingUserIds] = useState<Set<string>>(() => new Set());
+  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
   const [historyUser, setHistoryUser] = useState<AdminUserRow | null>(null);
   const [mediaDialog, setMediaDialog] = useState<{ user: AdminUserRow; mediaType: "image" | "upload_image" | "video" | "asset_image" } | null>(null);
   const [creditFlowUser, setCreditFlowUser] = useState<AdminCreditUser | null>(null);
@@ -137,27 +169,12 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
   const [generatedListDialog, setGeneratedListDialog] = useState<{ user: AdminCreditUser; categories: AdminCreditCategoryDetail[]; initialCategoryId: string } | null>(null);
   const [uploadDialog, setUploadDialog] = useState<{ user: AdminCreditUser; categories: AdminCreditCategoryDetail[]; initialCategoryId: string } | null>(null);
 
-  const creditUserMap = useMemo(() => new Map(creditRows.map((row) => [row.id, row])), [creditRows]);
-  const rows = useMemo(() => users.map((user) => {
-    const creditUser = creditUserMap.get(user.id);
-    const conversationUploadImageCount = conversationUploadItems(creditUser, "image").length;
-    const conversationUploadFileCount = conversationUploadItems(creditUser, "file").length;
-    const assetUploadedImages = assetUploadImageCount(user);
-    return {
-      user,
-      creditUser,
-      imageGenerationCount: user.generatedImageCount + generatedAssetImageCount(user),
-      videoGenerationCount: user.generatedVideoCount,
-      uploadImageCount: conversationUploadImageCount + assetUploadedImages,
-      uploadFileCount: conversationUploadFileCount,
-      latestRecordTs: latestRecordTime(user, creditUser),
-    };
-  }).sort((left, right) => right.latestRecordTs - left.latestRecordTs), [creditUserMap, users]);
+  const rows = useMemo(() => summaries.slice().sort((left, right) => right.latestRecordTs - left.latestRecordTs), [summaries]);
 
   const filteredRows = useMemo(() => {
     const value = query.trim().toLowerCase();
     if (!value) return rows;
-    return rows.filter(({ user }) => `${user.id} ${user.email} ${user.nickname ?? ""}`.toLowerCase().includes(value));
+    return rows.filter((user) => `${user.id} ${user.email} ${user.nickname ?? ""}`.toLowerCase().includes(value));
   }, [query, rows]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
@@ -166,18 +183,47 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
   const rangeStart = filteredRows.length > 0 ? (safePage - 1) * PAGE_SIZE + 1 : 0;
   const rangeEnd = Math.min(safePage * PAGE_SIZE, filteredRows.length);
   const stats = {
-    conversations: users.reduce((sum, user) => sum + user.conversationCount, 0),
+    conversations: rows.reduce((sum, row) => sum + row.conversationCount, 0),
     images: rows.reduce((sum, row) => sum + row.imageGenerationCount, 0),
     videos: rows.reduce((sum, row) => sum + row.videoGenerationCount, 0),
     uploadImages: rows.reduce((sum, row) => sum + row.uploadImageCount, 0),
     uploadFiles: rows.reduce((sum, row) => sum + row.uploadFileCount, 0),
   };
 
+  const loadUserDetail = async (userId: string) => {
+    if (detailsByUserId[userId] || loadingUserIds.has(userId)) return;
+    setLoadingUserIds((current) => new Set(current).add(userId));
+    setDetailErrors((current) => {
+      const next = { ...current };
+      delete next[userId];
+      return next;
+    });
+
+    try {
+      const response = await fetch(`/admin/api/records/user-detail?userId=${encodeURIComponent(userId)}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof payload.error === "string" ? payload.error : "加载失败");
+      setDetailsByUserId((current) => ({ ...current, [userId]: payload.detail as AdminRecordDetail }));
+    } catch (error) {
+      setDetailErrors((current) => ({ ...current, [userId]: error instanceof Error ? error.message : "加载失败" }));
+    } finally {
+      setLoadingUserIds((current) => {
+        const next = new Set(current);
+        next.delete(userId);
+        return next;
+      });
+    }
+  };
+
   const toggleExpandedUser = (userId: string) => {
     setExpandedUserIds((current) => {
       const next = new Set(current);
-      if (next.has(userId)) next.delete(userId);
-      else next.add(userId);
+      if (next.has(userId)) {
+        next.delete(userId);
+      } else {
+        next.add(userId);
+        void loadUserDetail(userId);
+      }
       return next;
     });
   };
@@ -225,41 +271,49 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
             </tr>
           </thead>
           <tbody>
-            {pagedRows.map(({ user, creditUser, imageGenerationCount, videoGenerationCount, uploadImageCount, uploadFileCount }) => {
-              const isExpanded = expandedUserIds.has(user.id);
-              const conversationImages = conversationUploadItems(creditUser, "image");
-              const conversationFiles = conversationUploadItems(creditUser, "file");
-              const assetImages = assetUploadItems(creditUser);
-              const generatedConversationImages = workspaceConversationGeneratedItems(user, creditUser, "image");
-              const generatedConversationVideos = workspaceConversationGeneratedItems(user, creditUser, "video");
-              const generatedAssetImages = workspaceAssetGeneratedImageItems(user, creditUser);
+            {pagedRows.map((summary) => {
+              const isExpanded = expandedUserIds.has(summary.id);
+              const detail = detailsByUserId[summary.id];
+              const user = detail?.user;
+              const creditUser = detail?.creditUser;
+              const isLoading = loadingUserIds.has(summary.id);
+              const error = detailErrors[summary.id];
+              const conversationImages = isExpanded ? conversationUploadItems(creditUser, "image") : [];
+              const conversationFiles = isExpanded ? conversationUploadItems(creditUser, "file") : [];
+              const assetImages = isExpanded ? assetUploadItems(creditUser) : [];
+              const generatedConversationImages = isExpanded && user ? workspaceConversationGeneratedItems(user, creditUser, "image") : [];
+              const generatedConversationVideos = isExpanded && user ? workspaceConversationGeneratedItems(user, creditUser, "video") : [];
+              const generatedAssetImages = isExpanded && user ? workspaceAssetGeneratedImageItems(user, creditUser) : [];
               return (
-                <Fragment key={user.id}>
-                  <tr onClick={() => toggleExpandedUser(user.id)} className="cursor-pointer text-[#333333] transition hover:bg-[#fcfcfc]">
+                <Fragment key={summary.id}>
+                  <tr onClick={() => toggleExpandedUser(summary.id)} className="cursor-pointer text-[#333333] transition hover:bg-[#fcfcfc]">
                     <td className="border-b border-[#f2f2f2] py-3 pl-6 pr-0 text-left">
-                      <button type="button" onClick={(event) => { event.stopPropagation(); toggleExpandedUser(user.id); }} className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[#777777] transition hover:bg-[#f2f2f2] hover:text-[#111111]" aria-label={isExpanded ? "收起生成记录" : "展开生成记录"}>
+                      <button type="button" onClick={(event) => { event.stopPropagation(); toggleExpandedUser(summary.id); }} className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[#777777] transition hover:bg-[#f2f2f2] hover:text-[#111111]" aria-label={isExpanded ? "收起生成记录" : "展开生成记录"}>
                         {isExpanded ? <RiArrowDownSLine className="h-5 w-5" /> : <RiArrowRightSLine className="h-5 w-5" />}
                       </button>
                     </td>
-                    <td className="border-b border-[#f2f2f2] py-3 pl-2 pr-3 font-mono text-[12px] text-[#777777]">{user.id}</td>
+                    <td className="border-b border-[#f2f2f2] py-3 pl-2 pr-3 font-mono text-[12px] text-[#777777]">{summary.id}</td>
                     <td className="border-b border-[#f2f2f2] px-4 py-3">
                       <div className="flex items-center gap-3">
-                        <UserAvatar user={user} />
+                        <RecordUserAvatar user={summary} />
                         <div className="min-w-0">
-                          <div className="truncate text-[13px] font-medium text-[#222222]">{user.email}</div>
-                          <div className="mt-0.5 truncate text-[12px] text-[#888888]">{user.nickname || "未设置昵称"}</div>
+                          <div className="truncate text-[13px] font-medium text-[#222222]">{summary.email}</div>
+                          <div className="mt-0.5 truncate text-[12px] text-[#888888]">{summary.nickname || "未设置昵称"}</div>
                         </div>
                       </div>
                     </td>
-                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium">{formatNumber(user.conversationCount)}</td>
-                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium">{formatNumber(imageGenerationCount)}</td>
-                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium">{formatNumber(videoGenerationCount)}</td>
-                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium">{formatNumber(uploadImageCount)}</td>
-                    <td className="border-b border-[#f2f2f2] py-3 pl-4 pr-8 text-left font-medium">{formatNumber(uploadFileCount)}</td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium"><CountWithDeleted total={summary.conversationCount} deleted={summary.conversationDeletedCount} /></td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium"><CountWithDeleted total={summary.imageGenerationCount} deleted={summary.imageGenerationDeletedCount} /></td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium"><CountWithDeleted total={summary.videoGenerationCount} deleted={summary.videoGenerationDeletedCount} /></td>
+                    <td className="border-b border-[#f2f2f2] px-4 py-3 text-left font-medium"><CountWithDeleted total={summary.uploadImageCount} deleted={summary.uploadImageDeletedCount} /></td>
+                    <td className="border-b border-[#f2f2f2] py-3 pl-4 pr-8 text-left font-medium"><CountWithDeleted total={summary.uploadFileCount} deleted={summary.uploadFileDeletedCount} /></td>
                   </tr>
                   {isExpanded ? (
                     <tr className="bg-[#fbfbfb]">
                       <td colSpan={8} className="border-b border-[#f2f2f2] px-4 py-4">
+                        {!detail ? (
+                          <div className="px-3 py-5 text-center text-[13px] text-[#888888]">{error ? `加载失败：${error}` : isLoading ? "正在加载详细记录..." : "正在准备详细记录..."}</div>
+                        ) : (
                         <div className="grid grid-cols-4 gap-[5px] px-1 py-1 text-left">
                           <div className="space-y-px">
                             <DetailItem label="对话流图片" value={formatNumber(conversationImageCount(user))} onClick={() => setMediaDialog({ user, mediaType: "image" })} />
@@ -285,6 +339,7 @@ export function AdminRecordsPanel({ users, creditRows }: { users: AdminUserRow[]
                             <DetailItem label="反推/优化提示词消耗积分详细" value={creditUser ? `-${formatNumber(creditUser.promptToolConsumedCredits)}` : "-0"} onClick={() => creditUser && setPromptToolUser(creditUser)} />
                           </div>
                         </div>
+                        )}
                       </td>
                     </tr>
                   ) : null}

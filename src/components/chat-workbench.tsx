@@ -94,8 +94,15 @@ import { ADVANCED_CHAT_MODEL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_V
 import { toUserErrorMessage } from "@/lib/error-message";
 import { useBodyScrollLock } from "@/components/use-body-scroll-lock";
 import { BytePlusIcon } from "@/components/byteplus-icon";
+import { WorkflowCanvas, type WorkflowCanvasState } from "@/components/workflow-canvas";
 import { getSupportedUploadTypeLabel, getUploadAcceptValue, getUploadKindFromFileName, getUploadRule } from "@/lib/upload-rules";
 import { sanitizeModelOutputText } from "@/lib/text-cleanup";
+
+const HISTORY_INITIAL_SESSION_COUNT = 10;
+const HISTORY_LOAD_MORE_COUNT = 5;
+const WORKFLOW_MODE_ENABLED = process.env.NEXT_PUBLIC_WORKFLOW_MODE_ENABLED
+  ? process.env.NEXT_PUBLIC_WORKFLOW_MODE_ENABLED === "true"
+  : process.env.NODE_ENV !== "production";
 
 type Message = {
   id: string;
@@ -184,6 +191,7 @@ type AssetItem = {
   systemName?: string;
   userName?: string;
   url: string;
+  thumbnailUrl?: string;
   posterUrl?: string;
   librarySource?: "asset_generation" | "conversation";
   sourcePrompt: string;
@@ -274,6 +282,7 @@ type PendingGeneration = {
   originalPrompt?: string;
   taskId?: string;
   referenceImages?: string[];
+  videoReferenceMode?: VideoReferenceMode;
   imageReferences?: ImageReference[];
   referenceHint?: string;
   preserveOriginalInput?: boolean;
@@ -288,6 +297,32 @@ type PendingGeneration = {
   needsIntentResolution?: boolean;
   sourceText?: string;
 };
+
+type VideoReferenceMode = "reference" | "first_frame" | "last_frame" | "first_last_frame";
+
+function getExplicitVideoReferenceMode(text: string, referenceCount: number): VideoReferenceMode | undefined {
+  if (referenceCount <= 0) return undefined;
+
+  const normalized = text.replace(/\s+/g, "");
+  if (/首尾帧|首帧.*尾帧|尾帧.*首帧|第一帧.*最后一帧|最后一帧.*第一帧|开头帧.*结尾帧|结尾帧.*开头帧/.test(normalized)) return "first_last_frame";
+  if (/尾帧|最后一帧|结尾帧|结束帧|收尾帧|作为结尾|当作结尾|做结尾|做尾帧|以这张图结束|以此图结束/.test(normalized)) return undefined;
+  if (/首帧|第一帧|开头帧|起始帧|开始帧|作为开头|当作开头|做开头|做首帧|从这张图开始|以这张图开始|用这张图开头/.test(normalized)) return "first_frame";
+
+  return undefined;
+}
+
+function getEffectiveBytePlusVideoReferenceItems<T>(items: T[] | undefined, mode?: VideoReferenceMode): T[] {
+  const safeItems = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (mode === "first_last_frame") return safeItems.slice(0, 2);
+  if (mode === "first_frame" || mode === "last_frame") return safeItems.slice(0, 1);
+  return safeItems.slice(0, 9);
+}
+
+function getBytePlusVideoReferenceLimitHint(mode?: VideoReferenceMode) {
+  if (mode === "first_last_frame") return "首尾帧模式只会使用前两张参考图";
+  if (mode === "first_frame") return "首帧模式只会使用第一张参考图";
+  return "普通参考图模式最多使用九张参考图";
+}
 
 type WorkMode = "general" | "agent" | "image" | "video";
 
@@ -329,6 +364,7 @@ type ModeMenuName = "mode";
 type ActivePanel = "chat" | "workflow" | "assets";
 type UserDialogTab = "profile" | "credits" | "security" | "settings";
 type WorkspaceStorageMode = "loading" | "user";
+type WorkspaceLoadStatus = "loading" | "retrying" | "loaded" | "failed";
 type UserLanguage = "简体中文" | "繁体中文";
 type AssetFilter = AssetType | "conversation_images" | "conversation_uploads" | "conversation_videos";
 type AssetCategoryTarget = UploadableImageAssetType | "conversation_image";
@@ -348,7 +384,10 @@ type WorkSession = {
   pendingRequests?: PendingGeneration[];
   usageSummary?: UsageSummary;
   memorySummary?: SessionMemorySummary;
+  deletedAt?: number;
   messagesLoaded?: boolean;
+  messagesHasMore?: boolean;
+  messagesBeforeCursor?: number;
 };
 
 type SessionMemorySummary = {
@@ -360,17 +399,23 @@ type SessionMemorySummary = {
 
 type WorkspaceStatePayload = {
   sessions?: WorkSession[];
+  sessionsHasMore?: boolean;
+  sessionsNextOffset?: number;
   nextConversationNumber?: number;
   activePanel?: ActivePanel;
   assetFilter?: AssetFilter;
   assetScrollTopByFilter?: Partial<Record<AssetFilter, number>>;
   workflowItems?: WorkflowItem[];
+  activeWorkflowId?: string;
   assetGenerateJobs?: AssetGenerateJob[];
   activeSessionId?: string;
   inputSettings?: StoredInputSettings | null;
   intentMemoryRules?: IntentMemoryRule[];
   feedbackLogs?: FeedbackLogEntry[];
   assets?: AssetItem[];
+  assetCounts?: Record<string, number>;
+  assetsHasMore?: boolean;
+  assetsNextOffset?: number;
 };
 
 type CurrentUserProfile = {
@@ -443,6 +488,7 @@ type WorkflowItem = {
   id: string;
   title: string;
   createdAt: number;
+  canvas?: WorkflowCanvasState;
 };
 
 type ApiError = string | { message?: string };
@@ -569,16 +615,28 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-async function fetchJsonWithRetry<T>(url: string, init?: RequestInit, attempts = 3) {
+const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
+
+async function fetchJsonWithRetry<T>(url: string, init?: RequestInit, attempts = 3, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    const externalSignal = init?.signal;
+    const abortFromExternalSignal = () => controller.abort();
+
     try {
-      const response = await fetch(url, init);
+      if (externalSignal?.aborted) controller.abort();
+      externalSignal?.addEventListener("abort", abortFromExternalSignal, { once: true });
+      const response = await fetch(url, { ...init, signal: controller.signal });
       const data = (await response.json().catch(() => ({}))) as T;
       if (response.ok || response.status === 401) return { response, data };
       lastError = new Error(`HTTP ${response.status}`);
     } catch (error) {
       lastError = error;
+    } finally {
+      window.clearTimeout(timeout);
+      externalSignal?.removeEventListener("abort", abortFromExternalSignal);
     }
     if (attempt < attempts - 1) await delay(600 * (attempt + 1));
   }
@@ -1020,7 +1078,8 @@ function HoverImagePreview({ src, alt, wrapperClassName = "inline-block", childr
   );
 }
 
-function getAssetCardImageUrl(asset: Pick<AssetItem, "url" | "posterUrl">) {
+function getAssetCardImageUrl(asset: Pick<AssetItem, "url" | "thumbnailUrl" | "posterUrl">) {
+  if (asset.thumbnailUrl) return getStaticMediaUrl(asset.thumbnailUrl, mediaThumbnailVersion) ?? asset.thumbnailUrl;
   const posterUrl = asset.posterUrl ?? getLocalVideoPosterUrl(asset.url);
   return posterUrl ? getMediaThumbnailUrl(posterUrl) : getMediaThumbnailUrl(asset.url);
 }
@@ -1945,11 +2004,10 @@ function UsageSummaryButton({ summary, mediaCounts }: { summary?: UsageSummary; 
         {hasUsage ? (
           <div className="space-y-0 whitespace-nowrap">
             <div>• Tk {safeSummary.totalTokens.toLocaleString("en-US")}</div>
+            <div>• <RiVipDiamondLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {safeSummary.credits.toLocaleString("en-US")}</div>
+            <div className="mx-2 my-1 h-px bg-[#8f8f8f]/40" aria-hidden="true" />
             <div>• <RiImageLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {imageCount.toLocaleString("en-US")}</div>
             <div>• <RiFilmLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {videoCount.toLocaleString("en-US")}</div>
-            <div>• <RiVipDiamondLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {safeSummary.credits.toLocaleString("en-US")}</div>
-            <div>• <RiMoneyDollarCircleLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {safeSummary.usd.toFixed(4)}</div>
-            <div>• <RiMoneyCnyCircleLine className="inline h-3.5 w-3.5 align-[-2px]" aria-hidden="true" /> {safeSummary.cny.toFixed(2)} 约</div>
           </div>
         ) : (
           <div className="whitespace-nowrap">暂无用量</div>
@@ -2837,11 +2895,16 @@ function keepSingleEmptySession(sessions: WorkSession[]) {
   let hasEmptySession = false;
 
   return sessions.filter((session) => {
+    if (session.deletedAt) return true;
     if (!isEmptySession(session)) return true;
     if (hasEmptySession) return false;
     hasEmptySession = true;
     return true;
   });
+}
+
+function isDeletedSession(session: Pick<WorkSession, "deletedAt">) {
+  return Boolean(session.deletedAt);
 }
 
 function getPersistableSessions(sessions: WorkSession[]) {
@@ -2947,7 +3010,7 @@ function getStoredWorkspaceUiState(): StoredWorkspaceUiState {
     const assetScrollTopByFilter = scrollRecord ? Object.fromEntries(Object.entries(scrollRecord).filter(([key, value]) => isAssetFilter(key) && typeof value === "number" && Number.isFinite(value))) as Partial<Record<AssetFilter, number>> : undefined;
 
     return {
-      activePanel: state.activePanel === "chat" || state.activePanel === "workflow" || state.activePanel === "assets" ? state.activePanel : undefined,
+      activePanel: state.activePanel === "workflow" && !WORKFLOW_MODE_ENABLED ? "chat" : state.activePanel === "chat" || state.activePanel === "workflow" || state.activePanel === "assets" ? state.activePanel : undefined,
       assetFilter: isAssetFilter(state.assetFilter) ? state.assetFilter : undefined,
       assetScrollTopByFilter,
     };
@@ -3271,6 +3334,16 @@ function isUploadedAsset(asset: Pick<AssetItem, "url" | "sourcePrompt">) {
 
 function isConversationUploadedAsset(asset: AssetItem) {
   return isConversationAsset(asset) && !isVideoAsset(asset) && isUploadedAssetUrl(asset.url);
+}
+
+function isAssetInFilter(asset: AssetItem, filter: AssetFilter) {
+  if (filter !== "trash" && (asset.type === "trash" || asset.deletedAt)) return false;
+  if (filter === "trash") return asset.type === "trash" || Boolean(asset.deletedAt);
+  if (filter === "conversation_images") return isConversationAsset(asset) && !isVideoAsset(asset) && !isUploadedAssetUrl(asset.url);
+  if (filter === "conversation_uploads") return isConversationUploadedAsset(asset);
+  if (filter === "conversation_videos") return isConversationAsset(asset) && isVideoAsset(asset);
+  if (assetGenerationTypes.includes(filter as UploadableImageAssetType)) return isAssetGenerationAsset(asset) && asset.type === filter;
+  return asset.type === filter;
 }
 
 function normalizeSessionCodesAndMediaNames(sessions: WorkSession[], storedNextConversationNumber?: number) {
@@ -3961,6 +4034,10 @@ function getAssetCountdownText(asset: Pick<AssetItem, "purgeAt">, now: number) {
   return `${days} 天后删除`;
 }
 
+function isAssetTrashExpired(asset: Pick<AssetItem, "type" | "purgeAt">, now: number) {
+  return asset.type === "trash" && Boolean(asset.purgeAt && asset.purgeAt <= now);
+}
+
 function getRestoreAssetType(asset: AssetItem): AssetType {
   if (asset.previousType && asset.previousType !== "trash") return asset.previousType;
   if (isVideoAsset(asset)) return "shot_video";
@@ -4240,6 +4317,12 @@ function sanitizeMessageContentForDisplay(content: string) {
     .replace(/^```[\w-]*\s*$/gm, "")
     .replace(/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/gm, "")
     .trim();
+}
+
+const BYTEPLUS_AUTO_REVIEW_NOTICE = "系统检测到真人图片，需要审核才能生成视频，此次视频生成任务会延长时间，请稍候....";
+
+function isBytePlusAutoReviewNotice(content: string) {
+  return content === BYTEPLUS_AUTO_REVIEW_NOTICE;
 }
 
 function isAgentActivationMessage(content: string) {
@@ -4999,14 +5082,9 @@ function AssetManagementPanel({
     onToggleActionMenu(assetId);
   };
   const visibleAssets = useMemo(() => assets.filter((asset) => {
-    if (assetFilter !== "trash" && (asset.type === "trash" || asset.deletedAt)) return false;
-    if (assetFilter === "trash") return asset.type === "trash" || Boolean(asset.deletedAt);
-    if (assetFilter === "conversation_images") return isConversationAsset(asset) && !isVideoAsset(asset) && !isUploadedAssetUrl(asset.url);
-    if (assetFilter === "conversation_uploads") return isConversationUploadedAsset(asset);
-    if (assetFilter === "conversation_videos") return isConversationAsset(asset) && isVideoAsset(asset);
-    if (assetGenerationTypes.includes(assetFilter as UploadableImageAssetType)) return isAssetGenerationAsset(asset) && asset.type === assetFilter;
-    return true;
-  }), [assets, assetFilter]);
+    if (isAssetTrashExpired(asset, now)) return false;
+    return isAssetInFilter(asset, assetFilter);
+  }), [assets, assetFilter, now]);
   const visibleTypes: AssetType[] = assetFilter === "conversation_images" || assetFilter === "conversation_uploads" || assetFilter === "conversation_videos" ? assetTypeOrder : [assetFilter];
   const title = assetFilter === "conversation_images" ? "生成图片" : assetFilter === "conversation_uploads" ? "上传图片" : assetFilter === "conversation_videos" ? "生成视频" : assetTypeLabels[assetFilter];
   const canUploadImages = assetGenerationTypes.includes(assetFilter as UploadableImageAssetType);
@@ -5017,8 +5095,8 @@ function AssetManagementPanel({
       ? "对话流生成的图片会出现在这里。"
       : assetFilter === "conversation_videos"
         ? "对话流生成的视频会出现在这里。"
-        : assetFilter === "trash"
-          ? "删除的资产会出现在这里。"
+          : assetFilter === "trash"
+            ? "删除的资产会出现在这里。"
           : "还没有生成资产。生成角色图、场景图或分镜图后会自动出现在这里。";
   const currentGenerateType = canGenerateImages ? assetFilter as AssetGenerationImageType : undefined;
   const CurrentGenerateIcon = currentGenerateType ? assetTypeIcons[currentGenerateType] : RiImageAddLine;
@@ -6055,12 +6133,18 @@ function getDownloadName(asset: AssetItem) {
 export function ChatWorkbench() {
   const workspaceInstanceIdRef = useRef(createClientId());
   const workspaceInstanceClaimedRef = useRef(false);
+  const initialWorkspaceUiStateRef = useRef<StoredWorkspaceUiState | null>(null);
+  if (initialWorkspaceUiStateRef.current === null) initialWorkspaceUiStateRef.current = getStoredWorkspaceUiState();
   const [mode, setMode] = useState<WorkMode>("agent");
   const [agentModelTier, setAgentModelTier] = useState<AgentModelTier>("normal");
   const selectedModel: ModelName = agentModelTier === "advanced" ? ADVANCED_CHAT_MODEL : DEFAULT_CHAT_MODEL;
-  const [activePanel, setActivePanel] = useState<ActivePanel>("chat");
-  const [assetFilter, setAssetFilter] = useState<AssetFilter>("character_image");
-  const [assetScrollTopByFilter, setAssetScrollTopByFilter] = useState<Partial<Record<AssetFilter, number>>>({});
+  const [activePanel, setActivePanel] = useState<ActivePanel>(() => initialWorkspaceUiStateRef.current?.activePanel ?? "chat");
+  const [assetFilter, setAssetFilter] = useState<AssetFilter>(() => initialWorkspaceUiStateRef.current?.assetFilter ?? "character_image");
+  const [assetsLoadStatus, setAssetsLoadStatus] = useState<"idle" | "loading" | "loaded" | "failed">("idle");
+  const [assetCounts, setAssetCounts] = useState<Record<string, number>>({});
+  const [assetsHasMore, setAssetsHasMore] = useState(false);
+  const [assetsNextOffset, setAssetsNextOffset] = useState(0);
+  const [assetScrollTopByFilter, setAssetScrollTopByFilter] = useState<Partial<Record<AssetFilter, number>>>(() => initialWorkspaceUiStateRef.current?.assetScrollTopByFilter ?? {});
   const assetScrollTopByFilterRef = useRef<Partial<Record<AssetFilter, number>>>({});
   const previousAssetFilterRef = useRef<AssetFilter>(assetFilter);
   const [selectedRatios, setSelectedRatios] = useState<Record<WorkMode, string>>({
@@ -6111,13 +6195,23 @@ export function ChatWorkbench() {
   const [sessions, setSessions] = useState<WorkSession[]>([]);
   const [nextConversationNumber, setNextConversationNumber] = useState(1);
   const sessionsRef = useRef<WorkSession[]>([]);
+  const [historyVisibleSessionCount, setHistoryVisibleSessionCount] = useState(HISTORY_INITIAL_SESSION_COUNT);
+  const [historyHasMoreSessions, setHistoryHasMoreSessions] = useState(false);
+  const [historyNextOffset, setHistoryNextOffset] = useState(HISTORY_INITIAL_SESSION_COUNT);
+  const [isHistoryLoadingMore, setIsHistoryLoadingMore] = useState(false);
+  const [workspaceLoadStatus, setWorkspaceLoadStatus] = useState<WorkspaceLoadStatus>("loading");
+  const [workspaceLoadRetryKey, setWorkspaceLoadRetryKey] = useState(0);
   const [workflowItems, setWorkflowItems] = useState<WorkflowItem[]>([]);
+  const [activeWorkflowId, setActiveWorkflowId] = useState("");
   const [activeSessionId, setActiveSessionId] = useState("");
   const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(() => new Set());
+  const [loadingOlderMessageSessionIds, setLoadingOlderMessageSessionIds] = useState<Set<string>>(() => new Set());
   const [loadingSessionStartedAt, setLoadingSessionStartedAt] = useState<Record<string, number>>({});
   const [pendingHomePrompt, setPendingHomePrompt] = useState<{ sessionId: string; prompt: string } | null>(null);
   const [openWorkflowMenuId, setOpenWorkflowMenuId] = useState("");
   const [openSessionMenuId, setOpenSessionMenuId] = useState("");
+  const [isCollapsedHistoryMenuOpen, setIsCollapsedHistoryMenuOpen] = useState(false);
+  const [collapsedActionMenuPosition, setCollapsedActionMenuPosition] = useState<{ left: number; top: number } | null>(null);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<WorkspaceThemeMode>(getStoredWorkspaceThemeMode);
@@ -6553,7 +6647,8 @@ export function ChatWorkbench() {
     }
   }, []);
 
-  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0];
+  const activeSession = sessions.find((session) => session.id === activeSessionId && !isDeletedSession(session)) ?? sessions.find((session) => !isDeletedSession(session)) ?? sessions[0];
+  const activeWorkflow = workflowItems.find((item) => item.id === activeWorkflowId) ?? workflowItems[0];
   const messages = activeSession?.messages ?? initialMessages;
   const activeInput = activeSession?.draftInput ?? "";
   const activeInputLength = Array.from(activeInput).length;
@@ -6652,13 +6747,8 @@ export function ChatWorkbench() {
     const isAssetLibraryPreview = Boolean(previewAsset && assets.some((asset) => asset.id === previewAsset.id));
     if (isAssetLibraryPreview) {
       return assets.filter((asset) => {
-        if (assetFilter !== "trash" && (asset.type === "trash" || asset.deletedAt)) return false;
-        if (assetFilter === "trash") return asset.type === "trash" || Boolean(asset.deletedAt);
-        if (assetFilter === "conversation_images") return isConversationAsset(asset) && !isVideoAsset(asset) && !isUploadedAssetUrl(asset.url);
-        if (assetFilter === "conversation_uploads") return isConversationUploadedAsset(asset);
-        if (assetFilter === "conversation_videos") return isConversationAsset(asset) && isVideoAsset(asset);
-        if (assetGenerationTypes.includes(assetFilter as UploadableImageAssetType)) return isAssetGenerationAsset(asset) && asset.type === assetFilter;
-        return true;
+        if (isAssetTrashExpired(asset, timerNow)) return false;
+        return isAssetInFilter(asset, assetFilter);
       }).map(getCanonicalPreviewAsset);
     }
 
@@ -6693,13 +6783,13 @@ export function ChatWorkbench() {
 
       return [...imageItems, ...videoItem];
     });
-  }, [activeSessionIdValue, assetFilter, assets, getCanonicalMediaName, getCanonicalPreviewAsset, messages, previewAsset]);
+  }, [activeSessionIdValue, assetFilter, assets, getCanonicalMediaName, getCanonicalPreviewAsset, messages, previewAsset, timerNow]);
   const enrichAssetPreviewMeta = getCanonicalPreviewAsset;
   const previewAssetId = previewAsset?.id;
   const previewDisplayMeta = previewAsset ? enrichAssetPreviewMeta(previewAsset).previewMeta : undefined;
   const previewIsUploadedAsset = previewAsset ? isUploadedAsset(previewAsset) : false;
   const isPreviewDownloadReady = Boolean(previewAsset && !isRemoteMediaUrl(previewAsset.url));
-  const previewSourceLabel = previewAsset && !previewDisplayMeta ? previewAsset.sourcePrompt === "资产库上传" || previewAsset.librarySource === "asset_generation" ? "资产库上传" : isConversationAsset(previewAsset) ? "对话流上传" : "" : "";
+  const previewSourceLabel = previewAsset && !previewDisplayMeta ? previewAsset.promptSource === "upload" || previewAsset.sourcePrompt === "资产库上传" ? previewAsset.librarySource === "asset_generation" ? "资产库上传" : "对话流上传" : "" : "";
   const previewHasReversedUploadPrompt = Boolean(previewAsset?.sourcePrompt.trim()) && previewAsset?.promptSource === "reverse" && previewIsUploadedAsset;
   const previewHasUsablePrompt = Boolean(previewAsset?.sourcePrompt.trim()) && previewAsset?.sourcePrompt !== "资产库上传" && (!previewIsUploadedAsset || previewHasReversedUploadPrompt);
   const previewPromptText = previewHasUsablePrompt ? previewAsset?.sourcePrompt.trim() ?? "" : "";
@@ -7423,6 +7513,11 @@ export function ChatWorkbench() {
     if (chargedCredits > 0) addSessionUsage(sessionId, { credits: chargedCredits });
   }, [addSessionUsage]);
 
+  const applyWorkflowCreditResult = useCallback((credit?: { skipped?: boolean; balance?: number }) => {
+    if (!credit || credit.skipped) return;
+    if (typeof credit.balance === "number") setCurrentUserCredits(Math.max(0, Math.floor(credit.balance)));
+  }, []);
+
   const ensureSessionMemorySummary = useCallback(async (session: WorkSession, model: ModelName, requestId: string) => {
     if (!shouldUpdateMemorySummary(session)) return session;
 
@@ -7517,6 +7612,27 @@ export function ChatWorkbench() {
   const applyBytePlusAssetUpdate = useCallback((assetId: string, patch: Partial<AssetItem>) => {
     setPreviewAsset((current) => current && current.id === assetId ? { ...current, ...patch } : current);
     setAssets((current) => current.map((asset) => asset.id === assetId ? { ...asset, ...patch } : asset));
+  }, []);
+
+  const applyBytePlusAssetUpdatesByUrl = useCallback((updates: Array<{ url?: string; assetId?: string; groupId?: string; status?: AssetItem["bytePlusAssetStatus"]; error?: string }>) => {
+    const updateByUrl = new Map(updates.filter((item) => item.url && item.assetId).map((item) => [normalizeMediaUrlForMatch(item.url ?? ""), item]));
+    if (updateByUrl.size === 0) return;
+
+    const patchAsset = (asset: AssetItem) => {
+      const update = updateByUrl.get(normalizeMediaUrlForMatch(asset.url));
+      if (!update?.assetId) return asset;
+      return {
+        ...asset,
+        bytePlusAssetId: update.assetId,
+        bytePlusAssetGroupId: update.groupId,
+        bytePlusAssetStatus: update.status ?? "Active",
+        bytePlusAssetError: update.error,
+        bytePlusAssetUpdatedAt: Date.now(),
+      };
+    };
+
+    setPreviewAsset((current) => current ? patchAsset(current) : current);
+    setAssets((current) => current.map(patchAsset));
   }, []);
 
   const submitBytePlusAsset = useCallback(async () => {
@@ -7652,6 +7768,13 @@ export function ChatWorkbench() {
     sessionsRef.current = sessions;
   }, [sessions]);
 
+  useEffect(() => {
+    if (!activeSessionId) return;
+    const activeIndex = sessions.findIndex((session) => session.id === activeSessionId);
+    if (activeIndex < historyVisibleSessionCount) return;
+    setHistoryVisibleSessionCount(Math.max(HISTORY_INITIAL_SESSION_COUNT, activeIndex + 1));
+  }, [activeSessionId, historyVisibleSessionCount, sessions]);
+
   const loadSessionDetails = useCallback(async (sessionId: string) => {
     const targetSession = sessionsRef.current.find((session) => session.id === sessionId);
     if (!targetSession || targetSession.messagesLoaded !== false || loadingSessionIds.has(sessionId)) return;
@@ -7679,10 +7802,113 @@ export function ChatWorkbench() {
     }
   }, [loadingSessionIds, showInputTip]);
 
+  const loadOlderMessages = useCallback(async (sessionId: string) => {
+    const targetSession = sessionsRef.current.find((session) => session.id === sessionId);
+    if (!targetSession?.messagesHasMore || !targetSession.messagesBeforeCursor || loadingOlderMessageSessionIds.has(sessionId)) return;
+
+    setLoadingOlderMessageSessionIds((current) => new Set(current).add(sessionId));
+    try {
+      const response = await fetch(`/api/workspace-session?id=${encodeURIComponent(sessionId)}&historyOnly=1&before=${targetSession.messagesBeforeCursor}`, { cache: "no-store" });
+      const data = await readJson<{ messages?: Message[]; messagesHasMore?: boolean; messagesBeforeCursor?: number }>(response);
+      const olderMessages = Array.isArray(data.messages) ? data.messages : [];
+      setSessions((current) => current.map((session) => {
+        if (session.id !== sessionId) return session;
+        const existingIds = new Set(session.messages.map((message) => message.id));
+        const nextOlderMessages = olderMessages.filter((message) => !existingIds.has(message.id));
+        return {
+          ...session,
+          messages: [...nextOlderMessages, ...session.messages],
+          messagesHasMore: Boolean(data.messagesHasMore),
+          messagesBeforeCursor: data.messagesBeforeCursor,
+        };
+      }));
+    } catch {
+      showInputTip("更早消息加载失败，请稍后重试");
+    } finally {
+      setLoadingOlderMessageSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
+    }
+  }, [loadingOlderMessageSessionIds, showInputTip]);
+
+  const loadMoreHistorySessions = useCallback(async () => {
+    if (!historyHasMoreSessions || isHistoryLoadingMore) return;
+
+    setIsHistoryLoadingMore(true);
+    try {
+      const { data } = await fetchJsonWithRetry<{ state?: WorkspaceStatePayload | null }>(`/api/workspace-state?summary=1&historyOnly=1&offset=${historyNextOffset}&limit=${HISTORY_LOAD_MORE_COUNT}`, { cache: "no-store" });
+      const incomingSessions = Array.isArray(data.state?.sessions) ? data.state.sessions.map((session) => replaceSessionMediaUrls(session, legacyMediaUrlReplacements, {})) : [];
+      const existingIds = new Set(sessionsRef.current.map((session) => session.id));
+      const nextItems = incomingSessions.filter((session) => {
+        if (existingIds.has(session.id)) return false;
+        existingIds.add(session.id);
+        return true;
+      });
+      setSessions((current) => {
+        return nextItems.length > 0 ? [...current, ...nextItems] : current;
+      });
+      setHistoryHasMoreSessions(Boolean(data.state?.sessionsHasMore));
+      setHistoryNextOffset(Math.floor(Number(data.state?.sessionsNextOffset ?? historyNextOffset)));
+      setHistoryVisibleSessionCount((count) => Math.max(count, count + nextItems.length));
+    } catch {
+      showInputTip("历史对话加载失败，请稍后重试");
+    } finally {
+      setIsHistoryLoadingMore(false);
+    }
+  }, [historyHasMoreSessions, historyNextOffset, isHistoryLoadingMore, showInputTip]);
+
+  const loadWorkspaceAssets = useCallback(async (force = false, filter: AssetFilter = assetFilter, offset = 0) => {
+    const hasFilterAssets = assets.some((asset) => isAssetInFilter(asset, filter));
+    if (assetsLoadStatus === "loading" || (!force && offset === 0 && assetsLoadStatus === "loaded" && hasFilterAssets)) return;
+    setAssetsLoadStatus("loading");
+    try {
+      const { response, data } = await fetchJsonWithRetry<{ state?: WorkspaceStatePayload | null }>(`/api/workspace-state?assetsOnly=1&assetFilter=${encodeURIComponent(filter)}&assetOffset=${offset}&assetLimit=60`, { cache: "no-store" }, 2, 45_000);
+      if (response.status === 401) {
+        window.location.replace("/");
+        return;
+      }
+      const state = data.state ?? {};
+      const nextAssets = Array.isArray(state.assets)
+        ? applyAssetGenerationSystemNames(applySessionMediaSystemNamesToAssets(normalizeStoredAssets(state.assets).map((asset) => replaceAssetMediaUrls(asset, legacyMediaUrlReplacements)), sessionsRef.current))
+        : [];
+      const nextAssetGenerateJobs = Array.isArray(state.assetGenerateJobs) ? normalizeStoredAssetGenerateJobs(state.assetGenerateJobs).map((job) => replaceAssetGenerateJobMediaUrls(job, legacyMediaUrlReplacements, {})) : [];
+      setAssets((current) => {
+        const kept = offset > 0 ? current : current.filter((asset) => !isAssetInFilter(asset, filter));
+        const byId = new Map(kept.map((asset) => [asset.id, asset]));
+        nextAssets.forEach((asset) => byId.set(asset.id, asset));
+        return Array.from(byId.values());
+      });
+      if (state.assetCounts && typeof state.assetCounts === "object") setAssetCounts(state.assetCounts);
+      setAssetsHasMore(Boolean(state.assetsHasMore));
+      setAssetsNextOffset(Math.floor(Number(state.assetsNextOffset ?? nextAssets.length)));
+      setAssetRenderLimit((current) => Math.max(current, offset + nextAssets.length, ASSET_RENDER_PAGE_SIZE));
+      setAssetGenerateJobs(nextAssetGenerateJobs);
+      setAssetsLoadStatus("loaded");
+    } catch {
+      if (assets.some((asset) => isAssetInFilter(asset, filter))) {
+        setAssetsLoadStatus("loaded");
+        showInputTip("资产库刷新失败，已显示上次加载内容");
+        return;
+      }
+      setAssetsLoadStatus("failed");
+      showInputTip("资产库加载失败，请稍后重试");
+    }
+  }, [assetFilter, assets, assetsLoadStatus, showInputTip]);
+
   useEffect(() => {
+    if (!isLoaded || workspaceStorageMode !== "user" || workspaceLoadStatus !== "loaded") return;
+    if (activePanel !== "assets") return;
+    if (assetsLoadStatus === "idle" || assetsLoadStatus === "failed") void loadWorkspaceAssets();
+  }, [activePanel, assetsLoadStatus, isLoaded, loadWorkspaceAssets, workspaceLoadStatus, workspaceStorageMode]);
+
+  useEffect(() => {
+    let cancelled = false;
     const timer = window.setTimeout(() => {
       void (async () => {
         setWorkspaceSite(getCurrentWorkspaceSite(window.location.hostname));
+        setWorkspaceLoadStatus("loading");
 
         const applyInputSettings = (parsedInputSettings: StoredInputSettings | null | undefined) => {
           if (!parsedInputSettings) return;
@@ -7726,27 +7952,36 @@ export function ChatWorkbench() {
           const normalizedWorkspace = normalizeSessionCodesAndMediaNames(getPersistableSessions(savedSessions), state.nextConversationNumber);
           const nextSessions = normalizedWorkspace.sessions.map((session) => replaceSessionMediaUrls(session, legacyMediaUrlReplacements, {}));
           const nextWorkflows = Array.isArray(state.workflowItems) ? state.workflowItems.filter((item) => item && typeof item.id === "string" && typeof item.title === "string") : [];
+          const nextActiveWorkflowId = state.activeWorkflowId && nextWorkflows.some((item) => item.id === state.activeWorkflowId) ? state.activeWorkflowId : nextWorkflows[0]?.id ?? "";
           const nextActiveSessionId = state.activeSessionId && nextSessions.some((session) => session.id === state.activeSessionId) ? state.activeSessionId : nextSessions[0].id;
-          const savedAssets = Array.isArray(state.assets) ? applyAssetGenerationSystemNames(applySessionMediaSystemNamesToAssets(normalizeStoredAssets(state.assets).map((asset) => replaceAssetMediaUrls(asset, legacyMediaUrlReplacements)), nextSessions)) : [];
-          const savedAssetGenerateJobs = normalizeStoredAssetGenerateJobs(state.assetGenerateJobs).map((job) => replaceAssetGenerateJobMediaUrls(job, legacyMediaUrlReplacements, {}));
+          const savedAssets = Array.isArray(state.assets) ? applyAssetGenerationSystemNames(applySessionMediaSystemNamesToAssets(normalizeStoredAssets(state.assets).map((asset) => replaceAssetMediaUrls(asset, legacyMediaUrlReplacements)), nextSessions)) : undefined;
+          const savedAssetGenerateJobs = Array.isArray(state.assetGenerateJobs) ? normalizeStoredAssetGenerateJobs(state.assetGenerateJobs).map((job) => replaceAssetGenerateJobMediaUrls(job, legacyMediaUrlReplacements, {})) : undefined;
 
           setWorkspaceStorageMode(storageMode);
           applyInputSettings(state.inputSettings);
-          const nextActivePanel = uiState.activePanel ?? (state.activePanel === "chat" || state.activePanel === "workflow" || state.activePanel === "assets" ? state.activePanel : undefined);
+          const storedActivePanel = state.activePanel === "workflow" && !WORKFLOW_MODE_ENABLED ? "chat" : state.activePanel;
+          const nextActivePanel = uiState.activePanel ?? (storedActivePanel === "chat" || storedActivePanel === "workflow" || storedActivePanel === "assets" ? storedActivePanel : undefined);
           const nextAssetFilter = uiState.assetFilter ?? (isAssetFilter(state.assetFilter) ? state.assetFilter : undefined);
           const nextAssetScrollTopByFilter = uiState.assetScrollTopByFilter ?? state.assetScrollTopByFilter;
           if (nextActivePanel) setActivePanel(nextActivePanel);
           if (nextAssetFilter) setAssetFilter(nextAssetFilter);
           if (nextAssetScrollTopByFilter && typeof nextAssetScrollTopByFilter === "object") setAssetScrollTopByFilter(nextAssetScrollTopByFilter);
           setSessions(nextSessions);
+          setHistoryHasMoreSessions(Boolean(state.sessionsHasMore));
+          setHistoryNextOffset(Math.floor(Number(state.sessionsNextOffset ?? nextSessions.length)));
+          setHistoryVisibleSessionCount(Math.max(HISTORY_INITIAL_SESSION_COUNT, nextSessions.length));
           setNextConversationNumber(normalizedWorkspace.nextConversationNumber);
           setWorkflowItems(nextWorkflows);
+          setActiveWorkflowId(nextActiveWorkflowId);
           setActiveSessionId(nextActiveSessionId);
           setCompletedTypingMessageIds(new Set(getAssistantMessageIds(nextSessions)));
           setIntentMemoryRules(Array.isArray(state.intentMemoryRules) ? state.intentMemoryRules.slice(0, MAX_INTENT_MEMORY_RULES) : []);
           setFeedbackLogs(Array.isArray(state.feedbackLogs) ? state.feedbackLogs.slice(0, MAX_FEEDBACK_LOGS) : []);
-          setAssets(extractAssetsFromSessions(nextSessions, savedAssets));
-          setAssetGenerateJobs(savedAssetGenerateJobs);
+          if (savedAssets) {
+            setAssets(extractAssetsFromSessions(nextSessions, savedAssets));
+            setAssetsLoadStatus("loaded");
+          }
+          if (savedAssetGenerateJobs) setAssetGenerateJobs(savedAssetGenerateJobs);
         };
 
         try {
@@ -7760,22 +7995,41 @@ export function ChatWorkbench() {
           if (typeof meData.user?.email !== "string") return;
 
           applyCurrentUserProfile(meData.user);
-          try {
-            const { data: workspaceData } = await fetchJsonWithRetry<{ state?: WorkspaceStatePayload | null }>("/api/workspace-state?summary=1", { cache: "no-store" });
-            applyWorkspaceState(workspaceData.state ?? {}, "user");
-          } catch (error) {
-            console.warn("用户工作区加载失败，保留当前页面等待刷新", error);
+          let workspaceLoaded = false;
+          let workspaceLoadError: unknown;
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            if (cancelled) return;
+            setWorkspaceLoadStatus(attempt === 0 ? "loading" : "retrying");
+            try {
+              const { data: workspaceData } = await fetchJsonWithRetry<{ state?: WorkspaceStatePayload | null }>("/api/workspace-state?summary=1&panel=chat", { cache: "no-store" }, 1, 30_000);
+              if (cancelled) return;
+              applyWorkspaceState(workspaceData.state ?? {}, "user");
+              setWorkspaceLoadStatus("loaded");
+              workspaceLoaded = true;
+              break;
+            } catch (error) {
+              workspaceLoadError = error;
+              if (attempt < 4) await delay(Math.min(4_000, 1_200 * (attempt + 1)));
+            }
+          }
+          if (!workspaceLoaded) {
+            console.warn("用户工作区加载失败，等待用户重试", workspaceLoadError);
+            if (!cancelled) setWorkspaceLoadStatus("failed");
           }
         } catch (error) {
           console.warn("登录状态检查失败，保留当前页面等待重试", error);
+          if (!cancelled) setWorkspaceLoadStatus("failed");
         } finally {
-          setIsLoaded(true);
+          if (!cancelled) setIsLoaded(true);
         }
       })();
     }, 0);
 
-    return () => window.clearTimeout(timer);
-  }, [applyCurrentUserProfile]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [applyCurrentUserProfile, workspaceLoadRetryKey]);
 
   useEffect(() => {
     if (!isLoaded || workspaceStorageMode !== "user") return;
@@ -7981,6 +8235,7 @@ export function ChatWorkbench() {
 
   useEffect(() => {
     if (!isLoaded || workspaceStorageMode !== "user") return;
+    if (workspaceLoadStatus !== "loaded") return;
     if (workspaceSaveTimerRef.current !== null) window.clearTimeout(workspaceSaveTimerRef.current);
 
     const payload: WorkspaceStatePayload = {
@@ -7990,7 +8245,7 @@ export function ChatWorkbench() {
       assetFilter,
       assetScrollTopByFilter,
       workflowItems,
-      assetGenerateJobs: getPersistableAssetGenerateJobs(assetGenerateJobs),
+      activeWorkflowId,
       activeSessionId,
       inputSettings: {
         mode,
@@ -8004,8 +8259,9 @@ export function ChatWorkbench() {
       },
       intentMemoryRules: intentMemoryRules.slice(0, MAX_INTENT_MEMORY_RULES),
       feedbackLogs: feedbackLogs.slice(0, MAX_FEEDBACK_LOGS),
-      assets,
     };
+    if (assetsLoadStatus === "loaded" || assetGenerateJobs.length > 0) payload.assetGenerateJobs = getPersistableAssetGenerateJobs(assetGenerateJobs);
+    if (assetsLoadStatus === "loaded" || assets.length > 0) payload.assets = assets;
 
     workspaceSaveTimerRef.current = window.setTimeout(() => {
       fetch("/api/workspace-state", {
@@ -8018,7 +8274,7 @@ export function ChatWorkbench() {
     return () => {
       if (workspaceSaveTimerRef.current !== null) window.clearTimeout(workspaceSaveTimerRef.current);
     };
-  }, [activePanel, activeSessionId, agentModelTier, assetFilter, assetGenerateJobs, assetScrollTopByFilter, assets, feedbackLogs, intentMemoryRules, isLoaded, mode, nextConversationNumber, selectedDurations, selectedGeneralModels, selectedGenerationModels, selectedImageCounts, selectedRatios, selectedResolutions, sessions, workflowItems, workspaceStorageMode]);
+  }, [activePanel, activeSessionId, activeWorkflowId, agentModelTier, assetFilter, assetGenerateJobs, assetScrollTopByFilter, assets, assetsLoadStatus, feedbackLogs, intentMemoryRules, isLoaded, mode, nextConversationNumber, selectedDurations, selectedGeneralModels, selectedGenerationModels, selectedImageCounts, selectedRatios, selectedResolutions, sessions, workflowItems, workspaceLoadStatus, workspaceStorageMode]);
 
   useEffect(() => {
     if (!isLoaded || workspaceStorageMode !== "user") return;
@@ -8103,20 +8359,7 @@ export function ChatWorkbench() {
     const expiredAssets = assets.filter((asset) => asset.type === "trash" && asset.purgeAt && asset.purgeAt <= Date.now());
     if (expiredAssets.length === 0) return;
 
-    expiredAssets.forEach((asset) => {
-      fetch("/api/asset-delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: asset.url }),
-      }).catch(() => undefined);
-    });
-
-    const cleanupTimer = window.setTimeout(() => {
-      setAssets((current) => current.filter((asset) => !(asset.type === "trash" && asset.purgeAt && asset.purgeAt <= Date.now())));
-      setPreviewAsset((current) => (current && current.type === "trash" && current.purgeAt && current.purgeAt <= Date.now() ? null : current));
-    }, 0);
-
-    return () => window.clearTimeout(cleanupTimer);
+    setPreviewAsset((current) => (current && isAssetTrashExpired(current, Date.now()) ? null : current));
   }, [assets, isLoaded, timerNow]);
 
   useEffect(() => {
@@ -8209,6 +8452,7 @@ export function ChatWorkbench() {
       });
       if (distanceToBottom < 520) {
         setAssetRenderLimit((current) => current + ASSET_RENDER_PAGE_SIZE);
+        if (assetsHasMore && assetsLoadStatus !== "loading") void loadWorkspaceAssets(false, assetFilter, assetsNextOffset);
       }
       return;
     }
@@ -8216,9 +8460,24 @@ export function ChatWorkbench() {
     setShowScrollToBottom(distanceToBottom > 120);
   };
 
-  const closeAllPopupMenus = (except?: "session" | "workflow" | "user" | "message" | "assetAction" | "control" | "mention") => {
+  useEffect(() => {
+    if (activePanel !== "assets" || !assetsHasMore || assetsLoadStatus !== "loaded") return;
+    const frame = window.requestAnimationFrame(() => {
+      const element = chatScrollRef.current;
+      if (!element) return;
+      if (element.scrollHeight <= element.clientHeight + 120) void loadWorkspaceAssets(false, assetFilter, assetsNextOffset);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activePanel, assetFilter, assets.length, assetsHasMore, assetsLoadStatus, assetsNextOffset, loadWorkspaceAssets]);
+
+  const closeAllPopupMenus = (except?: "session" | "workflow" | "collapsedHistory" | "user" | "message" | "assetAction" | "control" | "mention") => {
     if (except !== "session") setOpenSessionMenuId("");
     if (except !== "workflow") setOpenWorkflowMenuId("");
+    if (except !== "session" && except !== "workflow") setCollapsedActionMenuPosition(null);
+    if (except !== "collapsedHistory") {
+      setIsCollapsedHistoryMenuOpen(false);
+      setCollapsedActionMenuPosition(null);
+    }
     if (except !== "user") {
       setIsUserMenuOpen(false);
       setIsThemeMenuOpen(false);
@@ -8231,24 +8490,36 @@ export function ChatWorkbench() {
 
   const toggleSessionMenu = (sessionId: string, button: HTMLButtonElement) => {
     const shouldClose = openSessionMenuId === sessionId;
-    closeAllPopupMenus();
+    closeAllPopupMenus(isSidebarCollapsed ? "collapsedHistory" : undefined);
     if (shouldClose) return;
 
     const rect = button.getBoundingClientRect();
     const menuHeight = 128;
     const reservedBottom = 32;
+    if (isSidebarCollapsed) {
+      setCollapsedActionMenuPosition({
+        left: Math.min(window.innerWidth - 140, rect.right + 8),
+        top: Math.min(window.innerHeight - menuHeight - reservedBottom, Math.max(12, rect.top - 8)),
+      });
+    }
     setSessionMenuPlacement(window.innerHeight - rect.bottom < menuHeight + reservedBottom ? "top" : "bottom");
     setOpenSessionMenuId(sessionId);
   };
 
   const toggleWorkflowMenu = (workflowId: string, button: HTMLButtonElement) => {
     const shouldClose = openWorkflowMenuId === workflowId;
-    closeAllPopupMenus();
+    closeAllPopupMenus(isSidebarCollapsed ? "collapsedHistory" : undefined);
     if (shouldClose) return;
 
     const rect = button.getBoundingClientRect();
     const menuHeight = 132;
     const reservedBottom = 24;
+    if (isSidebarCollapsed) {
+      setCollapsedActionMenuPosition({
+        left: Math.min(window.innerWidth - 140, rect.right + 8),
+        top: Math.min(window.innerHeight - menuHeight - reservedBottom, Math.max(12, rect.top - 8)),
+      });
+    }
     setSessionMenuPlacement(window.innerHeight - rect.bottom < menuHeight + reservedBottom ? "top" : "bottom");
     setOpenWorkflowMenuId(workflowId);
   };
@@ -8265,6 +8536,18 @@ export function ChatWorkbench() {
 
     return () => window.removeEventListener("click", closeMenu);
   }, [openSessionMenuId]);
+
+  useEffect(() => {
+    if (!isCollapsedHistoryMenuOpen) return;
+
+    const closeMenu = () => {
+      setIsCollapsedHistoryMenuOpen(false);
+      setOpenSessionMenuId("");
+    };
+    window.addEventListener("click", closeMenu);
+
+    return () => window.removeEventListener("click", closeMenu);
+  }, [isCollapsedHistoryMenuOpen]);
 
   useEffect(() => {
     if (!openMessageMenuId) return;
@@ -8917,7 +9200,9 @@ export function ChatWorkbench() {
 
   const startNewWorkflow = () => {
     setOpenWorkflowMenuId("");
-    setWorkflowItems((current) => [createWorkflowItem(current), ...current]);
+    const workflow = createWorkflowItem(workflowItems);
+    setWorkflowItems((current) => [workflow, ...current]);
+    setActiveWorkflowId(workflow.id);
   };
 
   const pinWorkflow = (workflowId: string) => {
@@ -8940,8 +9225,16 @@ export function ChatWorkbench() {
 
   const deleteWorkflow = (workflowId: string) => {
     setOpenWorkflowMenuId("");
-    setWorkflowItems((current) => current.filter((item) => item.id !== workflowId));
+    setWorkflowItems((current) => {
+      const next = current.filter((item) => item.id !== workflowId);
+      if (activeWorkflowId === workflowId) setActiveWorkflowId(next[0]?.id ?? "");
+      return next;
+    });
   };
+
+  const updateWorkflowCanvas = useCallback((workflowId: string, canvas: WorkflowCanvasState) => {
+    setWorkflowItems((current) => current.map((item) => item.id === workflowId ? { ...item, canvas } : item));
+  }, []);
 
   const pinSession = (sessionId: string) => {
     setOpenSessionMenuId("");
@@ -9033,12 +9326,15 @@ export function ChatWorkbench() {
   const deleteSession = (sessionId: string) => {
     setOpenSessionMenuId("");
     setSessions((current) => {
-      const nextSessions = current.filter((session) => session.id !== sessionId);
-      const safeSessions = nextSessions.length > 0 ? nextSessions : [createSession(nextConversationNumber)];
-      if (nextSessions.length === 0) setNextConversationNumber((current) => Math.max(current + 1, nextConversationNumber + 1));
+      const deletedAt = Date.now();
+      const nextSessions = current.map((session) => (session.id === sessionId ? { ...session, deletedAt, updatedAt: deletedAt } : session));
+      const visibleSessions = nextSessions.filter((session) => !isDeletedSession(session));
+      const safeSessions = visibleSessions.length > 0 ? nextSessions : [createSession(nextConversationNumber), ...nextSessions];
+      if (visibleSessions.length === 0) setNextConversationNumber((current) => Math.max(current + 1, nextConversationNumber + 1));
+      const nextVisibleSessions = safeSessions.filter((session) => !isDeletedSession(session));
 
-      if (sessionId === activeSessionId || !safeSessions.some((session) => session.id === activeSessionId)) {
-        setActiveSessionId(safeSessions[0].id);
+      if (sessionId === activeSessionId || !nextVisibleSessions.some((session) => session.id === activeSessionId)) {
+        setActiveSessionId(nextVisibleSessions[0]?.id ?? safeSessions[0].id);
       }
 
       return safeSessions;
@@ -9605,6 +9901,20 @@ export function ChatWorkbench() {
           : getAgentGenerationModel(agentModelTier, generationMode, selectedGenerationModels, { sourceText, session: sessions.find((session) => session.id === sessionId), feedbackLogs, enabledModels: availableMediaModels });
         const agentSettings = getAgentGenerationSettingsFromPlan(plan, sourceText, generationMode, generationModel);
         const agentPrompt = generationMode === "image" || generationMode === "video" ? getAgentPromptFromPlan(plan, sourceText, generationMode) : undefined;
+        const videoReferenceMode = generationMode === "video" ? getExplicitVideoReferenceMode([sourceText, agentPrompt ?? ""].join(" "), pendingRequest.referenceImages?.length ?? 0) : undefined;
+        if (videoReferenceMode === "first_last_frame" && (pendingRequest.referenceImages?.length ?? 0) < 2) {
+          appendSystemMessage(sessionId, { content: "首尾帧生视频需要至少两张参考图，请补充首帧和尾帧图片。", error: "首尾帧生视频需要至少两张参考图，请补充首帧和尾帧图片。", mode: "video" });
+          return;
+        }
+        const effectiveVideoReferenceImages = generationMode === "video" && generationModel.startsWith("byteplus:video.")
+          ? getEffectiveBytePlusVideoReferenceItems(pendingRequest.referenceImages, videoReferenceMode)
+          : pendingRequest.referenceImages;
+        const effectiveVideoImageReferences = generationMode === "video" && generationModel.startsWith("byteplus:video.")
+          ? getEffectiveBytePlusVideoReferenceItems(pendingRequest.imageReferences, videoReferenceMode)
+          : pendingRequest.imageReferences;
+        if (generationMode === "video" && generationModel.startsWith("byteplus:video.") && (pendingRequest.referenceImages?.length ?? 0) > (effectiveVideoReferenceImages?.length ?? 0)) {
+          appendSystemMessage(sessionId, { content: getBytePlusVideoReferenceLimitHint(videoReferenceMode), mode: "video" });
+        }
         const plannedItemPrompts = agentPrompt ? getAgentItemPromptsFromPlan(plan, sourceText, generationMode) : undefined;
         const agentItemPrompts = generationMode === "video" && agentPrompt && (!plannedItemPrompts?.length) && plan.count && plan.count > 1
           ? Array.from({ length: Math.min(20, Math.floor(plan.count)) }).map((_, index) => `${agentPrompt}，第 ${index + 1} 镜，只生成当前这一镜的一段视频`)
@@ -9626,6 +9936,9 @@ export function ChatWorkbench() {
           agentSuggestions: getAgentMediaSuggestions(generationMode, plan.suggestions),
           agentItemPrompts,
           agentItemSettings,
+          referenceImages: effectiveVideoReferenceImages,
+          imageReferences: effectiveVideoImageReferences,
+          videoReferenceMode,
           needsIntentResolution: false,
         };
 
@@ -9639,7 +9952,7 @@ export function ChatWorkbench() {
             pendingImageCount: getImageCountValue(nextPendingRequest.settings?.imageCount, Number.POSITIVE_INFINITY),
             mode: generationMode,
             requestId: pendingRequest.id,
-            imageReferences: pendingRequest.imageReferences,
+            imageReferences: effectiveVideoImageReferences,
             generationMeta: { mode: "image", model: nextPendingRequest.model, settings: nextPendingRequest.settings, preserveOriginalInput: nextPendingRequest.preserveOriginalInput, assetTargetType: nextPendingRequest.assetTargetType, originalPrompt: agentPrompt, agentGenerated: true },
           });
         }
@@ -9842,14 +10155,26 @@ export function ChatWorkbench() {
 
           if (!taskId) {
           const modelVideoPrompt = replaceMentionNamesForModelPrompt(videoPrompt, pendingRequest.imageReferences);
-          const taskResponse = await fetch("/api/video", {
+          const createVideoTask = (autoBytePlusAssetReview = false) => fetch("/api/video", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             signal: abortController.signal,
-            body: JSON.stringify({ prompt: withReferenceHint(modelVideoPrompt), model: pendingRequest.model, referenceImages: pendingRequest.referenceImages, settings, conversationId: sessionId, conversationTitle, requestId: videoRequestId, metadata: pendingRequest.agentGenerated ? { creditSource: "agent_video_generation" } : undefined }),
+            body: JSON.stringify({ prompt: withReferenceHint(modelVideoPrompt), model: pendingRequest.model, referenceImages: pendingRequest.referenceImages, referenceMode: pendingRequest.videoReferenceMode, settings, conversationId: sessionId, conversationTitle, requestId: videoRequestId, metadata: pendingRequest.agentGenerated ? { creditSource: "agent_video_generation" } : undefined, autoBytePlusAssetReview }),
           });
 
-          const taskData = await readJson<{ id?: string; polling_url?: string; pollingUrl?: string; usage?: UsageMeta }>(taskResponse);
+          let taskResponse = await createVideoTask();
+          let taskData = await readJson<{ id?: string; polling_url?: string; pollingUrl?: string; status?: string; usage?: UsageMeta; autoBytePlusAssetReview?: { triggered?: boolean; assets?: Array<{ url?: string; assetId?: string; groupId?: string; status?: AssetItem["bytePlusAssetStatus"]; error?: string }> } }>(taskResponse);
+          if (taskData.status === "reviewing" && taskData.autoBytePlusAssetReview?.triggered) {
+            const reviewNotice = BYTEPLUS_AUTO_REVIEW_NOTICE;
+            updateAssistantMessageByRequestId(sessionId, pendingRequest.id, { statusText: reviewNotice });
+            if (itemIndex === 0) appendSystemMessage(sessionId, { content: reviewNotice, mode: "video" });
+            taskResponse = await createVideoTask(true);
+            taskData = await readJson<{ id?: string; polling_url?: string; pollingUrl?: string; status?: string; usage?: UsageMeta; autoBytePlusAssetReview?: { triggered?: boolean; assets?: Array<{ url?: string; assetId?: string; groupId?: string; status?: AssetItem["bytePlusAssetStatus"]; error?: string }> } }>(taskResponse);
+          }
+          if (taskData.autoBytePlusAssetReview?.triggered) {
+            applyBytePlusAssetUpdatesByUrl(taskData.autoBytePlusAssetReview.assets ?? []);
+            updateAssistantMessageByRequestId(sessionId, pendingRequest.id, { statusText: "系统检测到真人图片，需要审核才能生成视频，此次视频生成任务会延长时间，请稍候...." });
+          }
           pendingVideoUsage = taskData.usage;
 
           const openRouterTaskId = taskData.polling_url ?? taskData.pollingUrl ?? taskData.id;
@@ -10025,7 +10350,7 @@ export function ChatWorkbench() {
       requestAbortControllersRef.current.delete(pendingRequest.id);
       stoppedRequestIdsRef.current.delete(pendingRequest.id);
     }
-  }, [addGeneratedAssets, addSessionUsage, agentModelTier, appendAssistantMessage, appendImagesToAssistantMessage, appendSystemMessage, appendVideoToAssistantMessage, applyCreditResult, autoSaveHistory, clearPendingRequest, enabledAgentGenerationModelIds, ensureSessionMemorySummary, feedbackLogs, finalizeAssistantImageFailures, markAssistantImageFailure, markAssistantVideoFailure, notifyGenerationCompleteOnce, reserveMediaSystemNames, selectedGenerationModels, selectedModel, sessions, updateAssistantMessageByRequestId, updatePendingRequest]);
+  }, [addGeneratedAssets, addSessionUsage, agentModelTier, appendAssistantMessage, appendImagesToAssistantMessage, appendSystemMessage, appendVideoToAssistantMessage, applyBytePlusAssetUpdatesByUrl, applyCreditResult, autoSaveHistory, clearPendingRequest, enabledAgentGenerationModelIds, ensureSessionMemorySummary, feedbackLogs, finalizeAssistantImageFailures, markAssistantImageFailure, markAssistantVideoFailure, notifyGenerationCompleteOnce, reserveMediaSystemNames, selectedGenerationModels, selectedModel, sessions, updateAssistantMessageByRequestId, updatePendingRequest]);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -10171,6 +10496,13 @@ export function ChatWorkbench() {
     const referencedAssets = getReferencedAssets(rawText, assets);
     const displayImageReferences = (namedImageReferences.length > 0 ? namedImageReferences : referenceImages.map((url, index) => ({ name: `图片${index + 1}`, url }))).slice(0, currentMaxReferenceImages);
     const text = rawText || getImageOnlyPrompt(submitMode);
+    const generationMode: WorkMode = submitMode;
+    const directVideoReferenceMode = generationMode === "video" ? getExplicitVideoReferenceMode(text, referenceImages.length) : undefined;
+    if (directVideoReferenceMode === "first_last_frame" && referenceImages.length < 2) {
+      showInputTip("首尾帧生视频需要至少两张参考图");
+      setSessionSending(sessionId, false);
+      return;
+    }
     const userMessage: Message = { id: createClientId(), role: "user", content: rawText, createdAt: nowTimestamp(), images: referenceImages.length > 0 ? referenceImages : undefined, imageReferences: displayImageReferences.length > 0 ? displayImageReferences : undefined, uploadedFiles: availableUploadedFiles.length > 0 ? availableUploadedFiles : undefined };
     const payloadUserMessage: Message = { ...userMessage, content: text };
     const messagesWithoutSuggestions = sessionForSend.messages.map((message) => (message.suggestions ? { ...message, suggestions: undefined } : message));
@@ -10343,8 +10675,6 @@ export function ChatWorkbench() {
       return;
     }
 
-    const generationMode: WorkMode = submitMode;
-
     const payloadMessages = applyMemorySummaryToPayload(toChatPayloadMessages(optimisticMessages), sessionForSend.memorySummary);
     if (referencedAssets.length > 0) {
       const lastUserMessage = [...payloadMessages].reverse().find((message) => message.role === "user");
@@ -10356,6 +10686,11 @@ export function ChatWorkbench() {
     const isAgentAutoGeneration = false;
     const assetTargetType = normalizedSuggestion?.assetTargetType ?? getAssetTypeFromText(text, generationMode);
     const generationModel = isAgentAutoGeneration ? getAgentGenerationModel(agentModelTier, generationMode, generationModelsForSubmit, { sourceText: text, session: activeSession, feedbackLogs, enabledModels: enabledModelsForSubmit }) : generationMode === "image" ? generationModelsForSubmit.image : generationModelsForSubmit.video;
+    const shouldApplyBytePlusReferenceMode = generationMode === "video" && generationModel.startsWith("byteplus:video.");
+    const effectiveReferenceImages = shouldApplyBytePlusReferenceMode ? getEffectiveBytePlusVideoReferenceItems(referenceImages, directVideoReferenceMode) : referenceImages;
+    const effectiveModelReferenceImages = shouldApplyBytePlusReferenceMode ? getEffectiveBytePlusVideoReferenceItems(modelReferenceImages, directVideoReferenceMode) : modelReferenceImages;
+    const effectiveDisplayImageReferences = shouldApplyBytePlusReferenceMode ? getEffectiveBytePlusVideoReferenceItems(displayImageReferences, directVideoReferenceMode) : displayImageReferences;
+    if (shouldApplyBytePlusReferenceMode && referenceImages.length > effectiveReferenceImages.length) showInputTip(getBytePlusVideoReferenceLimitHint(directVideoReferenceMode));
     const agentSettings = isAgentAutoGeneration ? getAgentGenerationSettings(text, generationMode, generationModel) : undefined;
     const generationResolution = agentSettings?.resolution ?? (generationMode === "image" ? normalizeImageResolutionForModel(generationModel, selectedResolutions[modeForSettings]) : generationMode === "video" ? (selectedRatios.video === "智能比例" ? "720p" : normalizeVideoResolutionForModel(generationModel, selectedResolutions.video)) : selectedResolutions[modeForSettings]);
     const generationRatio = agentSettings?.ratio ?? (generationMode === "video" ? (selectedRatios.video === "智能比例" ? "智能比例" : normalizeVideoRatioForModel(generationModel, selectedRatios.video, generationResolution)) : selectedRatios[modeForSettings]);
@@ -10369,9 +10704,10 @@ export function ChatWorkbench() {
       originalPrompt: generationMode === "image" || generationMode === "video" ? text : undefined,
       preserveOriginalInput: false,
       assetTargetType: assetTargetType === "other" ? undefined : assetTargetType,
-      referenceImages: (generationMode === "video" && generationModel.startsWith("byteplus:video.") ? modelReferenceImages : referenceImages).length > 0 ? (generationMode === "video" && generationModel.startsWith("byteplus:video.") ? modelReferenceImages : referenceImages) : undefined,
-      imageReferences: displayImageReferences.length > 0 ? displayImageReferences : undefined,
-      referenceHint: getReferenceHint(namedImageReferences),
+      referenceImages: (shouldApplyBytePlusReferenceMode ? effectiveModelReferenceImages : effectiveReferenceImages).length > 0 ? (shouldApplyBytePlusReferenceMode ? effectiveModelReferenceImages : effectiveReferenceImages) : undefined,
+      videoReferenceMode: directVideoReferenceMode,
+      imageReferences: effectiveDisplayImageReferences.length > 0 ? effectiveDisplayImageReferences : undefined,
+      referenceHint: getReferenceHint(effectiveDisplayImageReferences),
       agentGenerated: isAgentAutoGeneration,
       agentDisplayText,
       settings: agentSettings ?? {
@@ -10598,6 +10934,15 @@ export function ChatWorkbench() {
       : agentModelTier === "advanced" ? ADVANCED_CHAT_MODEL : DEFAULT_CHAT_MODEL;
     const replayResolution = generationMode === "image" ? normalizeImageResolutionForModel(replayModel, replaySettings?.resolution ?? selectedResolutions[generationMode]) : generationMode === "video" ? ((replaySettings?.ratio ?? selectedRatios.video) === "智能比例" ? "720p" : normalizeVideoResolutionForModel(replayModel, replaySettings?.resolution ?? selectedResolutions.video)) : replaySettings?.resolution ?? selectedResolutions[generationMode];
     const replayRatio = generationMode === "video" ? ((replaySettings?.ratio ?? selectedRatios.video) === "智能比例" ? "智能比例" : normalizeVideoRatioForModel(replayModel, replaySettings?.ratio ?? selectedRatios.video, replayResolution)) : replaySettings?.ratio ?? selectedRatios[generationMode];
+    const replayVideoReferenceMode = generationMode === "video" ? getExplicitVideoReferenceMode(replayPrompt, referenceImages?.length ?? 0) : undefined;
+    if (replayVideoReferenceMode === "first_last_frame" && (referenceImages?.length ?? 0) < 2) {
+      showInputTip("首尾帧生视频需要至少两张参考图");
+      return;
+    }
+    const shouldApplyReplayBytePlusReferenceMode = generationMode === "video" && replayModel.startsWith("byteplus:video.");
+    const effectiveReplayReferenceImages = shouldApplyReplayBytePlusReferenceMode ? getEffectiveBytePlusVideoReferenceItems(referenceImages, replayVideoReferenceMode) : referenceImages;
+    const effectiveReplayImageReferences = shouldApplyReplayBytePlusReferenceMode ? getEffectiveBytePlusVideoReferenceItems(replayImageReferences, replayVideoReferenceMode) : replayImageReferences;
+    if (shouldApplyReplayBytePlusReferenceMode && (referenceImages?.length ?? 0) > (effectiveReplayReferenceImages?.length ?? 0)) showInputTip(getBytePlusVideoReferenceLimitHint(replayVideoReferenceMode));
     const pendingRequest: PendingGeneration = {
       id: createClientId(),
       model: replayModel,
@@ -10606,9 +10951,10 @@ export function ChatWorkbench() {
       prompt: generationMode === "image" || generationMode === "video" ? replayPrompt : undefined,
       originalPrompt: generationMode === "image" || generationMode === "video" ? replayPrompt : undefined,
       preserveOriginalInput: false,
-      referenceImages: referenceImages && referenceImages.length > 0 ? referenceImages : undefined,
-      imageReferences: replayImageReferences && replayImageReferences.length > 0 ? replayImageReferences : undefined,
-      referenceHint: replayImageReferences && replayImageReferences.length > 0 ? getReferenceHint(replayImageReferences) : undefined,
+      referenceImages: effectiveReplayReferenceImages && effectiveReplayReferenceImages.length > 0 ? effectiveReplayReferenceImages : undefined,
+      videoReferenceMode: replayVideoReferenceMode,
+      imageReferences: effectiveReplayImageReferences && effectiveReplayImageReferences.length > 0 ? effectiveReplayImageReferences : undefined,
+      referenceHint: effectiveReplayImageReferences && effectiveReplayImageReferences.length > 0 ? getReferenceHint(effectiveReplayImageReferences) : undefined,
       assetTargetType: replayMeta?.assetTargetType,
       agentGenerated: replayMeta?.agentGenerated,
       agentDisplayText: replayMeta?.agentGenerated ? message.content : undefined,
@@ -11116,6 +11462,12 @@ export function ChatWorkbench() {
     focusCharacterEditorAt(Math.min(MAX_DRAFT_INPUT_LENGTH, insertBase.length + referenceText.length));
   };
   const openCharacterMentionAssetMenu = () => {
+    if (assetsLoadStatus !== "loaded") {
+      setCharacterPromptCursorOffset(getCurrentCharacterPromptCursor());
+      setIsCharacterAtAssetMenuOpen(true);
+      void loadWorkspaceAssets();
+      return;
+    }
     if (!hasMentionAssetImages) {
       setIsCharacterAtAssetMenuOpen(false);
       showInputTip("当前资产库没有图片");
@@ -11442,6 +11794,11 @@ export function ChatWorkbench() {
   };
   const openMentionAssetMenu = () => {
     closeAllPopupMenus("mention");
+    if (assetsLoadStatus !== "loaded") {
+      setIsAtAssetMenuOpen(true);
+      void loadWorkspaceAssets();
+      return;
+    }
     if (!hasMentionAssetImages) {
       setIsAtAssetMenuOpen(false);
       showInputTip("当前资产库没有图片");
@@ -11451,7 +11808,7 @@ export function ChatWorkbench() {
     setIsAtAssetMenuOpen(true);
   };
   const getDefaultDocumentPreviewWidth = useCallback(() => {
-    const sidebarWidth = isSidebarCollapsed ? 0 : 262;
+    const sidebarWidth = isSidebarCollapsed ? 80 : 262;
     const viewportWidth = typeof window === "undefined" ? 1440 : window.innerWidth;
     const availableWidth = Math.max(840, viewportWidth - sidebarWidth);
     return Math.max(420, Math.round((availableWidth * 4) / 9));
@@ -11468,7 +11825,7 @@ export function ChatWorkbench() {
     setHasCustomPreviewDocumentWidth(true);
     const startX = event.clientX;
     const startWidth = previewDocumentWidth || getDefaultDocumentPreviewWidth();
-    const getMaxWidth = () => Math.max(420, window.innerWidth - (isSidebarCollapsed ? 72 : 282) - 420);
+    const getMaxWidth = () => Math.max(420, window.innerWidth - (isSidebarCollapsed ? 100 : 282) - 420);
     const clampWidth = (width: number) => Math.min(getMaxWidth(), Math.max(420, width));
     const handlePointerMove = (moveEvent: PointerEvent) => {
       setPreviewDocumentWidth(clampWidth(startWidth + startX - moveEvent.clientX));
@@ -11506,37 +11863,47 @@ export function ChatWorkbench() {
     );
   };
 
-  const workspaceSwitchUrl = workspaceSite === "malaysia" ? ALI_WORKSPACE_URL : MALAYSIA_WORKSPACE_URL;
-  const workspaceSwitchLabel = workspaceSite === "malaysia" ? "切换到阿里工作台" : "切换到马来工作台";
   const showWorkspaceIntlBadge = workspaceSite === "malaysia";
+  const historySessions = sessions.filter((session) => !isDeletedSession(session));
+  const visibleHistorySessions = historySessions.slice(0, historyVisibleSessionCount);
+  const hiddenHistorySessionCount = Math.max(0, historySessions.length - visibleHistorySessions.length);
+  const shouldShowHistoryLoadStatus = activePanel !== "workflow" && sessions.length === 0 && workspaceLoadStatus !== "loaded";
+  const historyLoadStatusText = workspaceLoadStatus === "failed" ? "重新加载历史" : "历史加载中...";
+  const retryWorkspaceLoad = () => {
+    setIsLoaded(false);
+    setWorkspaceLoadStatus("loading");
+    setWorkspaceLoadRetryKey((key) => key + 1);
+  };
+  const getAssetCount = (key: string, fallback: number) => Math.max(0, Math.floor(Number(assetCounts[key] ?? fallback)));
+  const hasCurrentFilterAssets = assets.some((asset) => isAssetInFilter(asset, assetFilter));
 
   return (
-    <section className={isSidebarCollapsed ? "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white" : "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[262px_minmax(0,1fr)]"}>
-      <aside className={isSidebarCollapsed ? "hidden" : "flashmuse-sidebar relative z-10 hidden h-screen min-h-0 flex-col overflow-visible border-r border-[#e5e5e5] bg-[#f9f9f9] px-3 pb-1 pt-4 lg:flex"}>
-          <button type="button" onClick={() => window.location.assign(workspaceSwitchUrl)} className="mb-5 flex items-center gap-3 px-2 text-left" aria-label={workspaceSwitchLabel} title={workspaceSwitchLabel}>
-          <div className="flex h-[50px] w-[50px] items-center justify-center">
+    <section className={isSidebarCollapsed ? "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[80px_minmax(0,1fr)]" : "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[262px_minmax(0,1fr)]"}>
+      <aside className={isSidebarCollapsed ? "flashmuse-sidebar relative z-10 hidden h-screen min-h-0 flex-col overflow-visible border-r border-[#e5e5e5] bg-[#f9f9f9] px-2 pb-1 pt-4 lg:flex" : "flashmuse-sidebar relative z-10 hidden h-screen min-h-0 flex-col overflow-visible border-r border-[#e5e5e5] bg-[#f9f9f9] px-3 pb-1 pt-4 lg:flex"}>
+          <button type="button" onClick={() => setIsSidebarCollapsed((current) => !current)} className={isSidebarCollapsed ? "mb-5 flex justify-center text-left" : "mb-5 flex items-center gap-3 px-2 text-left"} aria-label={isSidebarCollapsed ? "展开左侧栏" : "收起左侧栏"} title={isSidebarCollapsed ? "展开左侧栏" : "收起左侧栏"}>
+          <div className={isSidebarCollapsed ? "flex h-[50px] w-[50px] items-center justify-center" : "flex h-[50px] w-[50px] items-center justify-center"}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/home-assets/logo.png" alt="闪念 FlashMuse" className="h-[50px] w-[50px] object-contain" />
           </div>
-          <div className="flex min-w-0 flex-col justify-center">
+          {!isSidebarCollapsed ? <div className="flex min-w-0 flex-col justify-center">
             <span className="flex items-end gap-1.5">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src="/home-assets/logo-text.png" alt="闪念" className="flashmuse-logo-text w-auto object-contain" style={{ height: 26 }} />
               {showWorkspaceIntlBadge ? <span className="pb-[1px] text-[12px] font-medium leading-none text-[#8a8a8a]">Intl.</span> : null}
             </span>
             <div className="mt-1 whitespace-nowrap text-xs leading-4 text-[#8a8a8a]">AI视频助手</div>
-          </div>
+          </div> : null}
         </button>
-        <div className="mb-[22px] space-y-[5px]">
-          <button type="button" onClick={() => { setStoredWorkspaceUiState({ activePanel: "chat" }); setActivePanel("chat"); }} className={activePanel === "chat" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#555555] transition hover:bg-[#ececec]"}>
+        <div className={isSidebarCollapsed ? "mb-3 flex flex-col items-center gap-[5px]" : "mb-[22px] space-y-[5px]"}>
+          <button type="button" onClick={() => { setStoredWorkspaceUiState({ activePanel: "chat" }); setActivePanel("chat"); }} className={isSidebarCollapsed ? activePanel === "chat" ? "relative flex h-10 w-10 items-center justify-center rounded-lg bg-[#ececec] font-medium text-[#111111]" : "relative flex h-10 w-10 items-center justify-center rounded-lg font-medium text-[#555555] transition hover:bg-[#ececec]" : activePanel === "chat" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#555555] transition hover:bg-[#ececec]"} title="对话模式" aria-label="对话模式">
             {activePanel === "chat" ? <RiChatSmileAiLine className="h-5 w-5 shrink-0 text-[#111111]" aria-hidden="true" /> : <RiChat3Line className="h-5 w-5 shrink-0 text-[#555555]" aria-hidden="true" />}
-            <span className="text-[13px] leading-[1.2]">对话模式</span>
-            {activePanel !== "chat" && hasAnyConversationRunning ? <span className="ml-auto flex w-7 shrink-0 justify-end"><HaloPulseIndicator /></span> : null}
+            {!isSidebarCollapsed ? <span className="text-[13px] leading-[1.2]">对话模式</span> : null}
+            {activePanel !== "chat" && hasAnyConversationRunning ? <span className={isSidebarCollapsed ? "absolute ml-7 mt-7 flex w-4 shrink-0 justify-end" : "ml-auto flex w-7 shrink-0 justify-end"}><HaloPulseIndicator /></span> : null}
           </button>
-          <button type="button" onClick={() => { setStoredWorkspaceUiState({ activePanel: "workflow" }); setActivePanel("workflow"); }} className={activePanel === "workflow" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#8a8a8a] transition hover:bg-[#ececec]"}>
-            {activePanel === "workflow" ? <RiGitMergeLine className="h-5 w-5 shrink-0 text-[#111111]" aria-hidden="true" /> : <RiGitPullRequestLine className="h-5 w-5 shrink-0 text-[#8a8a8a]" aria-hidden="true" />}
-            <span className="text-[13px] leading-[1.2]">工作流模式</span>
-            <span className="ml-auto rounded-full bg-white px-2 py-0.5 text-[11px] text-[#8a8a8a] ring-1 ring-[#e3e3e3]">未开放</span>
+          <button type="button" disabled={!WORKFLOW_MODE_ENABLED} onClick={() => { if (!WORKFLOW_MODE_ENABLED) return; setStoredWorkspaceUiState({ activePanel: "workflow" }); setActivePanel("workflow"); }} className={!WORKFLOW_MODE_ENABLED ? isSidebarCollapsed ? "relative flex h-10 w-10 cursor-not-allowed items-center justify-center rounded-lg font-medium text-[#b0b0b0]" : "flex h-10 w-full cursor-not-allowed items-center gap-2 rounded-lg px-3 text-left font-medium text-[#b0b0b0]" : isSidebarCollapsed ? activePanel === "workflow" ? "relative flex h-10 w-10 items-center justify-center rounded-lg bg-[#ececec] font-medium text-[#111111]" : "relative flex h-10 w-10 items-center justify-center rounded-lg font-medium text-[#555555] transition hover:bg-[#ececec]" : activePanel === "workflow" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#555555] transition hover:bg-[#ececec]"} title="工作流模式暂未开放" aria-label="工作流模式暂未开放">
+            {activePanel === "workflow" && WORKFLOW_MODE_ENABLED ? <RiGitMergeLine className="h-5 w-5 shrink-0 text-[#111111]" aria-hidden="true" /> : <RiGitPullRequestLine className={!WORKFLOW_MODE_ENABLED ? "h-5 w-5 shrink-0 text-[#b0b0b0]" : "h-5 w-5 shrink-0 text-[#555555]"} aria-hidden="true" />}
+            {!isSidebarCollapsed ? <span className="text-[13px] leading-[1.2]">工作流模式</span> : null}
+            {!isSidebarCollapsed && !WORKFLOW_MODE_ENABLED ? <span className="ml-auto rounded-full bg-white px-2 py-0.5 text-[11px] text-[#9a9a9a] ring-1 ring-[#e3e3e3]">未开放</span> : null}
           </button>
           <button type="button" onClick={() => {
             setAssetRenderLimit(ASSET_RENDER_PAGE_SIZE);
@@ -11544,21 +11911,23 @@ export function ChatWorkbench() {
             setPreviewDocumentFile(null);
             setStoredWorkspaceUiState({ activePanel: "assets", assetFilter });
             setActivePanel("assets");
-          }} className={activePanel === "assets" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#555555] transition hover:bg-[#ececec]"}>
+            void loadWorkspaceAssets(true, assetFilter, 0);
+          }} className={isSidebarCollapsed ? activePanel === "assets" ? "relative flex h-10 w-10 items-center justify-center rounded-lg bg-[#ececec] font-medium text-[#111111]" : "relative flex h-10 w-10 items-center justify-center rounded-lg font-medium text-[#555555] transition hover:bg-[#ececec]" : activePanel === "assets" ? "flex h-10 w-full items-center gap-2 rounded-lg bg-[#ececec] px-3 text-left font-medium text-[#111111]" : "flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left font-medium text-[#555555] transition hover:bg-[#ececec]"} title="资产库" aria-label="资产库">
             {activePanel === "assets" ? <RiFolderOpenLine className="h-5 w-5 shrink-0 text-[#111111]" aria-hidden="true" /> : <RiFolderLine className="h-5 w-5 shrink-0 text-[#555555]" aria-hidden="true" />}
-            <span className="text-[13px] leading-[1.2]">资产库</span>
-            {activePanel !== "assets" && hasAnyAssetGenerating ? <span className="ml-auto flex w-7 shrink-0 justify-end"><HaloPulseIndicator /></span> : null}
+            {!isSidebarCollapsed ? <span className="text-[13px] leading-[1.2]">资产库</span> : null}
+            {activePanel !== "assets" && hasAnyAssetGenerating ? <span className={isSidebarCollapsed ? "absolute ml-7 mt-7 flex w-4 shrink-0 justify-end" : "ml-auto flex w-7 shrink-0 justify-end"}><HaloPulseIndicator /></span> : null}
           </button>
         </div>
+        {isSidebarCollapsed ? <div className="mx-auto mb-3 h-px w-12 shrink-0 bg-[#e5e5e5]" aria-hidden="true" /> : null}
 
         {activePanel === "assets" ? (
           <>
-            <div className="mb-2 flex items-center justify-between px-3 text-xs text-[#8a8a8a]">
+            {!isSidebarCollapsed ? <div className="mb-2 flex items-center justify-between px-3 text-xs text-[#8a8a8a]">
               <span className="inline-flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-[#b7b7b7]" aria-hidden="true" />资产生成</span>
-              <span className="w-10 shrink-0 text-right">{assets.filter((asset) => asset.type !== "trash" && isAssetGenerationAsset(asset)).length}</span>
-            </div>
-            <div className="yinzao-chat-scroll yinzao-scrollbar-hover -mr-3 min-h-0 flex-1 space-y-[3px] overflow-y-auto pb-px pl-px pr-3 pt-px">
-              {assetGenerationTypes.map((type) => ({ label: assetTypeLabels[type], value: type, count: assets.filter((asset) => asset.type === type && isAssetGenerationAsset(asset)).length })).map((item) => {
+              <span className="w-10 shrink-0 text-right">{getAssetCount("asset_generation", assets.filter((asset) => asset.type !== "trash" && isAssetGenerationAsset(asset)).length)}</span>
+            </div> : null}
+            <div className={isSidebarCollapsed ? "yinzao-chat-scroll yinzao-scrollbar-hover min-h-0 flex-1 space-y-[6px] overflow-y-auto pb-px pt-px" : "yinzao-chat-scroll yinzao-scrollbar-hover -mr-3 min-h-0 flex-1 space-y-[3px] overflow-y-auto pb-px pl-px pr-3 pt-px"}>
+              {assetGenerationTypes.map((type) => ({ label: assetTypeLabels[type], value: type, count: getAssetCount(type, assets.filter((asset) => asset.type === type && isAssetGenerationAsset(asset)).length) })).map((item) => {
                 const isActive = assetFilter === item.value;
                 const AssetIcon = assetTypeIcons[item.value];
                 const isAssetTypeGenerating = assetGenerateJobs.some((job) => job.type === item.value && job.result.status === "generating");
@@ -11572,24 +11941,27 @@ export function ChatWorkbench() {
                       setPreviewDocumentFile(null);
                       setStoredWorkspaceUiState({ activePanel: "assets", assetFilter: item.value, assetScrollTopByFilter: { ...assetScrollTopByFilter, [item.value]: 0 } });
                       setAssetFilter(item.value);
+                      void loadWorkspaceAssets(true, item.value, 0);
                       requestAnimationFrame(() => chatScrollRef.current?.scrollTo({ top: 0, behavior: "auto" }));
                     }}
-                    className={isActive ? "flex h-9 w-full items-center rounded-lg bg-[#ececec] px-3 text-left" : "flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]"}
+                    className={isSidebarCollapsed ? isActive ? "relative mx-auto flex h-10 w-10 items-center justify-center rounded-lg bg-[#ececec]" : "relative mx-auto flex h-10 w-10 items-center justify-center rounded-lg transition hover:bg-[#ececec]" : isActive ? "flex h-9 w-full items-center rounded-lg bg-[#ececec] px-3 text-left" : "flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]"}
+                    title={item.label}
+                    aria-label={item.label}
                   >
-                    <AssetIcon className="mr-2 h-5 w-5 shrink-0 text-[#777777]" aria-hidden="true" />
-                    <span className={isActive ? "min-w-0 flex-1 truncate text-[13px] font-medium text-[#111111]" : "min-w-0 flex-1 truncate text-[13px] font-medium text-[#333333]"}>{item.label}</span>
-                    <span className="ml-auto flex w-10 shrink-0 justify-end text-[12px] text-[#9a9a9a]">{isAssetTypeGenerating ? <HaloPulseIndicator /> : item.count}</span>
+                    <AssetIcon className={isSidebarCollapsed ? "h-5 w-5 shrink-0 text-[#777777]" : "mr-2 h-5 w-5 shrink-0 text-[#777777]"} aria-hidden="true" />
+                    {!isSidebarCollapsed ? <span className={isActive ? "min-w-0 flex-1 truncate text-[13px] font-medium text-[#111111]" : "min-w-0 flex-1 truncate text-[13px] font-medium text-[#333333]"}>{item.label}</span> : null}
+                    {!isSidebarCollapsed ? <span className="ml-auto flex w-10 shrink-0 justify-end text-[12px] text-[#9a9a9a]">{isAssetTypeGenerating ? <HaloPulseIndicator /> : item.count}</span> : isAssetTypeGenerating ? <span className="absolute ml-7 mt-7"><HaloPulseIndicator /></span> : null}
                   </button>
                 );
               })}
-              <div className="flex items-center justify-between px-3 pb-1 pt-4 text-xs text-[#8a8a8a]">
+              {!isSidebarCollapsed ? <div className="flex items-center justify-between px-3 pb-1 pt-4 text-xs text-[#8a8a8a]">
                 <span className="inline-flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-[#b7b7b7]" aria-hidden="true" />对话流资产</span>
-                <span className="w-10 shrink-0 text-right">{assets.filter(isConversationAsset).length}</span>
-              </div>
+                <span className="w-10 shrink-0 text-right">{getAssetCount("conversation", assets.filter(isConversationAsset).length)}</span>
+              </div> : <div className="h-2" />}
               {[
-                { label: "上传图片", value: "conversation_uploads" as const, count: assets.filter(isConversationUploadedAsset).length, icon: ImageUploadLineIcon },
-                { label: "生成图片", value: "conversation_images" as const, count: assets.filter((asset) => isConversationAsset(asset) && !isVideoAsset(asset) && !isUploadedAssetUrl(asset.url)).length, icon: RiImageAiLine },
-                { label: "生成视频", value: "conversation_videos" as const, count: assets.filter((asset) => isConversationAsset(asset) && isVideoAsset(asset)).length, icon: RiFilmAiLine },
+                { label: "上传图片", value: "conversation_uploads" as const, count: getAssetCount("conversation_uploads", assets.filter(isConversationUploadedAsset).length), icon: ImageUploadLineIcon },
+                { label: "生成图片", value: "conversation_images" as const, count: getAssetCount("conversation_images", assets.filter((asset) => isConversationAsset(asset) && !isVideoAsset(asset) && !isUploadedAssetUrl(asset.url)).length), icon: RiImageAiLine },
+                { label: "生成视频", value: "conversation_videos" as const, count: getAssetCount("conversation_videos", assets.filter((asset) => isConversationAsset(asset) && isVideoAsset(asset)).length), icon: RiFilmAiLine },
               ].map((item) => {
                 const isActive = assetFilter === item.value;
                 const AssetIcon = item.icon;
@@ -11603,21 +11975,24 @@ export function ChatWorkbench() {
                       setPreviewDocumentFile(null);
                       setStoredWorkspaceUiState({ activePanel: "assets", assetFilter: item.value, assetScrollTopByFilter: { ...assetScrollTopByFilter, [item.value]: 0 } });
                       setAssetFilter(item.value);
+                      void loadWorkspaceAssets(true, item.value, 0);
                       requestAnimationFrame(() => chatScrollRef.current?.scrollTo({ top: 0, behavior: "auto" }));
                     }}
-                    className={isActive ? "flex h-9 w-full items-center rounded-lg bg-[#ececec] px-3 text-left" : "flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]"}
+                    className={isSidebarCollapsed ? isActive ? "relative mx-auto flex h-10 w-10 items-center justify-center rounded-lg bg-[#ececec]" : "relative mx-auto flex h-10 w-10 items-center justify-center rounded-lg transition hover:bg-[#ececec]" : isActive ? "flex h-9 w-full items-center rounded-lg bg-[#ececec] px-3 text-left" : "flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]"}
+                    title={item.label}
+                    aria-label={item.label}
                   >
-                    <AssetIcon className="mr-2 h-5 w-5 shrink-0 text-[#777777]" aria-hidden="true" />
-                    <span className={isActive ? "min-w-0 flex-1 truncate text-[13px] font-medium text-[#111111]" : "min-w-0 flex-1 truncate text-[13px] font-medium text-[#333333]"}>{item.label}</span>
-                    <span className="ml-auto w-10 shrink-0 text-right text-[12px] text-[#9a9a9a]">{item.count}</span>
+                    <AssetIcon className={isSidebarCollapsed ? "h-5 w-5 shrink-0 text-[#777777]" : "mr-2 h-5 w-5 shrink-0 text-[#777777]"} aria-hidden="true" />
+                    {!isSidebarCollapsed ? <span className={isActive ? "min-w-0 flex-1 truncate text-[13px] font-medium text-[#111111]" : "min-w-0 flex-1 truncate text-[13px] font-medium text-[#333333]"}>{item.label}</span> : null}
+                    {!isSidebarCollapsed ? <span className="ml-auto w-10 shrink-0 text-right text-[12px] text-[#9a9a9a]">{item.count}</span> : null}
                   </button>
                 );
               })}
-              <div className="flex items-center justify-between px-3 pb-1 pt-4 text-xs text-[#8a8a8a]">
+              {!isSidebarCollapsed ? <div className="flex items-center justify-between px-3 pb-1 pt-4 text-xs text-[#8a8a8a]">
                 <span className="inline-flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-[#b7b7b7]" aria-hidden="true" />回收资产30天删除</span>
-                <span className="w-10 shrink-0 text-right">{assets.filter((asset) => asset.type === "trash").length}</span>
-              </div>
-              {[{ label: assetTypeLabels.trash, value: "trash" as const, count: assets.filter((asset) => asset.type === "trash").length, icon: RiDeleteBinLine }].map((item) => {
+                <span className="w-10 shrink-0 text-right">{getAssetCount("trash", assets.filter((asset) => asset.type === "trash").length)}</span>
+              </div> : <div className="h-2" />}
+              {[{ label: assetTypeLabels.trash, value: "trash" as const, count: getAssetCount("trash", assets.filter((asset) => asset.type === "trash").length), icon: RiDeleteBinLine }].map((item) => {
                 const isActive = assetFilter === item.value;
                 const AssetIcon = item.icon;
 
@@ -11630,13 +12005,16 @@ export function ChatWorkbench() {
                       setPreviewDocumentFile(null);
                       setStoredWorkspaceUiState({ activePanel: "assets", assetFilter: item.value, assetScrollTopByFilter: { ...assetScrollTopByFilter, [item.value]: 0 } });
                       setAssetFilter(item.value);
+                      void loadWorkspaceAssets(true, item.value, 0);
                       requestAnimationFrame(() => chatScrollRef.current?.scrollTo({ top: 0, behavior: "auto" }));
                     }}
-                    className={isActive ? "flex h-9 w-full items-center rounded-lg bg-[#ececec] px-3 text-left" : "flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]"}
+                    className={isSidebarCollapsed ? isActive ? "relative mx-auto flex h-10 w-10 items-center justify-center rounded-lg bg-[#ececec]" : "relative mx-auto flex h-10 w-10 items-center justify-center rounded-lg transition hover:bg-[#ececec]" : isActive ? "flex h-9 w-full items-center rounded-lg bg-[#ececec] px-3 text-left" : "flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]"}
+                    title={item.label}
+                    aria-label={item.label}
                   >
-                    <AssetIcon className="mr-2 h-5 w-5 shrink-0 text-[#777777]" aria-hidden="true" />
-                    <span className={isActive ? "min-w-0 flex-1 truncate text-[13px] font-medium text-[#111111]" : "min-w-0 flex-1 truncate text-[13px] font-medium text-[#333333]"}>{item.label}</span>
-                    <span className="ml-auto w-10 shrink-0 text-right text-[12px] text-[#9a9a9a]">{item.count}</span>
+                    <AssetIcon className={isSidebarCollapsed ? "h-5 w-5 shrink-0 text-[#777777]" : "mr-2 h-5 w-5 shrink-0 text-[#777777]"} aria-hidden="true" />
+                    {!isSidebarCollapsed ? <span className={isActive ? "min-w-0 flex-1 truncate text-[13px] font-medium text-[#111111]" : "min-w-0 flex-1 truncate text-[13px] font-medium text-[#333333]"}>{item.label}</span> : null}
+                    {!isSidebarCollapsed ? <span className="ml-auto w-10 shrink-0 text-right text-[12px] text-[#9a9a9a]">{item.count}</span> : null}
                   </button>
                 );
               })}
@@ -11644,21 +12022,130 @@ export function ChatWorkbench() {
           </>
         ) : (
           <>
-            <div className="mb-2 flex items-center justify-between px-2 text-xs text-[#8a8a8a]">
+            {!isSidebarCollapsed ? <div className="mb-2 flex items-center justify-between px-2 text-xs text-[#8a8a8a]">
               <span>{activePanel === "workflow" ? "我的工作流" : "历史对话"}</span>
-              <span>{activePanel === "workflow" ? workflowItems.length : sessions.length}</span>
-            </div>
+              <span>{activePanel === "workflow" ? workflowItems.length : historySessions.length}</span>
+            </div> : null}
             <button
               type="button"
               onClick={activePanel === "workflow" ? startNewWorkflow : startNewSession}
-              className="relative mb-2 flex h-9 w-full items-center justify-center rounded-lg border border-dashed border-[#cfcfcf] px-3 text-center font-medium text-[#111111] transition hover:border-[#b8b8b8] hover:bg-[#ececec]"
+              className={isSidebarCollapsed ? "relative mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-lg border border-dashed border-[#cfcfcf] text-center font-medium text-[#111111] transition hover:border-[#b8b8b8] hover:bg-[#ececec]" : "relative mb-2 flex h-9 w-full items-center justify-center rounded-lg border border-dashed border-[#cfcfcf] px-3 text-center font-medium text-[#111111] transition hover:border-[#b8b8b8] hover:bg-[#ececec]"}
+              aria-label={activePanel === "workflow" ? "新建工作流" : "新建对话"}
+              title={activePanel === "workflow" ? "新建工作流" : "新建对话"}
             >
-              <span className="relative text-[13px] leading-[1.2]">
+              {isSidebarCollapsed ? <RiAddLine className="h-5 w-5 text-[#111111]" aria-hidden="true" /> : <span className="relative text-[13px] leading-[1.2]">
                 <RiAddLine className="absolute right-full top-1/2 mr-2 h-5 w-5 -translate-y-1/2 text-[#111111]" aria-hidden="true" />
                 {activePanel === "workflow" ? "新建工作流" : "新建对话"}
-              </span>
+              </span>}
             </button>
-            <div className="yinzao-chat-scroll yinzao-scrollbar-hover -mr-3 min-h-0 flex-1 space-y-[3px] overflow-y-auto pb-px pl-px pr-3 pt-px">
+            {isSidebarCollapsed ? (
+              <div className="relative flex min-h-0 flex-1 justify-center pt-px">
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    const shouldClose = isCollapsedHistoryMenuOpen;
+                    closeAllPopupMenus();
+                    if (!shouldClose) setIsCollapsedHistoryMenuOpen(true);
+                  }}
+                  className={isCollapsedHistoryMenuOpen ? "flex h-10 w-10 items-center justify-center rounded-lg bg-[#ececec] text-[#111111]" : "flex h-10 w-10 items-center justify-center rounded-lg text-[#555555] transition hover:bg-[#ececec] hover:text-[#111111]"}
+                  aria-label={activePanel === "workflow" ? "打开工作流列表" : "打开历史对话"}
+                  title={activePanel === "workflow" ? "工作流列表" : "历史对话"}
+                >
+                  {activePanel === "workflow" ? <RiGitPullRequestLine className="h-5 w-5" aria-hidden="true" /> : <RiChat3Line className="h-5 w-5" aria-hidden="true" />}
+                </button>
+
+                {isCollapsedHistoryMenuOpen ? (
+                  <div onClick={(event) => event.stopPropagation()} className="absolute left-[66px] top-0 z-40 flex max-h-[520px] w-[222px] flex-col overflow-hidden rounded-[12px] border border-[#e0e0e0] bg-white p-2 shadow-[0_10px_28px_rgba(0,0,0,0.12)]">
+                    <div className="yinzao-chat-scroll yinzao-scrollbar-hover min-h-0 flex-1 space-y-[3px] overflow-y-auto pr-1">
+                      {activePanel === "workflow" ? workflowItems.map((item) => {
+                        const isMenuOpen = openWorkflowMenuId === item.id;
+
+                        return (
+                          <div key={item.id} className="relative">
+                            <button type="button" onClick={() => { setActiveWorkflowId(item.id); setOpenWorkflowMenuId(""); setIsCollapsedHistoryMenuOpen(false); }} className={item.id === activeWorkflow?.id ? "flex h-9 w-full items-center rounded-lg bg-[#ececec] px-3 pr-10 text-left" : "flex h-9 w-full items-center rounded-lg px-3 pr-10 text-left transition hover:bg-[#ececec]"}>
+                              <div className={item.id === activeWorkflow?.id ? "min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#111111]" : "min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#333333]"}>{item.title}</div>
+                            </button>
+                            <button type="button" aria-label="打开工作流菜单" onClick={(event) => { event.stopPropagation(); toggleWorkflowMenu(item.id, event.currentTarget); }} className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-[#6f6f6f] transition hover:bg-[#dedede] hover:text-[#111111]">
+                              <RiMoreLine className="h-4 w-4" aria-hidden="true" />
+                            </button>
+                            {isMenuOpen && !isSidebarCollapsed ? (
+                              <div onClick={(event) => event.stopPropagation()} className="absolute right-1 top-10 z-50 w-32 rounded-xl border border-slate-100 bg-white p-1 shadow-[0_12px_28px_rgba(15,23,42,0.12)]">
+                                <button type="button" onClick={() => pinWorkflow(item.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-slate-900 hover:bg-slate-50"><RiPushpinLine className="h-4 w-4 shrink-0" aria-hidden="true" /><span>置顶</span></button>
+                                <button type="button" onClick={() => renameWorkflow(item.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-slate-900 hover:bg-slate-50"><RiEditBoxLine className="h-4 w-4 shrink-0" aria-hidden="true" /><span>重命名</span></button>
+                                <button type="button" onClick={() => deleteWorkflow(item.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-red-500 hover:bg-red-50"><RiDeleteBinLine className="h-4 w-4 shrink-0" aria-hidden="true" /><span>删除</span></button>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      }) : visibleHistorySessions.map((session) => {
+                        const isActive = session.id === activeSession?.id;
+                        const isMenuOpen = openSessionMenuId === session.id;
+                        const isSessionRunning = resolvingSessionIds.has(session.id) || getSessionPendingRequests(session).length > 0 || modelInfoSessionId === session.id;
+
+                        return (
+                          <div key={session.id} className="relative">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveSessionId(session.id);
+                                setOpenSessionMenuId("");
+                                setIsCollapsedHistoryMenuOpen(false);
+                                void loadSessionDetails(session.id);
+                              }}
+                              className={isActive ? "flex h-9 w-full items-center rounded-lg bg-[#ececec] px-3 pr-10 text-left" : "flex h-9 w-full items-center rounded-lg px-3 pr-10 text-left transition hover:bg-[#ececec]"}
+                            >
+                              <div className={isActive ? "min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#111111]" : "min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#333333]"}>{session.title}{loadingSessionIds.has(session.id) ? " · 加载中" : ""}</div>
+                            </button>
+
+                            {isSessionRunning ? (
+                              <div className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center" aria-label="对话生成中"><HaloPulseIndicator /></div>
+                            ) : (
+                              <button type="button" aria-label="打开对话菜单" onClick={(event) => { event.stopPropagation(); toggleSessionMenu(session.id, event.currentTarget); }} className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-[#6f6f6f] transition hover:bg-[#dedede] hover:text-[#111111]"><RiMoreLine className="h-4 w-4" aria-hidden="true" /></button>
+                            )}
+
+                            {isMenuOpen && !isSessionRunning && !isSidebarCollapsed ? (
+                              <div onClick={(event) => event.stopPropagation()} className="absolute right-1 top-10 z-50 w-32 rounded-xl border border-slate-100 bg-white p-1 shadow-[0_12px_28px_rgba(15,23,42,0.12)]">
+                                <button type="button" onClick={() => pinSession(session.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-slate-900 hover:bg-slate-50"><RiPushpinLine className="h-4 w-4 shrink-0" aria-hidden="true" /><span>置顶</span></button>
+                                <button type="button" onClick={() => renameSession(session.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-slate-900 hover:bg-slate-50"><RiEditBoxLine className="h-4 w-4 shrink-0" aria-hidden="true" /><span>重命名</span></button>
+                                <button type="button" onClick={() => deleteSession(session.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-red-500 hover:bg-red-50"><RiDeleteBinLine className="h-4 w-4 shrink-0" aria-hidden="true" /><span>删除</span></button>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                      {shouldShowHistoryLoadStatus ? (
+                        workspaceLoadStatus === "failed" ? (
+                          <button type="button" onClick={retryWorkspaceLoad} className="mt-2 flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]">
+                            <div className="min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#367cee]">{historyLoadStatusText}</div>
+                          </button>
+                        ) : (
+                          <div className="mt-2 flex h-9 w-full items-center rounded-lg px-3 text-left">
+                            <div className="min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#9a9a9a]">{historyLoadStatusText}</div>
+                          </div>
+                        )
+                      ) : null}
+                      {activePanel !== "workflow" && (hiddenHistorySessionCount > 0 || historyHasMoreSessions) ? (
+                        <button
+                          type="button"
+                          disabled={isHistoryLoadingMore}
+                          onClick={() => {
+                            if (hiddenHistorySessionCount > 0) {
+                              setHistoryVisibleSessionCount((count) => Math.min(historySessions.length, count + HISTORY_LOAD_MORE_COUNT));
+                              return;
+                            }
+                            void loadMoreHistorySessions();
+                          }}
+                          className="mt-2 flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]"
+                        >
+                          <div className="min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#9a9a9a]">{isHistoryLoadingMore ? "加载中..." : "加载更多"}</div>
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : <div className="yinzao-chat-scroll yinzao-scrollbar-hover -mr-3 min-h-0 flex-1 space-y-[3px] overflow-y-auto pb-10 pl-px pr-3 pt-px">
               {activePanel === "workflow" ? workflowItems.map((item) => {
                 const isMenuOpen = openWorkflowMenuId === item.id;
 
@@ -11666,10 +12153,10 @@ export function ChatWorkbench() {
                   <div key={item.id} className="relative">
                     <button
                       type="button"
-                      onClick={() => setOpenWorkflowMenuId("")}
-                      className="flex h-9 w-full items-center rounded-lg px-3 pr-10 text-left transition hover:bg-[#ececec]"
+                      onClick={() => { setActiveWorkflowId(item.id); setOpenWorkflowMenuId(""); }}
+                      className={item.id === activeWorkflow?.id ? "flex h-9 w-full items-center rounded-lg bg-[#ececec] px-3 pr-10 text-left" : "flex h-9 w-full items-center rounded-lg px-3 pr-10 text-left transition hover:bg-[#ececec]"}
                     >
-                      <div className="min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#333333]">{item.title}</div>
+                      <div className={item.id === activeWorkflow?.id ? "min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#111111]" : "min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#333333]"}>{item.title}</div>
                     </button>
 
                     <button
@@ -11709,7 +12196,7 @@ export function ChatWorkbench() {
                     ) : null}
                   </div>
                 );
-              }) : sessions.map((session) => {
+              }) : visibleHistorySessions.map((session) => {
             const isActive = session.id === activeSession?.id;
             const isMenuOpen = openSessionMenuId === session.id;
             const isSessionRunning = resolvingSessionIds.has(session.id) || getSessionPendingRequests(session).length > 0 || modelInfoSessionId === session.id;
@@ -11776,14 +12263,41 @@ export function ChatWorkbench() {
               </div>
             );
               })}
-            </div>
+              {shouldShowHistoryLoadStatus ? (
+                workspaceLoadStatus === "failed" ? (
+                  <button type="button" onClick={retryWorkspaceLoad} className="mt-2 flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]">
+                    <div className="min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#367cee]">{historyLoadStatusText}</div>
+                  </button>
+                ) : (
+                  <div className="mt-2 flex h-9 w-full items-center rounded-lg px-3 text-left">
+                    <div className="min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#9a9a9a]">{historyLoadStatusText}</div>
+                  </div>
+                )
+              ) : null}
+              {activePanel !== "workflow" && (hiddenHistorySessionCount > 0 || historyHasMoreSessions) ? (
+                <button
+                  type="button"
+                  disabled={isHistoryLoadingMore}
+                  onClick={() => {
+                    if (hiddenHistorySessionCount > 0) {
+                      setHistoryVisibleSessionCount((count) => Math.min(historySessions.length, count + HISTORY_LOAD_MORE_COUNT));
+                      return;
+                    }
+                    void loadMoreHistorySessions();
+                  }}
+                  className="mt-2 flex h-9 w-full items-center rounded-lg px-3 text-left transition hover:bg-[#ececec]"
+                >
+                  <div className="min-w-0 truncate text-[13px] font-medium leading-[1.2] text-[#9a9a9a]">{isHistoryLoadingMore ? "加载中..." : "加载更多"}</div>
+                </button>
+              ) : null}
+            </div>}
           </>
         )}
-        <div className="relative z-20 mt-0 flex min-h-[148px] flex-col justify-center pb-3 pt-1">
-          <div aria-hidden="true" className="absolute bottom-0 left-[-12px] right-[-12px] top-[-6px] bg-[#f9f9f9]" />
-          <div aria-hidden="true" style={{ position: "absolute", left: -12, right: -12, top: -6, height: 1, background: "#e5e5e5", zIndex: 1 }} />
+        <div className={isSidebarCollapsed ? "relative z-20 mt-0 flex min-h-[118px] flex-col items-center justify-center pb-3 pt-1" : "relative z-20 mt-0 flex min-h-[148px] flex-col justify-center pb-3 pt-1"}>
+          <div aria-hidden="true" className={isSidebarCollapsed ? "absolute bottom-0 left-0 right-0 top-[-6px] bg-[#f9f9f9]" : "absolute bottom-0 left-[-12px] right-[-12px] top-[-6px] bg-[#f9f9f9]"} />
+          <div aria-hidden="true" style={{ position: "absolute", left: isSidebarCollapsed ? 0 : -12, right: isSidebarCollapsed ? 0 : -12, top: -6, height: 1, background: "#e5e5e5", zIndex: 1 }} />
           {isUserMenuOpen ? (
-            <div onClick={(event) => event.stopPropagation()} className="absolute bottom-[60px] left-[calc(50%-1px)] z-[9999] w-[222px] -translate-x-1/2 overflow-visible rounded-[12px] border border-[#e0e0e0] bg-white pt-2 shadow-[0_10px_28px_rgba(0,0,0,0.12)]">
+            <div onClick={(event) => event.stopPropagation()} className={isSidebarCollapsed ? "absolute bottom-[60px] left-[18px] z-[9999] w-[222px] overflow-visible rounded-[12px] border border-[#e0e0e0] bg-white pt-2 shadow-[0_10px_28px_rgba(0,0,0,0.12)]" : "absolute bottom-[60px] left-[calc(50%-1px)] z-[9999] w-[222px] -translate-x-1/2 overflow-visible rounded-[12px] border border-[#e0e0e0] bg-white pt-2 shadow-[0_10px_28px_rgba(0,0,0,0.12)]"}>
               <button type="button" onClick={() => openUserDialog("profile")} className="mx-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-[6px] px-2 text-left text-[12px] font-medium text-[#333333] transition hover:bg-[#e9e9e9]">
                 <RiAccountCircleLine className="h-[18px] w-[18px] text-[#777777]" aria-hidden="true" />
                 <span style={{ fontSize: 13 }}>用户信息</span>
@@ -11841,19 +12355,30 @@ export function ChatWorkbench() {
               </div>
             </div>
           ) : null}
-          <div className="relative z-10 mx-[7px] mt-0 rounded-[10px] border border-[#eeeeee] bg-white p-1.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
-            <div className="flex h-7 items-center px-1">
-              <div className="flex items-center gap-1 whitespace-nowrap text-[12px] font-medium text-[#222222]">
-                <RiVipDiamondLine className="h-4 w-4 shrink-0 text-[#555555]" aria-hidden="true" />
-                <span>积分：<span className="font-semibold">{currentUserCredits.toLocaleString("en-US")}</span></span>
+          {isSidebarCollapsed ? (
+            <button type="button" onClick={() => openUserDialog("credits")} className="relative z-10 mt-0 flex h-12 w-12 flex-col items-center justify-center rounded-[10px] border border-[#eeeeee] bg-white text-[#222222] shadow-[0_1px_3px_rgba(0,0,0,0.04)] transition hover:bg-[#f7f7f7]" aria-label="打开我的积分" title="我的积分">
+              <div className="flex flex-col items-center justify-center gap-0.5">
+                <div className="flex flex-col items-center gap-0.5 whitespace-nowrap text-[11px] font-semibold leading-none text-[#222222]">
+                  <RiVipDiamondLine className="h-4 w-4 shrink-0 text-[#555555]" aria-hidden="true" />
+                  <span className="font-semibold">{currentUserCredits.toLocaleString("en-US")}</span>
+                </div>
               </div>
-            </div>
-            <button type="button" onClick={() => openUserDialog("credits")} className="mt-1 flex h-8 w-full items-center justify-center gap-1.5 rounded-[6px] bg-[#faf8f2] px-2 text-[#9b8460] transition hover:bg-[#f5f1e8]">
-              <RiVipCrown2Line className="h-[18px] w-[18px] shrink-0 text-[#9b8460]" aria-hidden="true" />
-              <span className="font-medium leading-none" style={{ fontSize: 12 }}>个人免费版</span>
             </button>
-          </div>
-          <button type="button" onClick={(event) => { event.stopPropagation(); const shouldClose = isUserMenuOpen; closeAllPopupMenus(); if (!shouldClose) setIsUserMenuOpen(true); }} className="relative z-10 mx-2 mt-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-lg px-2 text-left transition hover:bg-[#ececec]">
+          ) : (
+            <div className="relative z-10 mx-[7px] mt-0 rounded-[10px] border border-[#eeeeee] bg-white p-1.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div className="flex h-7 items-center px-1">
+                <div className="flex items-center gap-1 whitespace-nowrap text-[12px] font-medium text-[#222222]">
+                  <RiVipDiamondLine className="h-4 w-4 shrink-0 text-[#555555]" aria-hidden="true" />
+                  <span>积分：<span className="font-semibold">{currentUserCredits.toLocaleString("en-US")}</span></span>
+                </div>
+              </div>
+              <button type="button" onClick={() => openUserDialog("credits")} className="mt-1 flex h-8 w-full items-center justify-center gap-1.5 rounded-[6px] bg-[#faf8f2] px-2 text-[#9b8460] transition hover:bg-[#f5f1e8]">
+                <RiVipCrown2Line className="h-[18px] w-[18px] shrink-0 text-[#9b8460]" aria-hidden="true" />
+                <span className="font-medium leading-none" style={{ fontSize: 12 }}>个人免费版</span>
+              </button>
+            </div>
+          )}
+          <button type="button" onClick={(event) => { event.stopPropagation(); const shouldClose = isUserMenuOpen; closeAllPopupMenus(); if (!shouldClose) setIsUserMenuOpen(true); }} className={isSidebarCollapsed ? "relative z-10 mt-2 flex h-11 w-11 items-center justify-center rounded-lg transition hover:bg-[#ececec]" : "relative z-10 mx-2 mt-2 flex h-11 w-[calc(100%-16px)] items-center gap-3 rounded-lg px-2 text-left transition hover:bg-[#ececec]"}>
             <div className="relative h-7 w-7 shrink-0 overflow-hidden rounded-full" style={currentUserAvatarUrl ? undefined : { backgroundColor: defaultUserAvatar.backgroundColor, border: `1px solid ${defaultUserAvatar.borderColor}`, color: defaultUserAvatar.color }}>
               {currentUserAvatarUrl ? (
                 <Image src={currentUserAvatarUrl} alt="用户头像" width={32} height={32} unoptimized className="h-full w-full object-cover" style={{ width: "100%", height: "100%" }} />
@@ -11861,13 +12386,65 @@ export function ChatWorkbench() {
                 <div className="flex h-full w-full items-center justify-center text-[13px] font-medium">{defaultUserAvatar.label}</div>
               )}
             </div>
-            <div className="flex min-w-0 flex-col justify-center">
+            {!isSidebarCollapsed ? <div className="flex min-w-0 flex-col justify-center">
               <div className="truncate text-[13px] font-medium leading-4 text-[#333333]">{currentUserNickname || currentUserEmail}</div>
               <div className="truncate text-[12px] leading-4 text-[#8a8a8a]">{currentUserEmail}</div>
-            </div>
+            </div> : null}
           </button>
         </div>
       </aside>
+
+      {isSidebarCollapsed && isCollapsedHistoryMenuOpen && collapsedActionMenuPosition && typeof document !== "undefined" ? (() => {
+        const session = openSessionMenuId ? visibleHistorySessions.find((item) => item.id === openSessionMenuId) : undefined;
+        if (session) {
+          return createPortal(
+            <div
+              onClick={(event) => event.stopPropagation()}
+              className="fixed z-[10000] w-32 rounded-xl border border-slate-100 bg-white p-1 shadow-[0_12px_28px_rgba(15,23,42,0.12)]"
+              style={{ left: collapsedActionMenuPosition.left, top: collapsedActionMenuPosition.top }}
+            >
+              <button type="button" onClick={() => pinSession(session.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-slate-900 hover:bg-slate-50">
+                <RiPushpinLine className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>置顶</span>
+              </button>
+              <button type="button" onClick={() => renameSession(session.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-slate-900 hover:bg-slate-50">
+                <RiEditBoxLine className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>重命名</span>
+              </button>
+              <button type="button" onClick={() => deleteSession(session.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-red-500 hover:bg-red-50">
+                <RiDeleteBinLine className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>删除</span>
+              </button>
+            </div>,
+            document.body,
+          );
+        }
+
+        const workflow = openWorkflowMenuId ? workflowItems.find((item) => item.id === openWorkflowMenuId) : undefined;
+        if (!workflow) return null;
+
+        return createPortal(
+          <div
+            onClick={(event) => event.stopPropagation()}
+            className="fixed z-[10000] w-32 rounded-xl border border-slate-100 bg-white p-1 shadow-[0_12px_28px_rgba(15,23,42,0.12)]"
+            style={{ left: collapsedActionMenuPosition.left, top: collapsedActionMenuPosition.top }}
+          >
+            <button type="button" onClick={() => pinWorkflow(workflow.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-slate-900 hover:bg-slate-50">
+              <RiPushpinLine className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>置顶</span>
+            </button>
+            <button type="button" onClick={() => renameWorkflow(workflow.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-slate-900 hover:bg-slate-50">
+              <RiEditBoxLine className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>重命名</span>
+            </button>
+            <button type="button" onClick={() => deleteWorkflow(workflow.id)} className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] font-medium text-red-500 hover:bg-red-50">
+              <RiDeleteBinLine className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>删除</span>
+            </button>
+          </div>,
+          document.body,
+        );
+      })() : null}
 
       <section
         className="flashmuse-main relative flex h-screen min-h-screen flex-col bg-white"
@@ -11877,7 +12454,7 @@ export function ChatWorkbench() {
         onDragLeave={handleChatDragLeave}
         onDrop={handleChatDrop}
       >
-        <div className="relative z-30 flex h-[56px] shrink-0 items-center justify-center border-b border-[#eeeeee] bg-white px-14">
+        {activePanel !== "workflow" ? <div className="relative z-30 flex h-[56px] shrink-0 items-center justify-center border-b border-[#eeeeee] bg-white px-14">
           <button
             type="button"
             onClick={() => setIsSidebarCollapsed((current) => !current)}
@@ -11888,7 +12465,7 @@ export function ChatWorkbench() {
           </button>
 
           <div className="flex min-w-0 items-center gap-1.5 text-center">
-            <div className="truncate text-[13px] font-medium leading-8 text-[#111111]">{activePanel === "assets" ? "资产库" : activePanel === "workflow" ? "工作流模式" : activeSession?.title ?? "新对话"}</div>
+            <div className="truncate text-[13px] font-medium leading-8 text-[#111111]">{activePanel === "assets" ? "资产库" : activeSession?.title ?? "新对话"}</div>
             {activePanel === "chat" && activeSession ? (
               <button
                 type="button"
@@ -11903,7 +12480,7 @@ export function ChatWorkbench() {
 
           {activePanel === "chat" ? <div className="absolute right-4 top-1/2 flex -translate-y-1/2 items-center justify-end"><UsageSummaryButton summary={activeSession?.usageSummary} mediaCounts={getSessionMediaCounts(activeSession)} /></div> : null}
 
-        </div>
+        </div> : null}
 
         <div className="relative flex-1 overflow-hidden">
           {isDragUploadActive ? (
@@ -11919,8 +12496,19 @@ export function ChatWorkbench() {
               </div>
             </div>
           ) : null}
-          <div ref={chatScrollRef} onScroll={updateScrollToBottomButton} className="yinzao-chat-scroll h-full overflow-y-auto bg-white px-4 py-8 pb-6 sm:px-6 lg:px-8">
+          <div ref={chatScrollRef} onScroll={updateScrollToBottomButton} className={activePanel === "workflow" ? "yinzao-chat-scroll h-full overflow-y-auto bg-white" : "yinzao-chat-scroll h-full overflow-y-auto bg-white px-4 py-8 pb-6 sm:px-6 lg:px-8"}>
           {activePanel === "assets" ? (
+            assetsLoadStatus !== "loaded" && !hasCurrentFilterAssets ? (
+              <div className="flex min-h-full items-center justify-center bg-white pb-20 pt-10 text-center">
+                <div className="flex w-[220px] flex-col items-center gap-2">
+                  <div className="text-[13px] font-medium leading-none text-[#367cee]">{assetsLoadStatus === "failed" ? "加载失败" : "加载中..."}</div>
+                  <div className="h-1 w-full overflow-hidden rounded-full bg-[#e8efff]">
+                    <div className="h-full w-2/3 animate-pulse rounded-full bg-[#367cee]" />
+                  </div>
+                  {assetsLoadStatus === "failed" ? <button type="button" onClick={() => { setAssetsLoadStatus("idle"); void loadWorkspaceAssets(); }} className="mt-2 text-[13px] font-medium text-[#367cee]">重新加载</button> : null}
+                </div>
+              </div>
+            ) : (
             <AssetManagementPanel assets={assets} assetFilter={assetFilter} renderLimit={assetRenderLimit} openAssetActionMenuId={openAssetActionMenuId} now={timerNow} pendingAssetGenerateJobs={assetGenerateJobs} onOpenPendingGenerate={openAssetGenerateJob} onDismissGenerateJob={(jobId) => setAssetGenerateJobs((current) => current.filter((job) => job.id !== jobId))} onOpenUpload={openAssetUploadDialog} onPreview={(asset) => { setPreviewDocumentFile(null); setPreviewAsset(enrichAssetPreviewMeta(asset)); }} onUseAsset={(asset) => {
               if (activeUploadedImages.length >= currentMaxReferenceImages && !activeUploadedImages.some((image) => image.url === asset.url)) {
                 showInputTip(`当前模型最多支持 ${currentMaxReferenceImages} 张参考图，不能上传更多图片`);
@@ -11972,8 +12560,27 @@ export function ChatWorkbench() {
               }));
               setOpenAssetActionMenuId("");
             }} onDelete={deleteAsset} onRestore={restoreAsset} />
+            )
           ) : activePanel === "workflow" ? (
-            <div className="min-h-full bg-[#f3f3f3] bg-[linear-gradient(to_right,#e4e4e4_1px,transparent_1px),linear-gradient(to_bottom,#e4e4e4_1px,transparent_1px)] bg-[size:24px_24px]" />
+            activeWorkflow ? (
+              <WorkflowCanvas
+                workflowId={activeWorkflow.id}
+                value={activeWorkflow.canvas}
+                workflowTitle={activeWorkflow.title}
+                onChange={(canvas) => updateWorkflowCanvas(activeWorkflow.id, canvas)}
+                onCredit={applyWorkflowCreditResult}
+              />
+            ) : (
+              <div className="flex h-full min-h-full items-center justify-center bg-[#f3f3f3] bg-[linear-gradient(to_right,#d8d8d8_1px,transparent_1px),linear-gradient(to_bottom,#d8d8d8_1px,transparent_1px),linear-gradient(to_right,#e9e9e9_1px,transparent_1px),linear-gradient(to_bottom,#e9e9e9_1px,transparent_1px)] bg-[size:120px_120px,120px_120px,24px_24px,24px_24px] text-center">
+                <div className="rounded-[16px] border border-[#e5e5e5] bg-white/90 px-8 py-7 shadow-[0_14px_40px_rgba(15,23,42,0.08)] backdrop-blur">
+                  <div className="text-[17px] font-semibold text-[#111111]">还没有工作流</div>
+                  <div className="mt-2 text-[13px] text-[#8a8a8a]">先新建一个工作流，再添加文本和图片节点。</div>
+                  <button type="button" onClick={startNewWorkflow} className="mt-5 inline-flex h-10 items-center gap-2 rounded-full bg-[#367cee] px-4 text-[13px] font-semibold text-white transition hover:bg-[#286fe0]">
+                    <RiAddLine className="h-4 w-4" aria-hidden="true" /> 新建工作流
+                  </button>
+                </div>
+              </div>
+            )
           ) : isActiveSessionLoading ? (
             <div className="flex min-h-full items-center justify-center bg-white pb-20 pt-10 text-center">
               <div className="flex flex-col items-center gap-2">
@@ -12010,6 +12617,18 @@ export function ChatWorkbench() {
             </div>
           ) : (
             <div className="mx-auto max-w-[1006px] space-y-12">
+              {activeSession?.messagesHasMore ? (
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    disabled={loadingOlderMessageSessionIds.has(activeSession.id)}
+                    onClick={() => void loadOlderMessages(activeSession.id)}
+                    className="rounded-full border border-[#e5e5e5] bg-white px-4 py-2 text-[13px] font-medium text-[#8a8a8a] transition hover:border-[#d8d8d8] hover:bg-[#f7f7f7] hover:text-[#666666] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {loadingOlderMessageSessionIds.has(activeSession.id) ? "加载中..." : "加载更早消息"}
+                  </button>
+                </div>
+              ) : null}
               {messages.map((message) => {
                 const isLegacyAgentErrorNotice = message.role === "assistant" && message.mode === "agent" && Boolean(message.error) && message.content === message.error;
 
@@ -12018,11 +12637,12 @@ export function ChatWorkbench() {
                   const modeNoticeContent = `${modeNoticeText[noticeMode].title}，${modeNoticeText[noticeMode].description}`;
                   const isErrorNotice = Boolean(message.error);
                   const isModeNotice = message.content === modeNoticeContent;
+                  const isAutoReviewNotice = isBytePlusAutoReviewNotice(message.content);
                   const ModeIcon = isErrorNotice || !isModeNotice ? RiErrorWarningLine : modeOptions.find((option) => option.value === noticeMode)?.icon ?? RiRobot2Line;
 
                   return (
-                    <div key={message.id} className={isErrorNotice ? "flex justify-start" : "flex justify-start border-t border-[#eeeeee] pt-4"}>
-                      <div className={isErrorNotice ? "inline-flex max-w-full items-start gap-2 text-rose-500" : "inline-flex max-w-full items-start gap-2 text-[#9a9a9a]"}>
+                    <div key={message.id} className={isErrorNotice || isAutoReviewNotice ? "flex justify-start" : "flex justify-start border-t border-[#eeeeee] pt-4"}>
+                      <div className={isErrorNotice ? "inline-flex max-w-full items-start gap-2 text-rose-500" : isAutoReviewNotice ? "inline-flex max-w-full items-start gap-2 text-[#367cee]" : "inline-flex max-w-full items-start gap-2 text-[#9a9a9a]"}>
                         <ModeIcon className="mt-[3px] h-5 w-5 shrink-0" aria-hidden="true" />
                         <div className="text-[13px] leading-6">
                           {isErrorNotice ? (
@@ -12479,11 +13099,6 @@ export function ChatWorkbench() {
                       className="pointer-events-auto inline-flex items-center px-0.5 text-[#367cee] transition hover:text-[#367cee]"
                       onClick={(event) => {
                         event.stopPropagation();
-                        if (!hasMentionAssetImages) {
-                          showInputTip("当前资产库没有图片");
-                          return;
-                        }
-
                         openMentionAssetMenu();
                     }}
                     >
@@ -12492,9 +13107,11 @@ export function ChatWorkbench() {
                   <span>资产，描述生成内容...</span>
                 </div>
               ) : null}
-              {hasAtAssetOptions ? (
+              {isAtAssetMenuOpen && (hasAtAssetOptions || assetsLoadStatus === "loading") ? (
                 <div onClick={(event) => event.stopPropagation()} className="absolute bottom-full left-2 z-50 mb-4 max-h-80 w-[380px] overflow-y-auto rounded-[12px] bg-white p-2 shadow-[0_18px_44px_rgba(0,0,0,0.14)]">
                   <div className="px-2 pb-2 text-[12px] text-[#8a8a8a]">引用资产</div>
+                  {assetsLoadStatus === "loading" ? <div className="px-2 py-4 text-[13px] text-[#367cee]">加载中...</div> : null}
+                  {assetsLoadStatus !== "loading" ? <>
                   <div className="mb-2 flex flex-nowrap gap-1.5 px-1">
                     {atAssetGroups.map((group) => {
                       const count = group.assets.length;
@@ -12526,6 +13143,7 @@ export function ChatWorkbench() {
                       </div>
                     </button>
                   ))}
+                  </> : null}
                 </div>
               ) : null}
               <PlainMentionEditor
@@ -12642,11 +13260,6 @@ export function ChatWorkbench() {
                   disabled={isMainInputDisabled}
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (!hasMentionAssetImages) {
-                      showInputTip("当前资产库没有图片");
-                      return;
-                    }
-
                     openMentionAssetMenu();
                   }}
                   className={`yinzao-tool-button inline-flex h-9 shrink-0 items-center rounded-[8px] px-3.5 text-[#777777] outline-none transition ${isAtAssetMenuOpen ? toolButtonActiveClassName : ""}`}
@@ -12877,9 +13490,11 @@ export function ChatWorkbench() {
                         <span>清空输入框</span>
                       </button>
                     </div>
-                    {hasCharacterAtAssetOptions && !isCharacterGenerateInputDisabled ? (
+                    {isCharacterAtAssetMenuOpen && (hasCharacterAtAssetOptions || assetsLoadStatus === "loading") && !isCharacterGenerateInputDisabled ? (
                       <div onClick={(event) => event.stopPropagation()} className="absolute right-0 top-10 z-[90] max-h-80 w-[380px] overflow-y-auto rounded-[12px] bg-white p-2 shadow-[0_18px_44px_rgba(0,0,0,0.14)]">
                         <div className="px-2 pb-2 text-[12px] text-[#8a8a8a]">引用资产</div>
+                        {assetsLoadStatus === "loading" ? <div className="px-2 py-4 text-[13px] text-[#367cee]">加载中...</div> : null}
+                        {assetsLoadStatus !== "loading" ? <>
                         <div className="mb-2 flex flex-nowrap gap-1.5 px-1">
                           {characterAtAssetGroups.map((group) => {
                             const count = group.assets.length;
@@ -12905,6 +13520,7 @@ export function ChatWorkbench() {
                             </div>
                           </button>
                         ))}
+                        </> : null}
                       </div>
                     ) : null}
                     {assetGenerateReferenceImages.length > 0 ? (
@@ -13642,27 +14258,6 @@ export function ChatWorkbench() {
                   </div>
                   {previewPromptErrorText ? <div className="mt-1.5 text-[14px] leading-6 text-red-500">{previewPromptErrorText}</div> : null}
                   <div className="mt-1.5 text-[14px] leading-6 text-[#333333]">{previewHasUsablePrompt ? previewAsset.sourcePrompt : "暂无提示词"}</div>
-                  {ENABLE_BYTEPLUS_ASSET_REVIEW && canReviewBytePlusAsset ? (
-                    <div className="mt-4 rounded-[10px] border border-[#e6e2dc] bg-white/58 p-3 text-[13px] text-[#555555]">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="font-medium text-[#333333]">火山素材审核</div>
-                          <div className="mt-1 text-[12px] text-[#8b8b8b]">{previewBytePlusStatusText}{previewAsset.bytePlusAssetId ? ` · ${previewAsset.bytePlusAssetId}` : ""}</div>
-                        </div>
-                        {canSubmitBytePlusAsset ? (
-                          <button type="button" disabled={isSubmittingBytePlusAsset} onClick={() => void submitBytePlusAsset()} className="inline-flex h-7 shrink-0 items-center rounded-[6px] bg-[#367cee] px-2.5 text-[12px] font-medium text-white transition hover:bg-[#2f6fd4] disabled:cursor-not-allowed disabled:opacity-55">
-                            {isSubmittingBytePlusAsset ? "提交中" : "提交审核"}
-                          </button>
-                        ) : canRefreshBytePlusAsset ? (
-                          <button type="button" disabled={isSubmittingBytePlusAsset} onClick={() => void refreshBytePlusAsset()} className="inline-flex h-7 shrink-0 items-center rounded-[6px] bg-[#111111] px-2.5 text-[12px] font-medium text-white transition hover:bg-[#252525] disabled:cursor-not-allowed disabled:opacity-55">
-                            {isSubmittingBytePlusAsset ? "刷新中" : "刷新状态"}
-                          </button>
-                        ) : null}
-                      </div>
-                      {previewAsset.bytePlusAssetStatus === "Active" ? <div className="mt-2 text-[12px] text-[#367cee]">视频生成会优先使用 asset:// 素材 ID。</div> : null}
-                      {previewAsset.bytePlusAssetError || previewBytePlusErrorText ? <div className="mt-2 text-[12px] leading-5 text-red-500">{previewBytePlusErrorText || previewAsset.bytePlusAssetError}</div> : null}
-                    </div>
-                  ) : null}
                 </div>
               </aside>
             </div>

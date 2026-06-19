@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { AdminLogoutButton } from "./admin-logout-button";
 import { AdminLoginForm } from "./admin-login-form";
 import { AdminCreditsPanel, type AdminCreditCategoryDetail, type AdminCreditConversationDetail, type AdminCreditFlowItem, type AdminCreditUser } from "./admin-credits-panel";
-import { AdminRecordsPanel } from "./admin-records-panel";
+import { AdminRecordsPanel, type AdminRecordSummary } from "./admin-records-panel";
 import { AdminSystemSettingsPanel } from "./admin-system-settings-panel";
 import { AdminUsersPanel, type AdminConversation, type AdminConversationMessage, type AdminMediaItem, type AdminUserRow } from "./admin-users-panel";
 import { getCreditSettings } from "@/lib/credits";
@@ -93,6 +93,10 @@ function getProviderLabel(model?: string | null) {
 function getUserLatestLoginActivity(user: { lastLoginAt: Date | null; sessions: Array<{ lastSeenAt: Date }> }) {
   const times = [user.lastLoginAt?.getTime() ?? 0, user.sessions[0]?.lastSeenAt?.getTime() ?? 0].filter((time) => time > 0);
   return times.length > 0 ? new Date(Math.max(...times)) : null;
+}
+
+function getUserSessionActiveTime(user: { sessions: Array<{ lastSeenAt: Date }> }) {
+  return user.sessions[0]?.lastSeenAt?.getTime() ?? 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -187,6 +191,56 @@ function getMetadataNumber(metadata: unknown, key: string) {
   return Number.isFinite(numberValue) ? numberValue : undefined;
 }
 
+function getMetadataRecord(metadata: unknown, key: string) {
+  if (!isRecord(metadata)) return undefined;
+  return isRecord(metadata[key]) ? metadata[key] as Record<string, unknown> : undefined;
+}
+
+function getMetadataSettings(metadata: unknown) {
+  const settings = getMetadataRecord(metadata, "settings");
+  return {
+    ratio: getString(settings?.ratio, getMetadataString(metadata, "ratio") || "-"),
+    resolution: getString(settings?.resolution, getMetadataString(metadata, "resolution") || "-"),
+    duration: getString(settings?.duration, getMetadataString(metadata, "duration") || "-"),
+  };
+}
+
+function parseAdminMediaParameterLine(parameters: string, kind: "image" | "video") {
+  const parts = parameters.split("|").map((part) => part.trim()).filter(Boolean);
+  const sizeAndResolution = parts[2] ?? "";
+  const resolution = sizeAndResolution.match(/(?:^|\s)(智能比例|\d+K|超清4K|480p|720p|1080p|4K|HD|FHD|SD)(?:\s|$)/)?.[1]?.replace("超清", "") ?? "-";
+  const size = sizeAndResolution.replace(resolution === "-" ? /$^/ : resolution, "").trim() || "-";
+  return {
+    model: parts[0] ?? "-",
+    ratio: parts[1] ?? "-",
+    resolution,
+    duration: kind === "video" ? parts[3] ?? "-" : "-",
+    size,
+  };
+}
+
+function mediaItemFromCreditFlowItem(item: AdminCreditFlowItem): AdminMediaItem {
+  const parsed = parseAdminMediaParameterLine(item.parameters, item.kind === "video" ? "video" : "image");
+  return {
+    id: item.id,
+    requestId: item.requestId,
+    type: item.kind === "video" ? "video" : "image",
+    systemName: item.systemName,
+    isDeleted: item.errorText === "用户已删除",
+    deletedAtLabel: item.deletedAtLabel,
+    name: item.displayName,
+    url: item.url,
+    prompt: item.promptText || item.displayName || "",
+    model: getModelLabel(item.kind === "video" ? "video" : "image", item.model || parsed.model || "-"),
+    ratio: parsed.ratio,
+    resolution: parsed.resolution,
+    duration: item.kind === "video" ? parsed.duration : "-",
+    size: parsed.size,
+    style: "-",
+    createdAtTs: item.createdAtTs,
+  };
+}
+
 function getLedgerExpectedCredits(item: { credits: number; cny: number; metadata: unknown }, creditsPerCny: number) {
   if (getMetadataBoolean(item.metadata, "creditChargeDisabled")) return 0;
   return Math.max(0, Math.floor(getMetadataNumber(item.metadata, "expectedCredits") ?? Math.round(item.cny * creditsPerCny) ?? item.credits));
@@ -217,6 +271,33 @@ function getMessageRole(value: unknown): AdminConversationMessage["role"] {
   return value === "user" || value === "assistant" || value === "system" ? value : "assistant";
 }
 
+function buildAdminWorkspaceState(state: unknown, sessionRows: Array<{ sessionId: string; title: string; updatedAt: Date; deletedAt: Date | null; messagesJson: unknown; summaryJson: unknown; usageSummary: unknown; memorySummary: unknown }>, messageRows: Array<{ sessionId: string; messageJson: unknown; createdAt: Date }>) {
+  if (sessionRows.length === 0) return state;
+  const messagesBySession = new Map<string, unknown[]>();
+  for (const row of [...messageRows].sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())) {
+    const messages = messagesBySession.get(row.sessionId) ?? [];
+    messages.push(row.messageJson);
+    messagesBySession.set(row.sessionId, messages);
+  }
+
+  const sessions = sessionRows.map((row) => {
+    const summary = isRecord(row.summaryJson) ? row.summaryJson : {};
+    const messages = messagesBySession.get(row.sessionId) ?? (Array.isArray(row.messagesJson) ? row.messagesJson : []);
+    return {
+      ...summary,
+      id: row.sessionId,
+      title: row.title,
+      updatedAt: row.updatedAt.getTime(),
+      deletedAt: row.deletedAt ? row.deletedAt.getTime() : undefined,
+      messages,
+      usageSummary: row.usageSummary,
+      memorySummary: row.memorySummary,
+    };
+  });
+
+  return { ...(isRecord(state) ? state : {}), sessions };
+}
+
 function getConversationActivityTime(session: Record<string, unknown>, messages: Record<string, unknown>[]) {
   const messageTimes = messages.map((message) => finiteNumber(message.createdAt)).filter((time) => time > 0);
   if (messageTimes.length > 0) return Math.max(...messageTimes);
@@ -237,6 +318,8 @@ function getWorkspaceConversations(state: unknown): AdminConversation[] {
       return {
         id,
         title: getString(session.title, "新对话") || "新对话",
+        isDeleted: finiteNumber(session.deletedAt) > 0,
+        deletedAtLabel: finiteNumber(session.deletedAt) > 0 ? formatTimestamp(session.deletedAt) : undefined,
         conversationCode: getString(session.conversationCode),
         updatedAtLabel: formatTimestamp(activityTime),
         updatedAtTs: activityTime,
@@ -302,22 +385,7 @@ function getDeletedConversationMediaItems(details: AdminCreditConversationDetail
       const normalizedUrl = normalizeMediaUrlForAdmin(media.url);
       if (seenUrls.has(normalizedUrl)) continue;
       seenUrls.add(normalizedUrl);
-      items.push({
-        id: `${detail.id}-deleted-media-${media.id}`,
-        type: media.kind,
-        isDeleted: true,
-        deletedAtLabel: detail.updatedAtLabel,
-        name: media.displayName,
-        url: media.url,
-        prompt: media.promptText || media.displayName || "",
-        model: media.model || "-",
-        ratio: "-",
-        resolution: "-",
-        duration: media.kind === "video" ? "-" : "-",
-        size: "-",
-        style: "-",
-        createdAtTs: operationTs || media.createdAtTs,
-      });
+      items.push({ ...mediaItemFromCreditFlowItem(media), id: `${detail.id}-deleted-media-${media.id}`, isDeleted: true, deletedAtLabel: detail.updatedAtLabel, createdAtTs: operationTs || media.createdAtTs });
     }
   }
 
@@ -775,8 +843,9 @@ function getWorkspaceAssetMediaItems(state: unknown): AdminMediaItem[] {
 
   return state.assets.filter(isRecord).flatMap((asset, index): AdminMediaItem[] => {
     const assetType = getString(asset.type);
+    const effectiveAssetType = assetType === "trash" ? getString(asset.previousType) : assetType;
     if (asset.librarySource !== "asset_generation") return [];
-    if (assetType !== "character_image" && assetType !== "scene_image" && assetType !== "shot_image" && assetType !== "trash") return [];
+    if (effectiveAssetType !== "character_image" && effectiveAssetType !== "scene_image" && effectiveAssetType !== "shot_image") return [];
     const url = getString(asset.url);
     if (!url) return [];
 
@@ -789,7 +858,7 @@ function getWorkspaceAssetMediaItems(state: unknown): AdminMediaItem[] {
     return [{
       id: getString(asset.id, `asset-image-${index}`),
       type: "image",
-      assetType: assetType === "trash" ? undefined : assetType,
+      assetType: effectiveAssetType,
       isDeleted: assetType === "trash" || Boolean(asset.deletedAt),
       deletedAtLabel: finiteNumber(asset.deletedAt) > 0 ? formatTimestamp(asset.deletedAt) : undefined,
       isUploadedAsset,
@@ -823,7 +892,7 @@ function getWorkspaceAssetMediaMap(state: unknown) {
 function getWorkspaceSummary(state: unknown) {
   const summary = { conversationCount: 0, generatedImageCount: 0, generatedVideoCount: 0, savedAssetCount: 0, totalTokens: 0, usd: 0 };
   if (!isRecord(state)) return summary;
-  summary.savedAssetCount = Array.isArray(state.assets) ? state.assets.filter(isRecord).filter((asset) => !asset.deletedAt && asset.type !== "trash").length : 0;
+  summary.savedAssetCount = Array.isArray(state.assets) ? state.assets.filter(isRecord).filter((asset) => getString(asset.url)).length : 0;
   if (!Array.isArray(state.sessions)) return summary;
 
   summary.conversationCount = state.sessions.length;
@@ -847,6 +916,82 @@ function getWorkspaceSummary(state: unknown) {
 
       summary.generatedImageCount += imageSlotCount > 0 ? imageSlotCount : countStringArray(message.images);
       summary.generatedVideoCount += countStringArray(message.videos) || (typeof message.videoUrl === "string" && message.videoUrl.length > 0 ? 1 : 0);
+    }
+  }
+
+  return summary;
+}
+
+function getWorkspaceRecordsSummary(state: unknown) {
+  const summary = {
+    conversationCount: 0,
+    conversationDeletedCount: 0,
+    imageGenerationCount: 0,
+    imageGenerationDeletedCount: 0,
+    videoGenerationCount: 0,
+    videoGenerationDeletedCount: 0,
+    uploadImageCount: 0,
+    uploadImageDeletedCount: 0,
+    uploadFileCount: 0,
+    uploadFileDeletedCount: 0,
+    latestRecordTs: 0,
+  };
+
+  if (!isRecord(state)) return summary;
+
+  const deletedAssetInfoMap = getDeletedAssetInfoMap(state);
+  if (Array.isArray(state.assets)) {
+    for (const asset of state.assets.filter(isRecord)) {
+      const assetType = getString(asset.type);
+      const effectiveAssetType = assetType === "trash" ? getString(asset.previousType) : assetType;
+      if (asset.librarySource !== "asset_generation") continue;
+      if (effectiveAssetType !== "character_image" && effectiveAssetType !== "scene_image" && effectiveAssetType !== "shot_image") continue;
+      const createdAtTs = finiteNumber(asset.createdAt);
+      summary.latestRecordTs = Math.max(summary.latestRecordTs, createdAtTs);
+      const isDeleted = assetType === "trash" || Boolean(asset.deletedAt);
+      if (isRecord(asset.previewMeta)) {
+        summary.imageGenerationCount += 1;
+        if (isDeleted) summary.imageGenerationDeletedCount += 1;
+      } else {
+        summary.uploadImageCount += 1;
+        if (isDeleted) summary.uploadImageDeletedCount += 1;
+      }
+    }
+  }
+
+  if (!Array.isArray(state.sessions)) return summary;
+  summary.conversationCount = state.sessions.filter(isRecord).length;
+
+  for (const session of state.sessions.filter(isRecord)) {
+    if (finiteNumber(session.deletedAt) > 0) summary.conversationDeletedCount += 1;
+    summary.latestRecordTs = Math.max(summary.latestRecordTs, finiteNumber(session.updatedAt), finiteNumber(session.createdAt));
+    const messages = Array.isArray(session.messages) ? session.messages.filter(isRecord) : [];
+
+    for (const message of messages) {
+      summary.latestRecordTs = Math.max(summary.latestRecordTs, finiteNumber(message.createdAt));
+      if (message.role === "user") {
+        const uploadedImages = getStringArray(message.images).filter((url) => /\/generated\/(?:users\/[^/]+\/)?upload_image\//.test(normalizeMediaUrlForAdmin(url)));
+        summary.uploadImageCount += uploadedImages.length;
+        const uploadedFiles = Array.isArray(message.uploadedFiles) ? message.uploadedFiles.length : 0;
+        summary.uploadFileCount += uploadedFiles;
+      }
+      if (message.role !== "assistant") continue;
+
+      const imageSlotUrls = Array.isArray(message.imageResultSlots)
+        ? message.imageResultSlots.filter(isRecord).filter((slot) => slot.type === "image").map((slot) => getString(slot.url)).filter(Boolean)
+        : [];
+      const imageUrls = imageSlotUrls.length > 0 ? imageSlotUrls : getStringArray(message.images);
+      for (const url of imageUrls) {
+        summary.imageGenerationCount += 1;
+        if (deletedAssetInfoMap.has(url) || deletedAssetInfoMap.has(normalizeMediaUrlForAdmin(url))) summary.imageGenerationDeletedCount += 1;
+      }
+
+      const videoUrl = getString(message.videoUrl);
+      const videoUrls = videoUrl ? [...getStringArray(message.videos), videoUrl].filter((url, index, array) => array.indexOf(url) === index) : getStringArray(message.videos);
+      for (const url of videoUrls) {
+        summary.videoGenerationCount += 1;
+        if (deletedAssetInfoMap.has(url) || deletedAssetInfoMap.has(normalizeMediaUrlForAdmin(url))) summary.videoGenerationDeletedCount += 1;
+      }
     }
   }
 
@@ -1005,12 +1150,189 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
     return <AdminLoginForm hasAdminEmails={adminEmails.length > 0} initialMessage={`当前账号 ${currentAdminEmail} 不在后台白名单中，请使用管理员邮箱登录`} />;
   }
 
-  const [users, totalUsers, todayUsers, disabledUsers, userTotals, creditSettings, creditLedgers, systemSettings] = await Promise.all([
+  if (activeTab === "settings") {
+    const systemSettings = getAdminSystemSettings();
+    return (
+      <AdminShell adminEmail={currentAdminEmail} activeTab={activeTab}>
+        <AdminSystemSettingsPanel settings={systemSettings} adminEmailCount={adminEmails.length} />
+      </AdminShell>
+    );
+  }
+
+  if (activeTab === "users") {
+    const [users, totalUsers, todayUsers, disabledUsers, userTotals] = await Promise.all([
+      prisma.user.findMany({
+        orderBy: { updatedAt: "desc" },
+        take: 1000,
+        include: {
+          workspace: { select: { updatedAt: true } },
+          workspaceSessions: { select: { deletedAt: true } },
+          sessions: { orderBy: { lastSeenAt: "desc" }, take: 1, select: { lastSeenAt: true } },
+          _count: { select: { sessions: true } },
+        },
+      }),
+      prisma.user.count(),
+      prisma.user.count({ where: { createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } } }),
+      prisma.user.count({ where: { disabled: true } }),
+      prisma.user.aggregate({ _sum: { credits: true } }),
+    ]);
+    const normalUsers = totalUsers - disabledUsers;
+    const rows: AdminUserRow[] = users.sort((left, right) => {
+      const rightLoginTime = getUserLatestLoginActivity(right)?.getTime() ?? 0;
+      const leftLoginTime = getUserLatestLoginActivity(left)?.getTime() ?? 0;
+      if (rightLoginTime !== leftLoginTime) return rightLoginTime - leftLoginTime;
+      return right.createdAt.getTime() - left.createdAt.getTime();
+    }).map((user) => ({
+      id: user.id,
+      email: user.email,
+      nickname: user.nickname,
+      phone: user.phone,
+      avatarUrl: user.avatarUrl,
+      language: user.language,
+      credits: user.credits,
+      disabled: user.disabled,
+      generalModeEnabled: user.generalModeEnabled,
+      generatedImageCount: user.generatedImageCount,
+      generatedVideoCount: user.generatedVideoCount,
+      conversationCount: user.workspaceSessions.filter((session) => !session.deletedAt).length,
+      consumedCredits: 0,
+      consumedTokens: 0,
+      consumedAmountLabel: "$0.0000 / ¥0.00",
+      notifyOnGenerationComplete: user.notifyOnGenerationComplete,
+      autoSaveHistory: user.autoSaveHistory,
+      previewWheelZoom: user.previewWheelZoom,
+      previewWheelFlip: user.previewWheelFlip,
+      hasPassword: Boolean(user.passwordHash),
+      createdAtLabel: formatDate(user.createdAt),
+      updatedAtLabel: formatDate(user.updatedAt),
+      lastLoginAtLabel: formatDate(getUserLatestLoginActivity(user)),
+      lastLoginIp: user.lastLoginIp,
+      lastLoginLocation: user.lastLoginLocation,
+      lastLoginUserAgent: user.lastLoginUserAgent,
+      workspaceSaved: Boolean(user.workspace),
+      workspaceUpdatedAtLabel: formatDate(user.workspace?.updatedAt),
+      sessionCount: user._count.sessions,
+      lastSessionSeenAtLabel: formatDate(user.sessions[0]?.lastSeenAt),
+      conversations: [],
+      mediaItems: [],
+      assetMediaItems: [],
+    }));
+
+    return (
+      <AdminShell adminEmail={currentAdminEmail} activeTab={activeTab}>
+        <AdminUsersPanel users={rows} stats={{ totalUsers, todayUsers, normalUsers, disabledUsers, totalCredits: userTotals._sum.credits || 0 }} />
+      </AdminShell>
+    );
+  }
+
+  if (activeTab === "credits") {
+    const [users, creditSettings, creditLedgers, userTotals] = await Promise.all([
+      prisma.user.findMany({ orderBy: { updatedAt: "desc" }, take: 1000, select: { id: true, email: true, nickname: true, avatarUrl: true, credits: true } }),
+      getCreditSettings(),
+      prisma.creditLedger.findMany({ orderBy: { createdAt: "desc" }, select: { userId: true, direction: true, kind: true, credits: true, totalTokens: true, usd: true, cny: true, createdAt: true } }),
+      prisma.user.aggregate({ _sum: { credits: true } }),
+    ]);
+    const creditLedgersByUser = creditLedgers.reduce((map, ledger) => {
+      const items = map.get(ledger.userId) ?? [];
+      items.push(ledger);
+      map.set(ledger.userId, items);
+      return map;
+    }, new Map<string, typeof creditLedgers>());
+    const increasedCredits = creditLedgers.filter((item) => item.direction === "increase").reduce((sum, item) => sum + item.credits, 0);
+    const rows: AdminCreditUser[] = users.map((user) => {
+      const ledgers = creditLedgersByUser.get(user.id) ?? [];
+      const consumed = ledgers.filter((item) => item.direction === "consume");
+      return {
+        id: user.id,
+        userEmail: user.email,
+        nickname: user.nickname,
+        avatarUrl: user.avatarUrl,
+        currentCredits: user.credits,
+        giftedCredits: ledgers.filter((item) => item.direction === "increase").reduce((sum, item) => sum + item.credits, 0),
+        signupGiftedCredits: ledgers.filter((item) => item.direction === "increase" && item.kind === "signup").reduce((sum, item) => sum + item.credits, 0),
+        adminAdjustedGiftedCredits: ledgers.filter((item) => item.direction === "increase" && item.kind === "admin_adjust").reduce((sum, item) => sum + item.credits, 0),
+        consumedCredits: consumed.reduce((sum, item) => sum + item.credits, 0),
+        consumedTokens: consumed.reduce((sum, item) => sum + item.totalTokens, 0),
+        consumedUsd: consumed.reduce((sum, item) => sum + item.usd, 0),
+        consumedCny: consumed.reduce((sum, item) => sum + item.cny, 0),
+        conversationConsumedCredits: 0,
+        assetGenerationConsumedCredits: 0,
+        promptToolConsumedCredits: 0,
+        conversationCreditDetails: [],
+        assetGenerationCreditDetails: [],
+        promptToolCreditDetails: [],
+        currentCreditDetails: [],
+        lastActiveLabel: ledgers[0] ? formatShortDate(ledgers[0].createdAt) : "-",
+      };
+    }).sort((left, right) => right.consumedCredits - left.consumedCredits);
+
+    return (
+      <AdminShell adminEmail={currentAdminEmail} activeTab={activeTab}>
+        <AdminCreditsPanel settings={{ usdToCnyRate: creditSettings.usdToCnyRate, creditsPerCny: creditSettings.creditsPerCny, signupCredits: creditSettings.signupCredits, chargeText: creditSettings.chargeText, chargeImage: creditSettings.chargeImage, chargeVideo: creditSettings.chargeVideo, chargePromptTool: creditSettings.chargePromptTool }} stats={{ totalUserCredits: userTotals._sum.credits || 0, increasedCredits }} rows={rows} />
+      </AdminShell>
+    );
+  }
+
+  if (activeTab === "records") {
+    const [recordUsers, recordLedgers] = await Promise.all([
+      prisma.user.findMany({
+        orderBy: { updatedAt: "desc" },
+        take: 1000,
+        include: {
+          workspace: { select: { state: true, updatedAt: true } },
+          workspaceSessions: { orderBy: { updatedAt: "desc" }, select: { sessionId: true, title: true, updatedAt: true, deletedAt: true, messagesJson: true, summaryJson: true, usageSummary: true, memorySummary: true } },
+          workspaceMessages: { orderBy: { createdAt: "asc" }, select: { sessionId: true, messageJson: true, createdAt: true } },
+        },
+      }),
+      prisma.creditLedger.findMany({ orderBy: { createdAt: "desc" }, select: { userId: true, createdAt: true } }),
+    ]);
+
+    const latestLedgerTsByUser = recordLedgers.reduce((map, ledger) => {
+      map.set(ledger.userId, Math.max(map.get(ledger.userId) ?? 0, ledger.createdAt.getTime()));
+      return map;
+    }, new Map<string, number>());
+
+    const summaries: AdminRecordSummary[] = recordUsers.map((user) => {
+      const workspaceState = buildAdminWorkspaceState(user.workspace?.state, user.workspaceSessions, user.workspaceMessages);
+      const recordSummary = getWorkspaceRecordsSummary(workspaceState);
+      return {
+        id: user.id,
+        email: user.email,
+        nickname: user.nickname,
+        avatarUrl: user.avatarUrl,
+        conversationCount: recordSummary.conversationCount,
+        conversationDeletedCount: recordSummary.conversationDeletedCount,
+        imageGenerationCount: Math.max(user.generatedImageCount, recordSummary.imageGenerationCount),
+        imageGenerationDeletedCount: recordSummary.imageGenerationDeletedCount,
+        videoGenerationCount: Math.max(user.generatedVideoCount, recordSummary.videoGenerationCount),
+        videoGenerationDeletedCount: recordSummary.videoGenerationDeletedCount,
+        uploadImageCount: recordSummary.uploadImageCount,
+        uploadImageDeletedCount: recordSummary.uploadImageDeletedCount,
+        uploadFileCount: recordSummary.uploadFileCount,
+        uploadFileDeletedCount: recordSummary.uploadFileDeletedCount,
+        latestRecordTs: Math.max(recordSummary.latestRecordTs, latestLedgerTsByUser.get(user.id) ?? 0, user.updatedAt.getTime()),
+      };
+    });
+
+    return (
+      <AdminShell adminEmail={currentAdminEmail} activeTab={activeTab}>
+        <AdminRecordsPanel summaries={summaries} />
+      </AdminShell>
+    );
+  }
+
+  const now = new Date();
+  const onlineSince = new Date(now.getTime() - 60_000);
+  const active30MinSince = new Date(now.getTime() - 30 * 60_000);
+
+  const [users, totalUsers, todayUsers, disabledUsers, userTotals, creditSettings, creditLedgers, systemSettings, activeWorkspaceSessions, active30MinSessions] = await Promise.all([
     prisma.user.findMany({
       orderBy: { updatedAt: "desc" },
       take: 1000,
       include: {
         workspace: { select: { state: true, updatedAt: true } },
+        workspaceSessions: { orderBy: { updatedAt: "desc" }, select: { sessionId: true, title: true, updatedAt: true, deletedAt: true, messagesJson: true, summaryJson: true, usageSummary: true, memorySummary: true } },
+        workspaceMessages: { orderBy: { createdAt: "asc" }, select: { sessionId: true, messageJson: true, createdAt: true } },
         sessions: { orderBy: { lastSeenAt: "desc" }, take: 1, select: { lastSeenAt: true } },
         _count: { select: { sessions: true } },
       },
@@ -1022,13 +1344,23 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
     getCreditSettings(),
     prisma.creditLedger.findMany({ orderBy: { createdAt: "desc" }, include: { user: { select: { email: true, nickname: true } } } }),
     Promise.resolve(getAdminSystemSettings()),
+    prisma.session.findMany({ where: { activeWorkspaceSeenAt: { gte: onlineSince }, expiresAt: { gt: now }, user: { is: { disabled: false } } }, select: { userId: true } }),
+    prisma.session.findMany({ where: { lastSeenAt: { gte: active30MinSince }, expiresAt: { gt: now }, user: { is: { disabled: false } } }, select: { userId: true } }),
   ]);
 
-  const totalImages = userTotals._sum.generatedImageCount || 0;
-  const totalVideos = userTotals._sum.generatedVideoCount || 0;
+  const dbTotalImages = userTotals._sum.generatedImageCount || 0;
+  const dbTotalVideos = userTotals._sum.generatedVideoCount || 0;
   const totalCredits = userTotals._sum.credits || 0;
+  const currentOnlineUsers = new Set(activeWorkspaceSessions.map((session) => session.userId)).size;
+  const active30MinUsers = new Set(active30MinSessions.map((session) => session.userId)).size;
   const increasedCredits = creditLedgers.filter((item) => item.direction === "increase").reduce((sum, item) => sum + item.credits, 0);
   const normalUsers = totalUsers - disabledUsers;
+  const creditLedgersByUser = creditLedgers.reduce((map, ledger) => {
+    const items = map.get(ledger.userId) ?? [];
+    items.push(ledger);
+    map.set(ledger.userId, items);
+    return map;
+  }, new Map<string, typeof creditLedgers>());
   const userIncreaseMap = new Map<string, number>();
   const userSignupIncreaseMap = new Map<string, number>();
   const userAdminAdjustIncreaseMap = new Map<string, number>();
@@ -1050,17 +1382,20 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
   const userWorkspaceConversationUploadItemMaps = new Map<string, Map<string, AdminCreditFlowItem[]>>();
   const userWorkspaceImageFailureMaps = new Map<string, Map<string, number>>();
   const userWorkspaceFailureErrorMaps = new Map<string, Map<string, string>>();
+  const userAdminWorkspaceStateMap = new Map<string, unknown>();
 
   for (const user of users) {
-    userWorkspaceMediaUrlMaps.set(user.id, getWorkspaceMediaUrlMap(user.workspace?.state));
-    userWorkspaceMediaSystemNameMaps.set(user.id, getWorkspaceMediaSystemNameMap(user.workspace?.state));
-    userWorkspaceMediaDetailMaps.set(user.id, getWorkspaceMediaDetailMap(user.workspace?.state));
-    userWorkspaceAssetMediaMaps.set(user.id, getWorkspaceAssetMediaMap(user.workspace?.state));
-    userWorkspaceDeletedAssetInfoMaps.set(user.id, getDeletedAssetInfoMap(user.workspace?.state));
-    userWorkspaceConversationMediaItemMaps.set(user.id, getWorkspaceConversationMediaItems(user.workspace?.state));
-    userWorkspaceConversationUploadItemMaps.set(user.id, getWorkspaceConversationUploadItems(user.workspace?.state));
-    userWorkspaceImageFailureMaps.set(user.id, getWorkspaceImageFailureCounts(user.workspace?.state));
-    userWorkspaceFailureErrorMaps.set(user.id, getWorkspaceFailureErrorMap(user.workspace?.state));
+    const adminWorkspaceState = buildAdminWorkspaceState(user.workspace?.state, user.workspaceSessions, user.workspaceMessages);
+    userAdminWorkspaceStateMap.set(user.id, adminWorkspaceState);
+    userWorkspaceMediaUrlMaps.set(user.id, getWorkspaceMediaUrlMap(adminWorkspaceState));
+    userWorkspaceMediaSystemNameMaps.set(user.id, getWorkspaceMediaSystemNameMap(adminWorkspaceState));
+    userWorkspaceMediaDetailMaps.set(user.id, getWorkspaceMediaDetailMap(adminWorkspaceState));
+    userWorkspaceAssetMediaMaps.set(user.id, getWorkspaceAssetMediaMap(adminWorkspaceState));
+    userWorkspaceDeletedAssetInfoMaps.set(user.id, getDeletedAssetInfoMap(adminWorkspaceState));
+    userWorkspaceConversationMediaItemMaps.set(user.id, getWorkspaceConversationMediaItems(adminWorkspaceState));
+    userWorkspaceConversationUploadItemMaps.set(user.id, getWorkspaceConversationUploadItems(adminWorkspaceState));
+    userWorkspaceImageFailureMaps.set(user.id, getWorkspaceImageFailureCounts(adminWorkspaceState));
+    userWorkspaceFailureErrorMaps.set(user.id, getWorkspaceFailureErrorMap(adminWorkspaceState));
   }
 
   for (const item of creditLedgers) {
@@ -1074,7 +1409,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
   }
 
   for (const user of users) {
-    const userLedgers = creditLedgers.filter((item) => item.userId === user.id).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+    const userLedgers = [...(creditLedgersByUser.get(user.id) ?? [])].sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
     const totalDelta = userLedgers.reduce((sum, item) => sum + (item.direction === "increase" ? item.credits : -item.credits), 0);
     let balance = user.credits - totalDelta;
     const details: AdminCreditUser["currentCreditDetails"] = [];
@@ -1202,8 +1537,26 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         const workspaceMediaSystemNameMap = userWorkspaceMediaSystemNameMaps.get(item.userId);
         const rawSystemName = typeof item.metadata === "object" && item.metadata && "systemName" in item.metadata ? String(item.metadata.systemName || "") : (mediaDetail?.systemName || workspaceMediaSystemNameMap?.get(resolvedUrl) || "");
         const rawUserName = typeof item.metadata === "object" && item.metadata && "assetName" in item.metadata ? String(item.metadata.assetName || "") : "";
+        const metadataSettings = getMetadataSettings(item.metadata);
+        const metadataMedia: AdminMediaItem = {
+          id: item.id,
+          requestId,
+          type: item.kind,
+          systemName: rawSystemName,
+          name: formatAdminMediaName(rawSystemName, rawUserName, resolvedUrl === "__FAILED__" ? "生成失败" : item.kind === "video" ? "video" : "image"),
+          url: resolvedUrl === "__FAILED__" ? "" : resolvedUrl,
+          prompt: getMetadataString(item.metadata, "originalPrompt") || getMetadataString(item.metadata, "prompt"),
+          model: getModelLabel(item.kind, item.model || "-"),
+          ratio: metadataSettings.ratio,
+          resolution: metadataSettings.resolution,
+          duration: item.kind === "video" ? metadataSettings.duration : "-",
+          size: "-",
+          style: "-",
+          createdAtTs: item.createdAt.getTime(),
+        };
+        const effectiveMediaDetail = mediaDetail ?? metadataMedia;
         const displayName = mediaDetail?.name || formatAdminMediaName(rawSystemName, rawUserName, resolvedUrl === "__FAILED__" ? "生成失败" : item.kind === "video" ? "video" : "image");
-        const parameterLine = formatAdminMediaParameterLine(mediaDetail, item.kind, item.model || "-", item.label || "-");
+        const parameterLine = formatAdminMediaParameterLine(effectiveMediaDetail, item.kind, item.model || "-", item.label || "-");
         const mediaItem: AdminCreditFlowItem = {
           id: item.id,
           requestId,
@@ -1224,7 +1577,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
           parameters: parameterLine,
           isChargeDisabled: getMetadataBoolean(item.metadata, "creditChargeDisabled"),
           isCostUnavailable: !getMetadataBoolean(item.metadata, "creditChargeDisabled") && item.credits === 0 && item.usd === 0 && item.cny === 0 && resolvedUrl !== "__FAILED__",
-          promptText: mediaDetail?.prompt,
+          promptText: effectiveMediaDetail.prompt,
           createdAtLabel: formatShortDate(item.createdAt),
           createdAtTs: item.createdAt.getTime(),
         };
@@ -1240,7 +1593,8 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
   const creditRows: AdminCreditUser[] = users.map((user) => {
     const creditSummary = userConsumeMap.get(user.id) ?? { credits: 0, totalTokens: 0, usd: 0, cny: 0 };
     const lastActiveAt = userCreditLastActiveMap.get(user.id);
-    const workspaceConversations = getWorkspaceConversations(user.workspace?.state);
+    const adminWorkspaceState = userAdminWorkspaceStateMap.get(user.id);
+    const workspaceConversations = getWorkspaceConversations(adminWorkspaceState);
     const ledgerConversationDetails = userConversationCreditDetailMap.get(user.id);
     const imageFailureMap = userWorkspaceImageFailureMaps.get(user.id);
     const failureErrorMap = userWorkspaceFailureErrorMaps.get(user.id);
@@ -1382,10 +1736,16 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
     const rightTime = userCreditLastActiveMap.get(right.id)?.getTime() ?? 0;
     return rightTime - leftTime;
   });
-  const adminUserRows: AdminUserRow[] = users.sort((left, right) => getUserLastActiveTime(right) - getUserLastActiveTime(left)).map((user) => {
-    const workspaceSummary = getWorkspaceSummary(user.workspace?.state);
+  const adminUserRows: AdminUserRow[] = users.sort((left, right) => {
+    const rightLoginTime = getUserLatestLoginActivity(right)?.getTime() ?? 0;
+    const leftLoginTime = getUserLatestLoginActivity(left)?.getTime() ?? 0;
+    if (rightLoginTime !== leftLoginTime) return rightLoginTime - leftLoginTime;
+    return right.createdAt.getTime() - left.createdAt.getTime();
+  }).map((user) => {
+    const adminWorkspaceState = userAdminWorkspaceStateMap.get(user.id);
+    const workspaceSummary = getWorkspaceSummary(adminWorkspaceState);
     const ledgerConversationDetailsForUser = userConversationCreditDetailMap.get(user.id);
-    const workspaceConversationsForUser = getWorkspaceConversations(user.workspace?.state);
+    const workspaceConversationsForUser = getWorkspaceConversations(adminWorkspaceState);
     const workspaceConversationIdsForUser = new Set(workspaceConversationsForUser.map((conversation) => conversation.id));
     const deletedConversations = Array.from(ledgerConversationDetailsForUser?.values() ?? [])
       .filter((detail) => !workspaceConversationIdsForUser.has(detail.id))
@@ -1421,10 +1781,10 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         createdAtTs: item.createdAtTs,
       };
     }));
-    const baseMediaItems = [...getWorkspaceMediaItems(user.workspace?.state), ...conversationUploadedImageMediaItems];
+    const baseMediaItems = [...getWorkspaceMediaItems(adminWorkspaceState), ...conversationUploadedImageMediaItems];
     const deletedConversationDetailsForUser = Array.from(ledgerConversationDetailsForUser?.values() ?? []).filter((detail) => !workspaceConversationIdsForUser.has(detail.id));
     const mediaItems = [...getDeletedConversationMediaItems(deletedConversationDetailsForUser, baseMediaItems), ...baseMediaItems];
-    const assetMediaItems = getWorkspaceAssetMediaItems(user.workspace?.state);
+    const assetMediaItems = getWorkspaceAssetMediaItems(adminWorkspaceState);
     const creditSummary = userConsumeMap.get(user.id) ?? { credits: 0, totalTokens: 0, usd: 0, cny: 0 };
 
     return {
@@ -1469,26 +1829,29 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
   const todayStart = startOfLocalDay();
   const sevenDaysAgo = addDays(todayStart, -6).getTime();
   const thirtyDaysAgo = addDays(todayStart, -29).getTime();
-  const activeTimeByUser = new Map(users.map((user) => [user.id, getUserLastActiveTime(user)]));
-  const todayActiveUsers = users.filter((user) => getUserLastActiveTime(user) >= todayStart.getTime()).length;
-  const wau = users.filter((user) => getUserLastActiveTime(user) >= sevenDaysAgo).length;
-  const mau = users.filter((user) => getUserLastActiveTime(user) >= thirtyDaysAgo).length;
+  const activeTimeByUser = new Map(users.map((user) => [user.id, getUserSessionActiveTime(user)]));
+  const todayActiveUsers = users.filter((user) => getUserSessionActiveTime(user) >= todayStart.getTime()).length;
+  const wau = users.filter((user) => getUserSessionActiveTime(user) >= sevenDaysAgo).length;
+  const mau = users.filter((user) => getUserSessionActiveTime(user) >= thirtyDaysAgo).length;
   const todayLedgers = creditLedgers.filter((ledger) => ledger.createdAt >= todayStart);
   const todayConsumedCredits = todayLedgers.filter((ledger) => ledger.direction === "consume").reduce((sum, ledger) => sum + ledger.credits, 0);
   const todayGenerationTasks = todayLedgers.filter((ledger) => ledger.kind === "image" || ledger.kind === "video").length;
   const totalWorkspaceSummary = users.reduce((summary, user) => {
-    const item = getWorkspaceSummary(user.workspace?.state);
+    const item = getWorkspaceSummary(userAdminWorkspaceStateMap.get(user.id));
     summary.conversationCount += item.conversationCount;
     summary.generatedImageCount += item.generatedImageCount;
     summary.generatedVideoCount += item.generatedVideoCount;
     summary.savedAssetCount += item.savedAssetCount;
     return summary;
   }, { conversationCount: 0, generatedImageCount: 0, generatedVideoCount: 0, savedAssetCount: 0 });
+  const totalImages = Math.max(dbTotalImages, totalWorkspaceSummary.generatedImageCount);
+  const totalVideos = Math.max(dbTotalVideos, totalWorkspaceSummary.generatedVideoCount);
   const dailyActivePoints = days30.map((day) => {
     const key = dayKey(day);
     const activeUsers = new Set<string>();
     for (const user of users) {
-      if (dayKey(new Date(getUserLastActiveTime(user))) === key) activeUsers.add(user.id);
+      const activeTime = getUserSessionActiveTime(user);
+      if (activeTime > 0 && dayKey(new Date(activeTime)) === key) activeUsers.add(user.id);
     }
     for (const ledger of creditLedgers) {
       if (dayKey(ledger.createdAt) === key) activeUsers.add(ledger.userId);
@@ -1535,7 +1898,7 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
     const rate = cohort.length > 0 ? Math.round((retained / cohort.length) * 100) : 0;
     return { label: `${days}日留存`, value: `${rate}%`, note: `${retained}/${cohort.length}` };
   });
-  const activeUserTop = users.slice().sort((left, right) => getUserLastActiveTime(right) - getUserLastActiveTime(left)).slice(0, 10).map((user) => ({ label: user.nickname || user.email, value: formatShortDate(new Date(getUserLastActiveTime(user))), note: user.id }));
+  const activeUserTop = users.slice().filter((user) => getUserSessionActiveTime(user) > 0).sort((left, right) => getUserSessionActiveTime(right) - getUserSessionActiveTime(left)).slice(0, 10).map((user) => ({ label: user.nickname || user.email, value: formatShortDate(new Date(getUserSessionActiveTime(user))), note: user.id }));
   const creditConsumeTop = creditRows.slice().sort((left, right) => right.consumedCredits - left.consumedCredits).slice(0, 10).map((user) => ({ label: user.nickname || user.userEmail, value: user.consumedCredits.toLocaleString("en-US"), note: user.id }));
   const systemStatusItems = [
     { label: "OpenRouter API", value: systemSettings.openRouterApiKeyEnabled ? "已启用" : "已关闭" },
@@ -1555,15 +1918,14 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
           <section className="grid grid-cols-4 gap-4">
             <StatCard label="注册用户总数" value={totalUsers.toLocaleString("en-US")} note={`今日新增 ${todayUsers}`} />
             <StatCard label="今日活跃 DAU" value={todayActiveUsers.toLocaleString("en-US")} note={`WAU ${wau} / MAU ${mau}`} />
-            <StatCard label="当前总积分余额" value={totalCredits.toLocaleString("en-US")} note={`今日消耗 ${todayConsumedCredits.toLocaleString("en-US")}`} />
-            <StatCard label="今日生成任务" value={todayGenerationTasks.toLocaleString("en-US")} note={`图片 ${totalImages} / 视频 ${totalVideos}`} />
+            <StatCard label="当前在线人数" value={currentOnlineUsers.toLocaleString("en-US")} note={`30分钟活跃 ${active30MinUsers.toLocaleString("en-US")}`} />
           </section>
 
           <section className="mt-4 grid grid-cols-4 gap-4">
+            <StatCard label="当前总积分余额" value={totalCredits.toLocaleString("en-US")} note={`今日消耗 ${todayConsumedCredits.toLocaleString("en-US")}`} />
             <StatCard label="历史对话总数" value={totalWorkspaceSummary.conversationCount.toLocaleString("en-US")} note="来自工作区记录" />
-            <StatCard label="工作区图片总数" value={Math.max(totalImages, totalWorkspaceSummary.generatedImageCount).toLocaleString("en-US")} note="生成与工作区综合" />
-            <StatCard label="工作区视频总数" value={Math.max(totalVideos, totalWorkspaceSummary.generatedVideoCount).toLocaleString("en-US")} note="生成与工作区综合" />
-            <StatCard label="资产保存总数" value={totalWorkspaceSummary.savedAssetCount.toLocaleString("en-US")} note={`管理员 ${adminEmails.length} 个`} />
+            <StatCard label="资产保存总数" value={totalWorkspaceSummary.savedAssetCount.toLocaleString("en-US")} note={`图片：${totalImages.toLocaleString("en-US")}，视频：${totalVideos.toLocaleString("en-US")}`} />
+            <StatCard label="今日生成任务" value={todayGenerationTasks.toLocaleString("en-US")} note={`图片 ${totalImages} / 视频 ${totalVideos}`} />
           </section>
 
           <div className="mt-6 grid grid-cols-2 gap-4">
@@ -1589,17 +1951,6 @@ export default async function AdminPage({ searchParams }: { searchParams?: Promi
         </>
       ) : null}
 
-      {activeTab === "users" ? <AdminUsersPanel users={adminUserRows} stats={{ totalUsers, todayUsers, normalUsers, disabledUsers, totalCredits }} /> : null}
-
-      {activeTab === "credits" ? (
-        <AdminCreditsPanel settings={{ usdToCnyRate: creditSettings.usdToCnyRate, creditsPerCny: creditSettings.creditsPerCny, signupCredits: creditSettings.signupCredits, chargeText: creditSettings.chargeText, chargeImage: creditSettings.chargeImage, chargeVideo: creditSettings.chargeVideo, chargePromptTool: creditSettings.chargePromptTool }} stats={{ totalUserCredits: totalCredits, increasedCredits }} rows={creditRows} />
-      ) : null}
-
-      {activeTab === "records" ? (
-        <AdminRecordsPanel users={adminUserRows} creditRows={creditRows} />
-      ) : null}
-
-      {activeTab === "settings" ? <AdminSystemSettingsPanel settings={systemSettings} adminEmailCount={adminEmails.length} /> : null}
     </AdminShell>
   );
 }

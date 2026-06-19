@@ -39,6 +39,7 @@ yarn-error.log*
 /start-project.log
 /.runtime/
 /AI-Video-Assistant_Project Planning/
+/tmp/*.tgz
 
 # vercel
 .vercel

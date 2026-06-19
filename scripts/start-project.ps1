@@ -24,11 +24,58 @@ if (-not $Worker) {
 
 function Test-Ready {
   try {
-    $response = Invoke-WebRequest $healthUrl -UseBasicParsing -TimeoutSec 2
+    $response = Invoke-WebRequest $healthUrl -UseBasicParsing -TimeoutSec 1
     return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
   } catch {
     return $false
   }
+}
+
+function Test-TcpPort {
+  param(
+    [string]$HostName,
+    [int]$Port,
+    [int]$TimeoutMs = 500
+  )
+
+  $client = New-Object System.Net.Sockets.TcpClient
+  try {
+    $async = $client.BeginConnect($HostName, $Port, $null, $null)
+    if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+      return $false
+    }
+
+    $client.EndConnect($async)
+    return $true
+  } catch {
+    return $false
+  } finally {
+    $client.Close()
+  }
+}
+
+function Test-DockerReady {
+  cmd.exe /c "docker info >nul 2>&1"
+  return $LASTEXITCODE -eq 0
+}
+
+function Start-DockerDesktopIfAvailable {
+  $dockerDesktopPath = Join-Path $Env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
+  if (-not (Test-Path -LiteralPath $dockerDesktopPath)) {
+    return $false
+  }
+
+  Start-Process -FilePath $dockerDesktopPath | Out-Null
+
+  for ($i = 0; $i -lt 5; $i++) {
+    if (Test-DockerReady) {
+      return $true
+    }
+
+    Start-Sleep -Seconds 1
+  }
+
+  return $false
 }
 
 function Invoke-LoggedCommand {
@@ -73,11 +120,31 @@ try {
 
   Set-Content -LiteralPath $log -Value "Starting Yinzao dev server..." -Encoding UTF8
 
-  if (-not (Invoke-LoggedCommand "docker compose up -d" "Failed to start local PostgreSQL. Please start Docker Desktop and try again.")) {
-    exit
+  if (-not (Test-TcpPort "127.0.0.1" 5432)) {
+    if (-not (Test-DockerReady)) {
+      Add-Content -LiteralPath $log -Value ""
+      Add-Content -LiteralPath $log -Value "Docker Desktop is not ready. Trying to start Docker Desktop..."
+
+      if (-not (Start-DockerDesktopIfAvailable)) {
+        Add-Content -LiteralPath $log -Value "Docker Desktop did not become ready within 5 seconds. Please restart Docker Desktop manually, wait until it finishes starting, then run this script again."
+        Start-Process notepad.exe $log
+        exit
+      }
+    }
+
+    if (-not (Invoke-LoggedCommand "docker compose up -d" "Failed to start local PostgreSQL. Please restart Docker Desktop and try again.")) {
+      exit
+    }
+  } else {
+    Add-Content -LiteralPath $log -Value "Local PostgreSQL is already listening on 127.0.0.1:5432. Skipping Docker startup."
   }
 
-  if (-not (Invoke-LoggedCommand "npx prisma migrate deploy" "Failed to apply database migrations. Please check start-project.log.")) {
+  $prismaCommand = "npx prisma migrate deploy"
+  if (Test-Path -LiteralPath (Join-Path $root "node_modules\.bin\prisma.cmd")) {
+    $prismaCommand = "node_modules\.bin\prisma.cmd migrate deploy"
+  }
+
+  if (-not (Invoke-LoggedCommand $prismaCommand "Failed to apply database migrations. Please check start-project.log.")) {
     exit
   }
 
