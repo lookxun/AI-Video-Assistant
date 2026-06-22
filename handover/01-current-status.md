@@ -77,7 +77,7 @@ Last checked: 2026-06-22 China time.
 - Server-info backend tab was polished after deploy: production now reads Malaysia locally and Ali through the server key, hard-disk rows show blue usage bars, and entering the tab automatically loads data once while keeping the refresh button.
 - Conversation history sidebar count was fixed. The small number beside `历史对话` now uses the server total count, including conversations not loaded in the sidebar page yet.
 - `07-remote-video-url-debug.md` is closed as a confirmed home-network/environment issue. All debug/test code, test pages, test messages, legacy test residue, and `/api/media-proxy` were removed. Remote temporary videos now play directly from provider URLs until local `/generated/...` replacement.
-- User requested a GitHub sync after this work; memo `M004 Commit Deployed Local Changes` was marked completed and this handover was updated for the next AI.
+- User requested a GitHub sync after this work; memo `M004 Commit Deployed Local Changes` was marked completed and this handover was updated for the next AI. Main deployed-change commit pushed to GitHub: `17806ea Sync deployed media and workflow updates`.
 
 ## Latest 2026-06-23 Deploy
 
