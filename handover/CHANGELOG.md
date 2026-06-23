@@ -12,7 +12,7 @@
 - Deployed code includes history ordering by own `updatedAt`, workflow media naming and counters, workflow async stale-state fix, workflow media generated-success persistence, node media metadata preservation on stale saves, workflow preview scoping/parameter display fixes, workflow node drag/input fixes, root layout Next `Script` client-error reporter, and conversation input scroll/caret preservation. Production workflow entry remains disabled because `NEXT_PUBLIC_WORKFLOW_MODE_ENABLED` is unset/false.
 - Post-deploy snapshot created at `/var/www/flashmuse/.runtime/deploy-checks/20260624-after-workflow-input-deploy.json`. Snapshot compare against before returned `ok: true`; totals, per-category counts, per-user assets, `stableMissingInNewTable`, fallback users, and `assetListHash` were unchanged.
 - Production checks after deploy: PM2 `flashmuse` online; `https://main.venusface.com/workspace`, `https://main.venusface.com/admin`, `https://main.venusface.com/admin?tab=upload-rules`, `https://main.venusface.com/admin?tab=server`, and `https://api.venusface.com/api/model-availability` returned 200. Workflow env flag remained disabled/unset.
-- GitHub sync requested by the user is part of this session. Record the final commit hash after commit/push is complete.
+- GitHub sync requested by the user is part of this session. Main deployed-change commit: `90ae17d Deploy workflow stabilization and input fixes`. A follow-up handover-only commit may exist after this to record the hash.
 
 ## 2026-06-24 Local Workflow Naming, Preview, And Canvas-State Stabilization
 

@@ -26,7 +26,7 @@ Last checked: 2026-06-24 China time.
 - Deployed previously local workflow stabilization: history ordering by row `updatedAt`, workflow media naming fields/counters, `image_N_wX` / `video_N_wX` naming, stale async workflow canvas fix, workflow generated media success persistence, node media metadata preservation on stale saves, workflow preview scoping/parameter display fixes, node drag/input fixes, and root layout `Script` warning fix.
 - Production post-deploy snapshot: `/var/www/flashmuse/.runtime/deploy-checks/20260624-after-workflow-input-deploy.json`. Snapshot compare against before returned `ok: true`; totals, category counts, per-user assets, `stableMissingInNewTable`, fallback users, and asset hash were unchanged.
 - Verified production endpoints returned 200: `https://main.venusface.com/workspace`, `https://main.venusface.com/admin`, `https://main.venusface.com/admin?tab=upload-rules`, `https://main.venusface.com/admin?tab=server`, and `https://api.venusface.com/api/model-availability`. PM2 process was online.
-- User requested GitHub sync after deploy. Commit/push details should be recorded in this section after the commit is created.
+- User requested GitHub sync after deploy. Main deployed-change commit: `90ae17d Deploy workflow stabilization and input fixes`. A small follow-up handover-only commit may exist after this to record the commit hash.
 
 ## Latest 2026-06-24 Local Workflow Stabilization
 
