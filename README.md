@@ -10,8 +10,8 @@
 
 ## 换电脑继续开发
 
-1. 克隆仓库：`git clone https://github.com/lookxun/AI-Video-Assistant.git`
-2. 进入目录：`cd AI-Video-Assistant`
+1. 克隆仓库：`git clone https://github.com/lookxun/FlashMuse_Agent.git FlashMuse_Agent`
+2. 进入目录：`cd FlashMuse_Agent`
 3. 安装依赖：`npm install`
 4. 复制 `.env.example` 为 `.env.local`
 5. 在 `.env.local` 填入自己的 `OPENROUTER_API_KEY`

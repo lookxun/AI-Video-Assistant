@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const planningDir = join(process.cwd(), "AI-Video-Assistant_Project Planning");
+const planningDir = join(process.cwd(), "FlashMuse_Agent_Project Planning");
 const outputPath = join(planningDir, "openrouter 视频模型支持比例和分辨率.docx");
 const tempRoot = join(tmpdir(), `yinzao-openrouter-video-support-${Date.now()}`);
 const zipPath = join(tmpdir(), `yinzao-openrouter-video-support-${Date.now()}.zip`);

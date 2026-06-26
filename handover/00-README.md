@@ -15,7 +15,15 @@ Read in this order:
 7. `07-remote-video-url-debug.md`
 8. `CHANGELOG.md`
 
-Project path: `E:\project\AI-Video-Assistant`
+Project path: `E:\project\FlashMuse_Agent`
+
+Local root note, 2026-06-26:
+
+- The temporary copied folder `E:\project\FlashMuse_Agent` was removed after comparing it with the original `E:\project\AI-Video-Assistant` folder.
+- The original `E:\project\AI-Video-Assistant` folder, which had the larger and more complete local state including `.runtime/`, was renamed to `E:\project\FlashMuse_Agent`.
+- The old path `E:\project\AI-Video-Assistant` should no longer exist. Continue from `E:\project\FlashMuse_Agent`.
+- The internal planning folder was renamed from `AI-Video-Assistant_Project Planning` to `FlashMuse_Agent_Project Planning`.
+- Final local validation after the rename: `npx tsc --noEmit` passed.
 
 Product name: `闪念 / FlashMuse`
 

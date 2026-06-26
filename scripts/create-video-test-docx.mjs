@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const planningDir = join(process.cwd(), "AI-Video-Assistant_Project Planning");
+const planningDir = join(process.cwd(), "FlashMuse_Agent_Project Planning");
 const inputPath = join(planningDir, "test", "video-model-test-raw.json");
 const outputPath = join(planningDir, "视频模型测试结果表.docx");
 const tempRoot = join(tmpdir(), `yinzao-video-test-docx-${Date.now()}`);

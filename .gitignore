@@ -38,7 +38,7 @@ yarn-error.log*
 /public/generated/
 /start-project.log
 /.runtime/
-/AI-Video-Assistant_Project Planning/
+/FlashMuse_Agent_Project Planning/
 /tmp/*.tgz
 
 # vercel

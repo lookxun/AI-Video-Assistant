@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 
-const output = join(process.cwd(), "AI-Video-Assistant_Project Planning", "图片模型尺寸测试表.docx");
+const output = join(process.cwd(), "FlashMuse_Agent_Project Planning", "图片模型尺寸测试表.docx");
 const tempRoot = join(tmpdir(), `yinzao-image-size-docx-${Date.now()}`);
 const zipPath = join(tmpdir(), `yinzao-image-size-docx-${Date.now()}.zip`);
 

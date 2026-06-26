@@ -32,6 +32,63 @@ body {
   margin: 0;
 }
 
+.workflow-lovart-skin .tl-background {
+  background: var(--workflow-canvas-bg, #cccccc) !important;
+  background-image: none !important;
+}
+
+.workflow-lovart-skin .tl-watermark_SEE-LICENSE,
+.workflow-lovart-skin [data-testid="tl-watermark-unlicensed"],
+.workflow-lovart-skin [data-testid="tl-watermark-licensed"] {
+  display: none !important;
+}
+
+.workflow-lovart-skin .workflow-node {
+  filter: none;
+}
+
+.workflow-lovart-skin .workflow-node,
+.workflow-lovart-skin .workflow-node * {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+.workflow-lovart-skin .workflow-node [class*="rounded-[14px]"] {
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(245, 247, 252, 0.9)) !important;
+  box-shadow: none !important;
+}
+
+.workflow-lovart-skin .workflow-node [class*="border-[#367cee]"] {
+  border-color: rgba(107, 157, 255, 0.95) !important;
+  box-shadow: none !important;
+}
+
+.workflow-lovart-skin .workflow-node-html,
+.workflow-lovart-skin .workflow-node-html * {
+  pointer-events: auto;
+}
+
+.workflow-lovart-skin .tl-selection__bg {
+  pointer-events: none;
+}
+
+.workflow-lovart-skin .yinzao-tool-button {
+  border-color: rgba(15, 23, 42, 0.08) !important;
+  background: rgba(255, 255, 255, 0.72) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.7), 0 6px 18px rgba(15,23,42,0.08) !important;
+  backdrop-filter: blur(12px);
+}
+
+.workflow-lovart-skin .yinzao-tool-button:hover,
+.workflow-lovart-skin .yinzao-tool-button-active {
+  background: rgba(255, 255, 255, 0.92) !important;
+}
+
+.workflow-lovart-skin .workflow-node textarea {
+  min-height: 56px;
+}
+
 button:focus,
 button:focus-visible,
 [role="button"]:focus,

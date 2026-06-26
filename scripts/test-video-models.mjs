@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 const OPENROUTER_VIDEOS_URL = "https://openrouter.ai/api/v1/videos";
-const OUTPUT_DIR = join(process.cwd(), "AI-Video-Assistant_Project Planning", "test");
+const OUTPUT_DIR = join(process.cwd(), "FlashMuse_Agent_Project Planning", "test");
 const RESULTS_PATH = join(OUTPUT_DIR, "video-model-test-results.md");
 const RAW_PATH = join(OUTPUT_DIR, "video-model-test-raw.json");
 

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Script from "next/script";
 import { GlobalScrollbarController } from "@/components/global-scrollbar-controller";
+import "tldraw/tldraw.css";
 import "./globals.css";
 
 const geistSans = Geist({

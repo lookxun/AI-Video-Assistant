@@ -96,7 +96,7 @@ import { ADVANCED_CHAT_MODEL, DEFAULT_CHAT_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_V
 import { toUserErrorMessage } from "@/lib/error-message";
 import { useBodyScrollLock } from "@/components/use-body-scroll-lock";
 import { BytePlusIcon } from "@/components/byteplus-icon";
-import { WorkflowCanvas, type WorkflowCanvasState } from "@/components/workflow-canvas";
+import { WorkflowCanvas, type WorkflowCanvasState, type WorkflowNode } from "@/components/workflow-tldraw-canvas";
 import { getSupportedUploadTypeLabel, getUploadAcceptValue, getUploadKindFromFileName, getUploadRule } from "@/lib/upload-rules";
 import { sanitizeModelOutputText } from "@/lib/text-cleanup";
 
@@ -2429,6 +2429,46 @@ function getPreviewMediaMeta(message: Message, imageUrl?: string): PreviewMediaM
   const qualityBadgeLabel = mode === "image" ? getImageQualityBadgeLabel(actualResolution) : "";
 
   return { modelLabel, ratio: actualRatio, sizeText, resolution: actualResolution, mode, duration, qualityBadgeLabel, nonStandardSize };
+}
+
+function getWorkflowNodeSourcePrompt(workflow: WorkflowItem, node: WorkflowNode) {
+  return node.data.prompt?.trim() || node.data.text?.trim() || node.data.outputText?.trim() || workflow.title;
+}
+
+function getWorkflowPreviewMeta(kind: "image" | "video", node: WorkflowNode, url: string, asset?: AssetItem): PreviewMediaMeta {
+  const assetMeta = asset?.previewMeta;
+  const dimensions = kind === "image" ? node.data.imageDimensions?.[url] : undefined;
+  if (assetMeta && assetMeta.sizeText && assetMeta.sizeText !== "-") return assetMeta;
+
+  const ratio = node.data.ratio || assetMeta?.ratio || (kind === "video" ? "16:9" : "智能比例");
+  const resolution = node.data.resolution || assetMeta?.resolution || (kind === "video" ? "720p" : "1K");
+  const expectedDimensions = dimensions ?? getDisplayDimensions(ratio, resolution, kind, node.data.model) ?? undefined;
+  const actualRatio = dimensions ? getCommonRatioLabel(dimensions.width, dimensions.height) : assetMeta?.ratio && assetMeta.ratio !== "-" ? assetMeta.ratio : expectedDimensions?.width && expectedDimensions.height ? getCommonRatioLabel(expectedDimensions.width, expectedDimensions.height) : ratio;
+  const sizeText = dimensions
+    ? `${dimensions.width} × ${dimensions.height}`
+    : assetMeta?.sizeText && assetMeta.sizeText !== "-"
+      ? assetMeta.sizeText
+      : expectedDimensions?.width && expectedDimensions.height
+        ? `${expectedDimensions.width} × ${expectedDimensions.height}`
+        : "智能尺寸";
+  const actualResolution = kind === "image"
+    ? getImageResolutionFromDimensions(dimensions ?? expectedDimensions) ?? resolution
+    : getVideoResolutionFromDimensions(dimensions ?? expectedDimensions) ?? resolution;
+
+  return {
+    modelLabel: node.data.model ? getGenerationModelLabel(kind, node.data.model) : assetMeta?.modelLabel || "-",
+    ratio: actualRatio,
+    sizeText,
+    resolution: actualResolution,
+    mode: kind,
+    duration: kind === "video" ? node.data.duration || assetMeta?.duration : undefined,
+    qualityBadgeLabel: kind === "image" ? getImageQualityBadgeLabel(actualResolution) : "",
+  };
+}
+
+function isInvalidPersistedPrompt(value: string) {
+  const text = value.trim();
+  return !text || /^\?+$/.test(text);
 }
 
 function getImageSourcePrompt(message: Message, url: string) {
@@ -6841,6 +6881,7 @@ export function ChatWorkbench() {
   const [openControlMenu, setOpenControlMenu] = useState<ControlMenuName | ModeMenuName | "">("");
   const [isLoaded, setIsLoaded] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarVisible, setIsSidebarVisible] = useState(true);
   const [workspaceSite, setWorkspaceSite] = useState<WorkspaceSite>("other");
   const [modelInfoSessionId, setModelInfoSessionId] = useState("");
   const [activeTypingMessageIds, setActiveTypingMessageIds] = useState<Set<string>>(() => new Set());
@@ -7243,6 +7284,12 @@ export function ChatWorkbench() {
   const activeConversationImageReferences = useMemo(() => getConversationImageReferences(messages), [messages]);
   const assetNameByUrl = useMemo(() => new Map(assets.map((asset) => [normalizeMediaUrlForMatch(asset.url), asset.name])), [assets]);
   const getCanonicalMediaName = useCallback((message: Message, url: string, fallbackName: string) => assetNameByUrl.get(normalizeMediaUrlForMatch(url)) ?? getMediaSystemName(message, url, fallbackName), [assetNameByUrl]);
+
+  useEffect(() => {
+    if (activePanel !== "workflow") return;
+    const nextActiveWorkflowId = activeWorkflowItems.some((item) => item.id === activeWorkflowId) ? activeWorkflowId : activeWorkflowItems[0]?.id ?? "";
+    if (nextActiveWorkflowId !== activeWorkflowId) setActiveWorkflowId(nextActiveWorkflowId);
+  }, [activePanel, activeWorkflowId, activeWorkflowItems]);
   const updateUploadedRowScrollState = useCallback(() => {
     const filesRow = uploadedFilesRowRef.current;
     const imagesRow = uploadedImagesRowRef.current;
@@ -7295,6 +7342,46 @@ export function ChatWorkbench() {
     setActiveAssetGeneratePrompt(nextPrompt);
     setCharacterPromptCursorOffset(Math.min(characterPromptCursorOffset, nextPrompt.length));
   }, [characterGeneratePrompt, characterPromptCursorOffset, setActiveAssetGeneratePrompt]);
+  const getWorkflowPreviewAsset = useCallback((workflow: WorkflowItem, node: WorkflowNode, kind: "image" | "video", url: string, asset?: AssetItem): AssetItem => {
+    const nodeName = node.data.mediaSystemNames?.[url];
+    const fallbackName = kind === "video" ? "视频生成" : "图片生成";
+    const name = nodeName || asset?.systemName || asset?.name || fallbackName;
+    const assetPrompt = asset?.sourcePrompt?.trim() ?? "";
+    const sourcePrompt = assetPrompt && !isInvalidPersistedPrompt(assetPrompt) ? assetPrompt : getWorkflowNodeSourcePrompt(workflow, node);
+    const previewMeta = getWorkflowPreviewMeta(kind, node, url, asset);
+
+    if (asset) {
+      return {
+        ...asset,
+        name,
+        systemName: asset.systemName || nodeName || name,
+        sourcePrompt,
+        posterUrl: kind === "video" ? asset.posterUrl || node.data.posterUrl : asset.posterUrl,
+        previewMeta,
+        sessionId: asset.sessionId || workflow.id,
+        workflowId: asset.workflowId || workflow.id,
+        workflowNodeId: asset.workflowNodeId || node.id,
+      };
+    }
+
+    return {
+      id: `${workflow.id}-${node.id}-${kind}-${normalizeMediaUrlForMatch(url)}`,
+      type: kind === "video" ? "shot_video" : "other",
+      name,
+      systemName: nodeName || name,
+      url,
+      posterUrl: kind === "video" ? node.data.posterUrl : undefined,
+      librarySource: "workflow",
+      sourcePrompt,
+      promptSource: "generated",
+      previewMeta,
+      sessionId: workflow.id,
+      workflowId: workflow.id,
+      workflowNodeId: node.id,
+      lockedType: true,
+      createdAt: workflow.updatedAt ?? Date.now(),
+    };
+  }, []);
   const getCanonicalPreviewAsset = useCallback((asset: AssetItem): AssetItem => {
     if (isUploadedAsset(asset)) return { ...asset, previewMeta: undefined };
 
@@ -7325,55 +7412,14 @@ export function ChatWorkbench() {
       const workflow = workflowItems.find((item) => item.id === workflowId);
       if (workflow?.canvas?.nodes?.length) {
         return workflow.canvas.nodes.flatMap((node) => {
-          const sourcePrompt = node.data.prompt?.trim() || node.data.text?.trim() || workflow.title;
           const imageItems = (node.data.images ?? []).map((url, imageIndex) => {
             const existingAsset = assets.find((asset) => isWorkflowAsset(asset) && normalizeMediaUrlForMatch(asset.url) === normalizeMediaUrlForMatch(url));
-            if (existingAsset) return getCanonicalPreviewAsset(existingAsset);
-            const dimensions = node.data.imageDimensions?.[url];
-            return {
-              id: `${workflow.id}-${node.id}-image-${imageIndex}`,
-              type: "other" as const,
-              name: node.data.mediaSystemNames?.[url] ?? "图片生成",
-              systemName: node.data.mediaSystemNames?.[url] ?? "图片生成",
-              url,
-              posterUrl: undefined,
-              librarySource: "workflow" as const,
-              sourcePrompt,
-              promptSource: "generated" as const,
-              previewMeta: {
-                modelLabel: node.data.model ? getGenerationModelLabel("image", node.data.model) : "-",
-                ratio: dimensions ? getCommonRatioLabel(dimensions.width, dimensions.height) : node.data.ratio || "-",
-                sizeText: dimensions ? `${dimensions.width} × ${dimensions.height}` : "-",
-                resolution: dimensions ? getImageResolutionFromDimensions(dimensions) ?? node.data.resolution ?? "-" : node.data.resolution || "-",
-                mode: "image" as const,
-              },
-              sessionId: workflow.id,
-              workflowId: workflow.id,
-              workflowNodeId: node.id,
-              lockedType: true,
-              createdAt: workflow.updatedAt ?? Date.now(),
-            };
+            const item = getWorkflowPreviewAsset(workflow, node, "image", url, existingAsset);
+            return imageIndex === 0 ? item : { ...item, id: `${item.id}-${imageIndex}` };
           });
           const videoItem = node.data.videoUrl ? (() => {
             const existingAsset = assets.find((asset) => isWorkflowAsset(asset) && normalizeMediaUrlForMatch(asset.url) === normalizeMediaUrlForMatch(node.data.videoUrl as string));
-            if (existingAsset) return [getCanonicalPreviewAsset(existingAsset)];
-            return [{
-              id: `${workflow.id}-${node.id}-video`,
-              type: "shot_video" as const,
-              name: node.data.mediaSystemNames?.[node.data.videoUrl as string] ?? "视频生成",
-              systemName: node.data.mediaSystemNames?.[node.data.videoUrl as string] ?? "视频生成",
-              url: node.data.videoUrl as string,
-              posterUrl: node.data.posterUrl,
-              librarySource: "workflow" as const,
-              sourcePrompt,
-              promptSource: "generated" as const,
-              previewMeta: { modelLabel: node.data.model ? getGenerationModelLabel("video", node.data.model) : "-", ratio: node.data.ratio || "-", sizeText: "-", resolution: node.data.resolution || "-", mode: "video" as const, duration: node.data.duration },
-              sessionId: workflow.id,
-              workflowId: workflow.id,
-              workflowNodeId: node.id,
-              lockedType: true,
-              createdAt: workflow.updatedAt ?? Date.now(),
-            }];
+            return [getWorkflowPreviewAsset(workflow, node, "video", node.data.videoUrl as string, existingAsset)];
           })() : [];
           return [...imageItems, ...videoItem];
         });
@@ -7419,7 +7465,7 @@ export function ChatWorkbench() {
 
       return [...imageItems, ...videoItem];
     });
-  }, [activeSessionIdValue, assetFilter, assets, getCanonicalMediaName, getCanonicalPreviewAsset, messages, previewAsset, timerNow, workflowItems]);
+  }, [activeSessionIdValue, assetFilter, assets, getCanonicalMediaName, getCanonicalPreviewAsset, getWorkflowPreviewAsset, messages, previewAsset, timerNow, workflowItems]);
   const enrichAssetPreviewMeta = getCanonicalPreviewAsset;
   const previewAssetId = previewAsset?.id;
   const previewDisplayMeta = previewAsset ? enrichAssetPreviewMeta(previewAsset).previewMeta : undefined;
@@ -9081,9 +9127,10 @@ export function ChatWorkbench() {
           const workflowName = fromWorkflow?.node.data.mediaSystemNames?.[job.remoteUrl] ?? (job.localUrl ? fromWorkflow?.node.data.mediaSystemNames?.[job.localUrl] : undefined);
           const name = message?.mediaSystemNames?.[job.remoteUrl] ?? fromAsset?.systemName ?? fromAsset?.name ?? workflowName ?? fromWorkflow?.node.title;
           const promptDetail = isVideo ? message?.videoPromptDetails?.[job.remoteUrl] : message?.imagePromptDetails?.[job.remoteUrl];
+          const workflowPrompt = fromWorkflow ? getWorkflowNodeSourcePrompt(fromWorkflow.workflow, fromWorkflow.node) : undefined;
           const sourcePrompt = isVideo
-            ? promptDetail?.prompt ?? message?.videoPrompts?.[job.remoteUrl] ?? message?.generationMeta?.originalPrompt ?? fromAsset?.sourcePrompt ?? fromWorkflow?.node.data.prompt ?? message?.content
-            : promptDetail?.prompt ?? message?.imagePrompts?.[job.remoteUrl] ?? fromAsset?.sourcePrompt ?? fromWorkflow?.node.data.prompt ?? fromWorkflow?.node.data.text ?? message?.content;
+            ? promptDetail?.prompt ?? message?.videoPrompts?.[job.remoteUrl] ?? message?.generationMeta?.originalPrompt ?? workflowPrompt ?? fromAsset?.sourcePrompt ?? message?.content
+            : promptDetail?.prompt ?? message?.imagePrompts?.[job.remoteUrl] ?? workflowPrompt ?? fromAsset?.sourcePrompt ?? message?.content;
           const assetGenerationCategory = fromAsset && ["character_image", "scene_image", "shot_image"].includes(fromAsset.type) ? fromAsset.type : undefined;
           const currentCategory = fromWorkflow
             ? isVideo ? "workflow_videos" : "workflow_images"
@@ -10049,7 +10096,10 @@ export function ChatWorkbench() {
       const deletedAt = Date.now();
       const next = ensureWorkflowItems(current.map((item) => item.id === workflowId ? { ...item, deletedAt, updatedAt: deletedAt } : item));
       const nextVisible = next.filter((item) => !isDeletedWorkflow(item));
-      if (activeWorkflowId === workflowId) setActiveWorkflowId(nextVisible[0]?.id ?? next[0]?.id ?? "");
+      setActiveWorkflowId((currentActiveId) => {
+        if (currentActiveId !== workflowId && nextVisible.some((item) => item.id === currentActiveId)) return currentActiveId;
+        return nextVisible[0]?.id ?? next[0]?.id ?? "";
+      });
       return next;
     });
   };
@@ -12977,11 +13027,11 @@ export function ChatWorkbench() {
     setIsAtAssetMenuOpen(true);
   };
   const getDefaultDocumentPreviewWidth = useCallback(() => {
-    const sidebarWidth = isSidebarCollapsed ? 80 : 262;
+    const sidebarWidth = isSidebarVisible ? isSidebarCollapsed ? 80 : 262 : 0;
     const viewportWidth = typeof window === "undefined" ? 1440 : window.innerWidth;
     const availableWidth = Math.max(840, viewportWidth - sidebarWidth);
     return Math.max(420, Math.round((availableWidth * 4) / 9));
-  }, [isSidebarCollapsed]);
+  }, [isSidebarCollapsed, isSidebarVisible]);
   useEffect(() => {
     if (!previewDocumentFile || hasCustomPreviewDocumentWidth) return;
     const updateDefaultWidth = () => setPreviewDocumentWidth(getDefaultDocumentPreviewWidth());
@@ -12994,7 +13044,7 @@ export function ChatWorkbench() {
     setHasCustomPreviewDocumentWidth(true);
     const startX = event.clientX;
     const startWidth = previewDocumentWidth || getDefaultDocumentPreviewWidth();
-    const getMaxWidth = () => Math.max(420, window.innerWidth - (isSidebarCollapsed ? 100 : 282) - 420);
+    const getMaxWidth = () => Math.max(420, window.innerWidth - (isSidebarVisible ? isSidebarCollapsed ? 100 : 282 : 20) - 420);
     const clampWidth = (width: number) => Math.min(getMaxWidth(), Math.max(420, width));
     const handlePointerMove = (moveEvent: PointerEvent) => {
       setPreviewDocumentWidth(clampWidth(startWidth + startX - moveEvent.clientX));
@@ -13006,7 +13056,7 @@ export function ChatWorkbench() {
 
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", handlePointerUp);
-  }, [getDefaultDocumentPreviewWidth, isSidebarCollapsed, previewDocumentWidth]);
+  }, [getDefaultDocumentPreviewWidth, isSidebarCollapsed, isSidebarVisible, previewDocumentWidth]);
   const switchAgentModelTier = (tier: AgentModelTier) => {
     if (agentModelTier === tier) return;
 
@@ -13048,9 +13098,19 @@ export function ChatWorkbench() {
   };
   const getAssetCount = (key: string, fallback: number) => Math.max(0, Math.floor(Number(assetCounts[key] ?? fallback)));
   const hasCurrentFilterAssets = assets.some((asset) => isAssetInFilter(asset, assetFilter));
+  const workspaceRootClassName = isSidebarVisible
+    ? isSidebarCollapsed
+      ? "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[80px_minmax(0,1fr)]"
+      : "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[262px_minmax(0,1fr)]"
+    : "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white";
+  const toggleSidebarVisibility = () => {
+    closeAllPopupMenus();
+    setIsSidebarVisible((current) => !current);
+  };
 
   return (
-    <section className={isSidebarCollapsed ? "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[80px_minmax(0,1fr)]" : "flashmuse-workspace-root grid h-screen min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[262px_minmax(0,1fr)]"}>
+    <section className={workspaceRootClassName}>
+      {isSidebarVisible ? (
       <aside className={isSidebarCollapsed ? "flashmuse-sidebar relative z-10 hidden h-screen min-h-0 flex-col overflow-visible border-r border-[#e5e5e5] bg-[#f9f9f9] px-2 pb-1 pt-4 lg:flex" : "flashmuse-sidebar relative z-10 hidden h-screen min-h-0 flex-col overflow-visible border-r border-[#e5e5e5] bg-[#f9f9f9] px-3 pb-1 pt-4 lg:flex"}>
           <button type="button" onClick={() => setIsSidebarCollapsed((current) => !current)} className={isSidebarCollapsed ? "mb-5 flex justify-center text-left" : "mb-5 flex items-center gap-3 px-2 text-left"} aria-label={isSidebarCollapsed ? "展开左侧栏" : "收起左侧栏"} title={isSidebarCollapsed ? "展开左侧栏" : "收起左侧栏"}>
           <div className={isSidebarCollapsed ? "flex h-[50px] w-[50px] items-center justify-center" : "flex h-[50px] w-[50px] items-center justify-center"}>
@@ -13633,8 +13693,9 @@ export function ChatWorkbench() {
           </button>
         </div>
       </aside>
+      ) : null}
 
-      {isSidebarCollapsed && isCollapsedHistoryMenuOpen && collapsedActionMenuPosition && typeof document !== "undefined" ? (() => {
+      {isSidebarVisible && isSidebarCollapsed && isCollapsedHistoryMenuOpen && collapsedActionMenuPosition && typeof document !== "undefined" ? (() => {
         const session = openSessionMenuId ? visibleHistorySessions.find((item) => item.id === openSessionMenuId) : undefined;
         if (session) {
           return createPortal(
@@ -13697,11 +13758,12 @@ export function ChatWorkbench() {
         {activePanel !== "workflow" ? <div className="relative z-30 flex h-[56px] shrink-0 items-center justify-center border-b border-[#eeeeee] bg-white px-14">
           <button
             type="button"
-            onClick={() => setIsSidebarCollapsed((current) => !current)}
+            onClick={toggleSidebarVisibility}
             className="absolute left-4 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-[#6f6f6f] transition hover:bg-[#f2f2f2] hover:text-[#111111]"
-            aria-label={isSidebarCollapsed ? "展开左侧栏" : "收起左侧栏"}
+            aria-label={isSidebarVisible ? "隐藏左侧栏" : "显示左侧栏"}
+            title={isSidebarVisible ? "隐藏左侧栏" : "显示左侧栏"}
           >
-            {isSidebarCollapsed ? <RiLayoutLeftLine className="h-[22px] w-[22px]" aria-hidden="true" /> : <RiLayoutLeft2Line className="h-[22px] w-[22px]" aria-hidden="true" />}
+            {isSidebarVisible ? <RiLayoutLeft2Line className="h-[22px] w-[22px]" aria-hidden="true" /> : <RiLayoutLeftLine className="h-[22px] w-[22px]" aria-hidden="true" />}
           </button>
 
           <div className="flex min-w-0 items-center gap-1.5 text-center">
@@ -13812,9 +13874,13 @@ export function ChatWorkbench() {
             activeWorkflow ? (
               <>
                 <WorkflowCanvas
+                  key={activeWorkflow.id}
                   workflowId={activeWorkflow.id}
                   value={activeWorkflow.canvas}
                   workflowTitle={activeWorkflow.title}
+                  leftSidebarVisible={isSidebarVisible}
+                  onToggleLeftSidebar={toggleSidebarVisibility}
+                  workflowAssets={assets.filter((asset) => isWorkflowAsset(asset) && (asset.workflowId || asset.sessionId) === activeWorkflow.id).map((asset) => ({ id: asset.id, name: asset.name, url: asset.url, posterUrl: asset.posterUrl, kind: isVideoAsset(asset) ? "video" : "image", nodeId: asset.workflowNodeId }))}
                   enabledImageModelIds={enabledGenerationModelIds.image}
                   enabledVideoModelIds={enabledGenerationModelIds.video}
                   getImageDisplayUrl={(url) => getMediaThumbnailUrl(url)}
@@ -13825,7 +13891,12 @@ export function ChatWorkbench() {
                   onGeneratedMedia={(media) => addWorkflowGeneratedAssets(activeWorkflow.id, media.nodeId, { kind: media.kind, urls: media.urls, posterUrl: media.posterUrl, sourcePrompt: media.sourcePrompt, model: media.model, ratio: media.ratio, resolution: media.resolution, duration: media.duration, dimensions: media.dimensions })}
                   onPreviewMedia={(media) => {
                     const existingAsset = assets.find((asset) => isWorkflowAsset(asset) && normalizeMediaUrlForMatch(asset.url) === normalizeMediaUrlForMatch(media.url));
+                    const workflowNode = activeWorkflow.canvas?.nodes?.find((node) => node.id === media.nodeId);
                     setPreviewDocumentFile(null);
+                    if (workflowNode) {
+                      setPreviewAsset(getWorkflowPreviewAsset(activeWorkflow, workflowNode, media.kind, media.url, existingAsset));
+                      return;
+                    }
                     if (existingAsset) {
                       setPreviewAsset(enrichAssetPreviewMeta(existingAsset));
                       return;
@@ -13858,7 +13929,10 @@ export function ChatWorkbench() {
                 <UsageSummaryButton summary={activeWorkflow.usageSummary} mediaCounts={getWorkflowMediaCounts(activeWorkflow)} className="absolute right-4 top-4 z-30" />
               </>
             ) : (
-              <div className="flex h-full min-h-full items-center justify-center bg-[#f3f3f3] bg-[linear-gradient(to_right,#d8d8d8_1px,transparent_1px),linear-gradient(to_bottom,#d8d8d8_1px,transparent_1px),linear-gradient(to_right,#e9e9e9_1px,transparent_1px),linear-gradient(to_bottom,#e9e9e9_1px,transparent_1px)] bg-[size:120px_120px,120px_120px,24px_24px,24px_24px] text-center">
+              <div className="relative flex h-full min-h-full items-center justify-center bg-[#f3f3f3] bg-[linear-gradient(to_right,#d8d8d8_1px,transparent_1px),linear-gradient(to_bottom,#d8d8d8_1px,transparent_1px),linear-gradient(to_right,#e9e9e9_1px,transparent_1px),linear-gradient(to_bottom,#e9e9e9_1px,transparent_1px)] bg-[size:120px_120px,120px_120px,24px_24px,24px_24px] text-center">
+                <button type="button" onClick={toggleSidebarVisibility} className="absolute left-4 top-3 flex h-8 w-8 items-center justify-center rounded-md text-[#5c626b] transition hover:bg-black/5 hover:text-[#30343a]" aria-label={isSidebarVisible ? "隐藏左侧栏" : "显示左侧栏"} title={isSidebarVisible ? "隐藏左侧栏" : "显示左侧栏"}>
+                  {isSidebarVisible ? <RiLayoutLeft2Line className="h-[22px] w-[22px]" aria-hidden="true" /> : <RiLayoutLeftLine className="h-[22px] w-[22px]" aria-hidden="true" />}
+                </button>
                 <div className="rounded-[16px] border border-[#e5e5e5] bg-white/90 px-8 py-7 shadow-[0_14px_40px_rgba(15,23,42,0.08)] backdrop-blur">
                   <div className="text-[17px] font-semibold text-[#111111]">还没有工作流</div>
                   <div className="mt-2 text-[13px] text-[#8a8a8a]">先新建一个工作流，再添加文本和图片节点。</div>

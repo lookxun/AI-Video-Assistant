@@ -47,6 +47,28 @@ function sourceDetailFromBody(value: unknown) {
   }
 }
 
+function isInvalidSourcePrompt(value: unknown) {
+  if (typeof value !== "string") return true;
+  const text = value.trim();
+  return !text || /^\?+$/.test(text);
+}
+
+function getString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+async function getWorkflowNodeSourcePrompt(userId: string, workflowId: string | undefined, workflowNodeId: string | undefined) {
+  if (!workflowId || !workflowNodeId) return undefined;
+  const workflow = await prisma.workspaceWorkflow.findUnique({
+    where: { userId_workflowId: { userId, workflowId } },
+    select: { title: true, canvasJson: true },
+  });
+  if (!workflow || !isRecord(workflow.canvasJson) || !Array.isArray(workflow.canvasJson.nodes)) return undefined;
+  const node = workflow.canvasJson.nodes.find((item) => isRecord(item) && item.id === workflowNodeId);
+  if (!isRecord(node) || !isRecord(node.data)) return workflow.title;
+  return getString(node.data.prompt) || getString(node.data.text) || getString(node.data.outputText) || workflow.title;
+}
+
 export async function POST(request: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "未登录" }, { status: 401 });
@@ -81,6 +103,11 @@ export async function POST(request: Request) {
   const settingsJson = settings as Prisma.InputJsonValue | undefined;
   const previewMetaJson = (isRecord(body.previewMeta) ? body.previewMeta : undefined) as Prisma.InputJsonValue | undefined;
   const sourceDetail = sourceDetailFromBody(body.sourceDetail);
+  const bodySourcePrompt = typeof body.sourcePrompt === "string" ? body.sourcePrompt : undefined;
+  const workflowNodeSourcePrompt = workspaceKind === "workflow" && isInvalidSourcePrompt(bodySourcePrompt)
+    ? await getWorkflowNodeSourcePrompt(user.id, typeof body.workflowId === "string" ? body.workflowId : undefined, typeof body.workflowNodeId === "string" ? body.workflowNodeId : undefined)
+    : undefined;
+  const sourcePrompt = isInvalidSourcePrompt(bodySourcePrompt) ? workflowNodeSourcePrompt : bodySourcePrompt;
 
   const media = await prisma.mediaAsset.upsert({
     where: { userId_normalizedUrl: { userId: user.id, normalizedUrl } },
@@ -94,7 +121,7 @@ export async function POST(request: Request) {
       thumbnailUrl,
       sourceKind,
       sourceDetail,
-      sourcePrompt: typeof body.sourcePrompt === "string" ? body.sourcePrompt : undefined,
+      sourcePrompt,
       promptSource,
       model: typeof body.model === "string" ? body.model : undefined,
       ratio: typeof settings?.ratio === "string" ? settings.ratio : undefined,
@@ -125,7 +152,7 @@ export async function POST(request: Request) {
       thumbnailUrl,
       sourceKind,
       sourceDetail,
-      sourcePrompt: typeof body.sourcePrompt === "string" ? body.sourcePrompt : undefined,
+      sourcePrompt,
       promptSource,
       model: typeof body.model === "string" ? body.model : undefined,
       ratio: typeof settings?.ratio === "string" ? settings.ratio : undefined,

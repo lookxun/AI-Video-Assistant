@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const API_URL = "https://ark.ap-southeast.bytepluses.com/api/v3/images/generations";
-const OUTPUT_DIR = join(process.cwd(), "AI-Video-Assistant_Project Planning", "test");
+const OUTPUT_DIR = join(process.cwd(), "FlashMuse_Agent_Project Planning", "test");
 const IMAGE_DIR = join(OUTPUT_DIR, "byteplus-seedream-5-lite-px-images");
 const MD_OUTPUT = join(OUTPUT_DIR, "byteplus-seedream-5-lite-px-size-test-results.md");
 const RAW_OUTPUT = join(OUTPUT_DIR, "byteplus-seedream-5-lite-px-size-test-raw.json");

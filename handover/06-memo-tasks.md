@@ -14,11 +14,11 @@ Temporary reason: do not change now because the user may change domains later, a
 
 What to do later: after domain changes are settled, change server-to-model-provider reference media handling so local `/generated/...` media is sent to BytePlus/OpenRouter as public HTTPS URLs instead of being converted back to base64 data URLs. Verify the chosen public domain is reachable by provider servers, not 403, not login-gated, and not expired. Relevant current code: `src/lib/openrouter.ts`, `src/lib/openrouter-video.ts`, and `src/lib/seedance.ts` functions named `toDataUrlIfLocalPublicAsset()`.
 
-### [ ] M002 Static Domain Public Access
+### [x] M002 Static Domain Public Access
 
-Temporary reason: not blocking the main app because `main.venusface.com` and `api.venusface.com` are working; Ali local SNI works, but public checks for `static.venusface.com` and `ali.venusface.com` returned 403/000.
+Temporary reason: completed on 2026-06-26 after domain review passed and public HTTP/HTTPS access was verified.
 
-What to do later: review DNS, proxy, firewall, certificate, and Nginx path for `static.venusface.com` and `ali.venusface.com`. Confirm whether generated media and `_next/static` should be publicly served from those domains.
+What to do later: no action unless public access regresses. Current `ali.venusface.com` and `static.venusface.com` HTTP redirect to HTTPS, HTTPS returns 200, and static/generated media paths are verified.
 
 ### [ ] M003 Production Workflow Mode
 
@@ -38,11 +38,11 @@ Temporary reason: current `@` mention behavior is acceptable after recent fixes;
 
 What to do later: if input `@` editing bugs resurface, do a focused contenteditable mention refactor for atomic mention deletion, cursor behavior, typed mention resolution, and blue inline rendering.
 
-### [ ] M006 Ali Static Certificate Renewal Automation
+### [x] M006 Ali Static Certificate Renewal Automation
 
-Temporary reason: current `flashmuse-ali-static` certificate was created with manual DNS-01 and is not an immediate blocker.
+Temporary reason: completed on 2026-06-26. The `flashmuse-ali-static` certificate was reissued through HTTP-01 webroot after domain review passed.
 
-What to do later: before expiry, either manually renew with TXT records or automate renewal using Aliyun DNS API. Use a least-privilege RAM AccessKey for `venusface.com` DNS only, store credentials outside Git with `600` permissions, install a certbot-compatible Aliyun DNS plugin, and run `certbot renew --dry-run`.
+What to do later: no DNS API key is needed under the current setup. Certbot renewal config uses `authenticator = webroot` with `/var/www/letsencrypt`, `certbot.timer` exists, `certbot renew --dry-run --cert-name flashmuse-ali-static --no-random-sleep-on-renew` passed, and `/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh` reloads Nginx after renewal.
 
 ### [ ] M007 Formal Frontend Monitoring
 
