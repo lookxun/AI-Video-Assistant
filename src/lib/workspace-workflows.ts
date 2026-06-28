@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { getCreditSettings } from "@/lib/credits";
 import { prisma } from "@/lib/prisma";
 
 type WorkspaceWorkflowRow = {
@@ -36,6 +37,13 @@ function toJsonObject(value: unknown): Prisma.InputJsonObject {
 function toPositiveInt(value: unknown, fallback = 1) {
   const number = typeof value === "number" || typeof value === "string" ? Number(value) : Number.NaN;
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+}
+
+function metadataNumber(metadata: unknown, key: string) {
+  if (!isRecord(metadata)) return undefined;
+  const value = metadata[key];
+  const numberValue = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(numberValue) ? numberValue : undefined;
 }
 
 function getWorkflowCodeFromTitle(title: string) {
@@ -162,6 +170,32 @@ export function workspaceWorkflowRowToPayload(row: WorkspaceWorkflowRow) {
   };
 }
 
+async function getWorkflowUsageSummariesFromLedger(userId: string) {
+  const [settings, ledgers] = await Promise.all([
+    getCreditSettings(),
+    prisma.creditLedger.findMany({
+      where: { userId, direction: "consume", workspaceKind: "workflow", workspaceId: { not: null } },
+      select: { workspaceId: true, credits: true, promptTokens: true, completionTokens: true, totalTokens: true, metadata: true },
+    }),
+  ]);
+
+  const summaries = new Map<string, { promptTokens: number; completionTokens: number; totalTokens: number; usd: number; cny: number; credits: number }>();
+  for (const item of ledgers) {
+    if (!item.workspaceId) continue;
+    const summary = summaries.get(item.workspaceId) ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0, usd: 0, cny: 0, credits: 0 };
+    const chargedCny = metadataNumber(item.metadata, "chargedCny") ?? (settings.creditsPerCny > 0 ? item.credits / settings.creditsPerCny : 0);
+    const chargedUsd = metadataNumber(item.metadata, "chargedUsd") ?? (settings.usdToCnyRate > 0 ? chargedCny / settings.usdToCnyRate : 0);
+    summary.promptTokens += item.promptTokens;
+    summary.completionTokens += item.completionTokens;
+    summary.totalTokens += item.totalTokens;
+    summary.usd += chargedUsd;
+    summary.cny += chargedCny;
+    summary.credits += item.credits;
+    summaries.set(item.workspaceId, summary);
+  }
+  return summaries;
+}
+
 export async function getWorkspaceWorkflowPayloads(userId: string, fallbackState?: unknown) {
   await migrateWorkspaceWorkflowsFromState(userId, fallbackState);
   const rows = await prisma.workspaceWorkflow.findMany({
@@ -169,7 +203,14 @@ export async function getWorkspaceWorkflowPayloads(userId: string, fallbackState
     orderBy: [{ updatedAt: "desc" }, { workflowId: "desc" }],
     select: { workflowId: true, workflowCode: true, title: true, nextImageNumber: true, nextVideoNumber: true, createdAt: true, updatedAt: true, deletedAt: true, canvasJson: true, usageSummary: true },
   });
-  if (rows.length > 0) return rows.map(workspaceWorkflowRowToPayload);
+  if (rows.length > 0) {
+    const ledgerSummaries = await getWorkflowUsageSummariesFromLedger(userId);
+    return rows.map((row) => {
+      const payload = workspaceWorkflowRowToPayload(row);
+      const ledgerSummary = ledgerSummaries.get(row.workflowId);
+      return ledgerSummary ? { ...payload, usageSummary: ledgerSummary } : payload;
+    });
+  }
   return normalizeWorkflowItems(isRecord(fallbackState) ? fallbackState.workflowItems : undefined).filter((workflow) => !workflow.deletedAt).map((workflow) => ({
     id: workflow.workflowId,
     workflowCode: workflow.workflowCode,

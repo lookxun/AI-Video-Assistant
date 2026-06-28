@@ -12,6 +12,7 @@ import { isAgentVideoModelEnabled, isConversationVideoModelEnabled } from "@/lib
 import { prisma } from "@/lib/prisma";
 import { appendUploadRuleFeedbackLog } from "@/lib/upload-rule-feedback-log";
 import { appendVideoDiagnosticsLog, summarizeVideoReference } from "@/lib/video-diagnostics-log";
+import { appendGenerationDiagnosticsLog, summarizeGeneratedReference } from "@/lib/generation-diagnostics-log";
 import { createBytePlusAsset, getBytePlusAsset } from "@/lib/byteplus-assets";
 import { Prisma } from "@prisma/client";
 
@@ -470,6 +471,7 @@ function getVideoUrl(value: unknown): string | undefined {
 }
 
 export async function POST(request: Request) {
+  const routeStartedAt = Date.now();
   let body: {
     prompt?: string;
     model?: string;
@@ -510,6 +512,7 @@ export async function POST(request: Request) {
 
     if (taskId) {
       const startedAt = Date.now();
+      void appendGenerationDiagnosticsLog({ event: "video-route-poll-start", requestId: body.requestId ?? taskId, conversationId: body.conversationId, conversationTitle: body.conversationTitle, mode: "video", provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter", model: body.model, taskId, settings: body.settings });
       const task = await getOpenRouterVideoTask(taskId);
       const queryDoneAt = Date.now();
       const videoError = getVideoErrorMessage(task);
@@ -530,6 +533,7 @@ export async function POST(request: Request) {
           });
         }
         const codedError = await createCodedApiError(new Error(videoError), GENERIC_MEDIA_ERROR_MESSAGE, "video task polling failed");
+        void appendGenerationDiagnosticsLog({ event: "video-route-poll-failed", requestId: body.requestId ?? taskId, conversationId: body.conversationId, conversationTitle: body.conversationTitle, mode: "video", provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter", model: body.model, taskId, settings: body.settings, durationMs: Date.now() - startedAt, error: videoError, upstream: task, extra: { errorCode: codedError.errorCode, userError: codedError.error } });
         return NextResponse.json({ ...task, status: "failed", error: { message: codedError.error }, errorCode: codedError.errorCode });
       }
 
@@ -589,6 +593,7 @@ export async function POST(request: Request) {
 
         const usage = withBytePlusVideoUsd(getUsageMeta(task) ?? body.usage, body.model, body.settings);
         const credit = user ? await chargeCredits(user.id, "video", usage, { conversationId: body.conversationId, conversationTitle: body.conversationTitle, requestId: body.requestId ?? taskId, label: "视频生成", model: body.model, videoCount: 1, metadata: { ...body.metadata, settings: body.settings, ratio: body.settings?.ratio, resolution: body.settings?.resolution, duration: body.settings?.duration, originalPrompt: body.prompt, mediaUrls: [saveJob?.localUrl ?? videoUrl], remoteMediaUrls: [videoUrl], posterUrl: saveJob?.posterUrl, delivered: true, savedLocal: saveJob?.status === "saved", localSaveStatus: saveJob?.status ?? "pending", mediaSaveJobId: saveJob?.id } }) : undefined;
+        void appendGenerationDiagnosticsLog({ event: "video-route-poll-completed", requestId: body.requestId ?? taskId, conversationId: body.conversationId, conversationTitle: body.conversationTitle, userId: user?.id, mode: "video", provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter", model: body.model, taskId, settings: body.settings, prompt: body.prompt, references: [summarizeGeneratedReference(videoUrl, 0, "remote_video")], durationMs: Date.now() - startedAt, extra: { status, saveJob, credit } });
 
         return NextResponse.json({
           ...task,
@@ -621,6 +626,7 @@ export async function POST(request: Request) {
           });
         }
         const codedError = await createCodedApiError(new Error("视频平台返回已完成，但没有返回视频地址。"), GENERIC_MEDIA_ERROR_MESSAGE, "video task completed without url");
+        void appendGenerationDiagnosticsLog({ event: "video-route-completed-without-url", requestId: body.requestId ?? taskId, conversationId: body.conversationId, conversationTitle: body.conversationTitle, mode: "video", provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter", model: body.model, taskId, settings: body.settings, durationMs: Date.now() - startedAt, error: codedError.error, upstream: task });
         return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
       }
 
@@ -656,6 +662,25 @@ export async function POST(request: Request) {
 
     const user = await getCurrentUser();
     await assertUserCanUseCredits(user, "video");
+    const referenceMode = body.referenceMode;
+    void appendGenerationDiagnosticsLog({
+      event: "video-route-create-start",
+      requestId: body.requestId,
+      conversationId: body.conversationId,
+      conversationTitle: body.conversationTitle,
+      userId: user?.id,
+      mode: "video",
+      provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter",
+      model: body.model,
+      prompt,
+      settings: body.settings,
+      references: [
+        ...referenceImages.map((url, index) => summarizeGeneratedReference(url, index, getBytePlusReferenceRole(index, referenceMode))),
+        ...referenceVideos.map((url, index) => summarizeGeneratedReference(url, index, "reference_video")),
+        ...referenceAudios.map((url, index) => summarizeGeneratedReference(url, index, "reference_audio")),
+      ],
+      extra: { referenceMode, creditSource, referenceImageCount: referenceImages.length, referenceVideoCount: referenceVideos.length, referenceAudioCount: referenceAudios.length },
+    });
     const effectiveReferenceImages = isBytePlusVideoModel(body.model) ? getBytePlusEffectiveReferenceImages(referenceImages, body.referenceMode) : referenceImages;
     const existingReferenceFailure = isBytePlusVideoModel(body.model) ? await getBytePlusReferenceFailure(user?.id, effectiveReferenceImages) : undefined;
     if (existingReferenceFailure) {
@@ -690,7 +715,7 @@ export async function POST(request: Request) {
     let autoBytePlusAssetReview: Awaited<ReturnType<typeof autoReviewBytePlusVideoReferences>> | undefined;
     let task: Awaited<ReturnType<typeof createOpenRouterVideoTask>>;
     try {
-      task = await createOpenRouterVideoTask(prompt, modelReferenceImages, body.settings, body.model, { bytePlusProviderKey: getBytePlusProviderKey(body.model, creditSource), referenceMode: body.referenceMode, referenceVideos, referenceAudios });
+      task = await createOpenRouterVideoTask(prompt, modelReferenceImages, body.settings, body.model, { bytePlusProviderKey: getBytePlusProviderKey(body.model, creditSource), referenceMode: body.referenceMode, referenceVideos, referenceAudios, requestId: body.requestId });
     } catch (error) {
       if (!isBytePlusHumanReferenceError(error) || referenceImages.length === 0) throw error;
       void appendVideoDiagnosticsLog({
@@ -711,7 +736,7 @@ export async function POST(request: Request) {
       logVideoTiming("BytePlus human reference auto review started", { model: body.model, requestId: body.requestId, referenceCount: referenceImages.length });
       autoBytePlusAssetReview = await autoReviewBytePlusVideoReferences({ userId: user?.id, model: body.model, referenceImages: effectiveReferenceImages, requestId: body.requestId, referenceMode: body.referenceMode, settings: body.settings, conversationId: body.conversationId, conversationTitle: body.conversationTitle });
       if (!autoBytePlusAssetReview) throw error;
-      task = await createOpenRouterVideoTask(prompt, autoBytePlusAssetReview.references, body.settings, body.model, { bytePlusProviderKey: getBytePlusProviderKey(body.model, creditSource), referenceMode: body.referenceMode, referenceVideos, referenceAudios });
+      task = await createOpenRouterVideoTask(prompt, autoBytePlusAssetReview.references, body.settings, body.model, { bytePlusProviderKey: getBytePlusProviderKey(body.model, creditSource), referenceMode: body.referenceMode, referenceVideos, referenceAudios, requestId: body.requestId });
       logVideoTiming("BytePlus human reference auto review completed", { model: body.model, requestId: body.requestId, reviewedCount: autoBytePlusAssetReview.updates.length });
     }
     const createDoneAt = Date.now();
@@ -738,7 +763,7 @@ export async function POST(request: Request) {
         logVideoTiming("BytePlus human reference auto review started", { model: body.model, requestId: body.requestId, referenceCount: referenceImages.length });
         autoBytePlusAssetReview = await autoReviewBytePlusVideoReferences({ userId: user?.id, model: body.model, referenceImages: effectiveReferenceImages, requestId: body.requestId, referenceMode: body.referenceMode, settings: body.settings, conversationId: body.conversationId, conversationTitle: body.conversationTitle });
         if (autoBytePlusAssetReview) {
-          task = await createOpenRouterVideoTask(prompt, autoBytePlusAssetReview.references, body.settings, body.model, { bytePlusProviderKey: getBytePlusProviderKey(body.model, creditSource), referenceMode: body.referenceMode, referenceVideos, referenceAudios });
+          task = await createOpenRouterVideoTask(prompt, autoBytePlusAssetReview.references, body.settings, body.model, { bytePlusProviderKey: getBytePlusProviderKey(body.model, creditSource), referenceMode: body.referenceMode, referenceVideos, referenceAudios, requestId: body.requestId });
           logVideoTiming("BytePlus human reference auto review completed", { model: body.model, requestId: body.requestId, reviewedCount: autoBytePlusAssetReview.updates.length });
         }
       }
@@ -764,9 +789,11 @@ export async function POST(request: Request) {
         const retryId = task.polling_url ?? task.pollingUrl ?? getCreateTaskId(task);
         if (!retryId) {
           const codedError = await createCodedApiError(new Error("Missing video task id"), GENERIC_MEDIA_ERROR_MESSAGE, "video task id missing after auto review");
+          void appendGenerationDiagnosticsLog({ event: "video-route-create-missing-task-id-after-review", requestId: body.requestId, conversationId: body.conversationId, conversationTitle: body.conversationTitle, userId: user?.id, mode: "video", provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter", model: body.model, prompt, settings: body.settings, durationMs: Date.now() - routeStartedAt, error: codedError.error, upstream: task });
           return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
         }
         await upsertVideoManifestEntry({ taskId: retryId, prompt, model: body.model, settings: body.settings });
+        void appendGenerationDiagnosticsLog({ event: "video-route-create-success-after-review", requestId: body.requestId, conversationId: body.conversationId, conversationTitle: body.conversationTitle, userId: user?.id, mode: "video", provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter", model: body.model, taskId: retryId, prompt, settings: body.settings, durationMs: Date.now() - routeStartedAt, upstream: task, extra: { autoReviewTriggered: Boolean(autoBytePlusAssetReview), usage: getUsageMeta(task) } });
         return NextResponse.json({ ...task, id: retryId, job_id: getCreateTaskId(task), usage: getUsageMeta(task), autoBytePlusAssetReview: autoBytePlusAssetReview ? { triggered: true, assets: autoBytePlusAssetReview.updates } : undefined });
       }
 
@@ -785,6 +812,7 @@ export async function POST(request: Request) {
         });
       }
       const codedError = await createCodedApiError(new Error(retryVideoError), GENERIC_MEDIA_ERROR_MESSAGE, "video task create failed");
+      void appendGenerationDiagnosticsLog({ event: "video-route-create-returned-error", requestId: body.requestId, conversationId: body.conversationId, conversationTitle: body.conversationTitle, userId: user?.id, mode: "video", provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter", model: body.model, prompt, settings: body.settings, durationMs: Date.now() - routeStartedAt, error: retryVideoError, upstream: task, extra: { errorCode: codedError.errorCode, userError: codedError.error } });
       return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
     }
 
@@ -806,6 +834,7 @@ export async function POST(request: Request) {
         });
       }
       const codedError = await createCodedApiError(new Error("Missing video task id"), GENERIC_MEDIA_ERROR_MESSAGE, "video task id missing");
+      void appendGenerationDiagnosticsLog({ event: "video-route-create-missing-task-id", requestId: body.requestId, conversationId: body.conversationId, conversationTitle: body.conversationTitle, userId: user?.id, mode: "video", provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter", model: body.model, prompt, settings: body.settings, durationMs: Date.now() - routeStartedAt, error: codedError.error, upstream: task });
       return NextResponse.json({ ...codedError, raw: task }, { status: 502 });
     }
 
@@ -842,6 +871,7 @@ export async function POST(request: Request) {
       });
     }
 
+    void appendGenerationDiagnosticsLog({ event: "video-route-create-success", requestId: body.requestId, conversationId: body.conversationId, conversationTitle: body.conversationTitle, userId: user?.id, mode: "video", provider: isBytePlusVideoModel(body.model) ? "byteplus" : "openrouter", model: body.model, taskId: id, prompt, settings: body.settings, durationMs: Date.now() - routeStartedAt, upstream: task, extra: { autoReviewTriggered: Boolean(autoBytePlusAssetReview), usage: getUsageMeta(task) } });
     return NextResponse.json({ ...task, id, job_id: getCreateTaskId(task), usage: getUsageMeta(task), autoBytePlusAssetReview: autoBytePlusAssetReview ? { triggered: true, assets: autoBytePlusAssetReview.updates } : undefined });
   } catch (error) {
     const referenceImageCount = Array.isArray(body?.referenceImages) ? body.referenceImages.length : 0;
@@ -875,6 +905,7 @@ export async function POST(request: Request) {
       });
     }
     const codedError = await createCodedApiError(error, GENERIC_MEDIA_ERROR_MESSAGE, "video request failed");
+    void appendGenerationDiagnosticsLog({ event: "video-route-failed", requestId: body?.requestId ?? body?.taskId, conversationId: body?.conversationId, conversationTitle: body?.conversationTitle, mode: "video", provider: isBytePlusVideoModel(body?.model) ? "byteplus" : "openrouter", model: body?.model, taskId: body?.taskId, prompt: body?.prompt, settings: body?.settings, references: Array.isArray(body?.referenceImages) ? body.referenceImages.map((url, index) => summarizeGeneratedReference(url, index, getBytePlusReferenceRole(index, body?.referenceMode))) : undefined, durationMs: Date.now() - routeStartedAt, error, extra: { errorCode: codedError.errorCode, userError: codedError.error, referenceImageCount } });
     return NextResponse.json(codedError, { status: 500 });
   }
 }

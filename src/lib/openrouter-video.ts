@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { extname, join } from "node:path";
 import { promisify } from "node:util";
+import { appendGenerationDiagnosticsLog, summarizeGeneratedReference } from "@/lib/generation-diagnostics-log";
 import { DEFAULT_VIDEO_MODEL, resolveVideoSettingsForModel } from "@/lib/models";
 import { getBytePlusBaseUrl, getBytePlusModelForRequest, getConfiguredBytePlusApiKey, getConfiguredOpenRouterApiKey } from "@/lib/system-settings";
 
@@ -173,48 +174,61 @@ async function getOpenRouterError(response: Response, fallback: string) {
   }
 }
 
-async function postOpenRouterVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, options: CreateVideoOptions = {}) {
+async function postOpenRouterVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, options: CreateVideoOptions & { requestId?: string } = {}) {
   const apiKey = getRequiredOpenRouterApiKey();
 
   const images = referenceImages.filter(Boolean).map(toOpenRouterImage);
   const videoSettings = resolveVideoSettingsForModel(model, settings);
-  const response = await fetch(OPENROUTER_VIDEOS_URL, {
-    method: "POST",
-    headers: getOpenRouterHeaders(apiKey),
-    body: JSON.stringify({
-      model,
-      prompt,
-      duration: getDuration(model, settings?.duration),
-      resolution: videoSettings.resolution,
-      aspect_ratio: videoSettings.ratio,
-      generate_audio: options.generateAudio ?? true,
-      ...(images.length > 0 ? { input_references: images } : {}),
-    }),
-  });
+  const startedAt = Date.now();
+  const body = {
+    model,
+    prompt,
+    duration: getDuration(model, settings?.duration),
+    resolution: videoSettings.resolution,
+    aspect_ratio: videoSettings.ratio,
+    generate_audio: options.generateAudio ?? true,
+    ...(images.length > 0 ? { input_references: images } : {}),
+  };
+  void appendGenerationDiagnosticsLog({ event: "video-provider-create-start", requestId: options.requestId, mode: "video", provider: "openrouter", model, prompt, settings, references: referenceImages.map((url, index) => summarizeGeneratedReference(url, index)), extra: { url: OPENROUTER_VIDEOS_URL, generateAudio: options.generateAudio ?? true, videoSettings } });
+  let response: Response;
+  try {
+    response = await fetch(OPENROUTER_VIDEOS_URL, {
+      method: "POST",
+      headers: getOpenRouterHeaders(apiKey),
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    void appendGenerationDiagnosticsLog({ event: "video-provider-create-fetch-error", requestId: options.requestId, mode: "video", provider: "openrouter", model, prompt, settings, references: referenceImages.map((url, index) => summarizeGeneratedReference(url, index)), durationMs: Date.now() - startedAt, error });
+    throw error;
+  }
 
   if (!response.ok) {
+    void appendGenerationDiagnosticsLog({ event: "video-provider-create-non-ok", requestId: options.requestId, mode: "video", provider: "openrouter", model, status: response.status, prompt, settings, references: referenceImages.map((url, index) => summarizeGeneratedReference(url, index)), durationMs: Date.now() - startedAt, upstream: { statusText: response.statusText, body: await response.clone().text().catch(() => "") } });
     throw new Error(await getOpenRouterError(response, "视频任务创建失败"));
   }
 
-  return (await response.json()) as OpenRouterVideoTask;
+  const data = (await response.json()) as OpenRouterVideoTask;
+  void appendGenerationDiagnosticsLog({ event: "video-provider-create-success", requestId: options.requestId, mode: "video", provider: "openrouter", model, taskId: data.polling_url ?? data.pollingUrl ?? data.id ?? data.generation_id, status: response.status, prompt, settings, references: referenceImages.map((url, index) => summarizeGeneratedReference(url, index)), durationMs: Date.now() - startedAt, upstream: { status: data.status, hasError: Boolean(data.error), hasUnsignedUrls: Boolean(data.unsigned_urls?.length) } });
+  return data;
 }
 
-export async function createOpenRouterVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, options?: { bytePlusProviderKey?: string; referenceMode?: VideoReferenceMode; referenceVideos?: string[]; referenceAudios?: string[] }) {
-  if (getBytePlusVideoModelName(model, options?.bytePlusProviderKey)) return createBytePlusVideoTask(prompt, referenceImages, settings, model, options?.bytePlusProviderKey, options?.referenceMode, options?.referenceVideos, options?.referenceAudios);
+export async function createOpenRouterVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, options?: { bytePlusProviderKey?: string; referenceMode?: VideoReferenceMode; referenceVideos?: string[]; referenceAudios?: string[]; requestId?: string }) {
+  if (getBytePlusVideoModelName(model, options?.bytePlusProviderKey)) return createBytePlusVideoTask(prompt, referenceImages, settings, model, options?.bytePlusProviderKey, options?.referenceMode, options?.referenceVideos, options?.referenceAudios, options?.requestId);
 
   try {
-    return await postOpenRouterVideoTask(prompt, referenceImages, settings, model, { generateAudio: true });
+    return await postOpenRouterVideoTask(prompt, referenceImages, settings, model, { generateAudio: true, requestId: options?.requestId });
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (/audio|generate_audio|sound|voice/i.test(message)) {
-      return postOpenRouterVideoTask(prompt, referenceImages, settings, model, { generateAudio: false });
+      void appendGenerationDiagnosticsLog({ event: "video-provider-create-retry-without-audio", requestId: options?.requestId, mode: "video", provider: "openrouter", model, prompt, settings, references: referenceImages.map((url, index) => summarizeGeneratedReference(url, index)), error });
+      return postOpenRouterVideoTask(prompt, referenceImages, settings, model, { generateAudio: false, requestId: options?.requestId });
     }
 
     throw error;
   }
 }
 
-async function createBytePlusVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, bytePlusProviderKey?: string, referenceMode?: VideoReferenceMode, referenceVideos: string[] = [], referenceAudios: string[] = []) {
+async function createBytePlusVideoTask(prompt: string, referenceImages: string[] = [], settings?: VideoSettings, model = DEFAULT_VIDEO_MODEL, bytePlusProviderKey?: string, referenceMode?: VideoReferenceMode, referenceVideos: string[] = [], referenceAudios: string[] = [], requestId?: string) {
   const apiKey = getConfiguredBytePlusApiKey();
   if (!apiKey) throw new Error("缺少 BytePlus API Key");
 
@@ -253,15 +267,28 @@ async function createBytePlusVideoTask(prompt: string, referenceImages: string[]
   };
 
   const url = `${getBytePlusBaseUrl()}/contents/generations/tasks`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: getBytePlusHeaders(apiKey),
-    body: JSON.stringify(body),
-  });
+  const startedAt = Date.now();
+  void appendGenerationDiagnosticsLog({ event: "video-provider-create-start", requestId, mode: "video", provider: "byteplus", model, responseModel: bytePlusModel, prompt, settings, references: [...referenceImages.map((item, index) => summarizeGeneratedReference(item, index, getBytePlusReferenceRole(index, referenceMode))), ...referenceVideos.map((item, index) => summarizeGeneratedReference(item, index, "reference_video")), ...referenceAudios.map((item, index) => summarizeGeneratedReference(item, index, "reference_audio"))], extra: { url, referenceMode, videoSettings, imageCount: images.length, videoCount: videos.length, audioCount: audios.length } });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: getBytePlusHeaders(apiKey),
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    void appendGenerationDiagnosticsLog({ event: "video-provider-create-fetch-error", requestId, mode: "video", provider: "byteplus", model, responseModel: bytePlusModel, prompt, settings, durationMs: Date.now() - startedAt, error, extra: { url, referenceMode, imageCount: images.length, videoCount: videos.length, audioCount: audios.length } });
+    throw error;
+  }
 
-  if (!response.ok) throw new Error(await getOpenRouterError(response, "BytePlus 视频任务创建失败"));
+  if (!response.ok) {
+    void appendGenerationDiagnosticsLog({ event: "video-provider-create-non-ok", requestId, mode: "video", provider: "byteplus", model, responseModel: bytePlusModel, status: response.status, prompt, settings, durationMs: Date.now() - startedAt, upstream: { url, statusText: response.statusText, body: await response.clone().text().catch(() => "") } });
+    throw new Error(await getOpenRouterError(response, "BytePlus 视频任务创建失败"));
+  }
 
-  return (await response.json()) as OpenRouterVideoTask;
+  const data = (await response.json()) as OpenRouterVideoTask;
+  void appendGenerationDiagnosticsLog({ event: "video-provider-create-success", requestId, mode: "video", provider: "byteplus", model, responseModel: bytePlusModel, taskId: data.id ?? data.generation_id ?? data.polling_url ?? data.pollingUrl, status: response.status, prompt, settings, durationMs: Date.now() - startedAt, upstream: { status: data.status, hasError: Boolean(data.error), hasUnsignedUrls: Boolean(data.unsigned_urls?.length) } });
+  return data;
 }
 
 export async function getOpenRouterVideoTask(taskId: string) {
@@ -276,12 +303,14 @@ export async function getOpenRouterVideoTask(taskId: string) {
       : `${OPENROUTER_VIDEOS_URL}/${encodeURIComponent(taskId)}`;
 
   const headers = getOpenRouterHeaders(apiKey);
+  const startedAt = Date.now();
   const response = await fetch(url, {
     headers,
     cache: "no-store",
   });
 
   if (response.status === 404) {
+    void appendGenerationDiagnosticsLog({ event: "video-provider-poll-404", mode: "video", provider: "openrouter", taskId, status: response.status, durationMs: Date.now() - startedAt, upstream: { url } });
     try {
       return await curlGetJson(url, headers);
     } catch {
@@ -296,10 +325,13 @@ export async function getOpenRouterVideoTask(taskId: string) {
   }
 
   if (!response.ok) {
+    void appendGenerationDiagnosticsLog({ event: "video-provider-poll-non-ok", mode: "video", provider: "openrouter", taskId, status: response.status, durationMs: Date.now() - startedAt, upstream: { url, statusText: response.statusText, body: await response.clone().text().catch(() => "") } });
     throw new Error(await getOpenRouterError(response, "视频任务查询失败"));
   }
 
-  return (await response.json()) as OpenRouterVideoTask;
+  const data = (await response.json()) as OpenRouterVideoTask;
+  void appendGenerationDiagnosticsLog({ event: "video-provider-poll-success", mode: "video", provider: "openrouter", taskId, status: response.status, durationMs: Date.now() - startedAt, upstream: { status: data.status, hasVideoUrl: Boolean(data.content?.video_url || data.unsigned_urls?.length), hasError: Boolean(data.error) } });
+  return data;
 }
 
 async function getBytePlusVideoTask(taskId: string) {
@@ -308,12 +340,18 @@ async function getBytePlusVideoTask(taskId: string) {
 
   const url = `${getBytePlusBaseUrl()}/contents/generations/tasks/${encodeURIComponent(taskId)}`;
   const headers = getBytePlusHeaders(apiKey);
+  const startedAt = Date.now();
   const response = await fetch(url, {
     headers,
     cache: "no-store",
   });
 
-  if (!response.ok) throw new Error(await getOpenRouterError(response, "BytePlus 视频任务查询失败"));
+  if (!response.ok) {
+    void appendGenerationDiagnosticsLog({ event: "video-provider-poll-non-ok", mode: "video", provider: "byteplus", taskId, status: response.status, durationMs: Date.now() - startedAt, upstream: { url, statusText: response.statusText, body: await response.clone().text().catch(() => "") } });
+    throw new Error(await getOpenRouterError(response, "BytePlus 视频任务查询失败"));
+  }
 
-  return (await response.json()) as OpenRouterVideoTask;
+  const data = (await response.json()) as OpenRouterVideoTask;
+  void appendGenerationDiagnosticsLog({ event: "video-provider-poll-success", mode: "video", provider: "byteplus", taskId, status: response.status, durationMs: Date.now() - startedAt, upstream: { status: data.status, hasVideoUrl: Boolean(data.content?.video_url || data.unsigned_urls?.length), hasError: Boolean(data.error) } });
+  return data;
 }

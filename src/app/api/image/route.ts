@@ -9,6 +9,7 @@ import { isAgentImageModelEnabled, isAssetImageModelEnabled, isConversationImage
 import { validateReferenceImageCount } from "@/lib/upload-rules";
 import type { Prisma } from "@prisma/client";
 import { appendUploadRuleFeedbackLog } from "@/lib/upload-rule-feedback-log";
+import { appendGenerationDiagnosticsLog, summarizeGeneratedReference } from "@/lib/generation-diagnostics-log";
 
 function getRequestedImageCount(value: unknown) {
   const count = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 1;
@@ -82,6 +83,7 @@ function withChargedUsage<T extends { usage?: { promptTokens?: number; completio
 
 export async function POST(request: Request) {
   let body: { prompt?: string; model?: string; referenceImages?: string[]; settings?: { ratio?: string; resolution?: string }; count?: number; candidateMode?: "all" | "best"; conversationId?: string; conversationTitle?: string; requestId?: string; metadata?: Prisma.InputJsonValue } | undefined;
+  const routeStartedAt = Date.now();
   try {
     body = (await request.json()) as { prompt?: string; model?: string; referenceImages?: string[]; settings?: { ratio?: string; resolution?: string }; count?: number; candidateMode?: "all" | "best"; conversationId?: string; conversationTitle?: string; requestId?: string; metadata?: Prisma.InputJsonValue };
     const prompt = body.prompt?.trim();
@@ -99,6 +101,19 @@ export async function POST(request: Request) {
     await assertUserCanUseCredits(user, "image", body.metadata);
 
     const requestedImageCount = getRequestedImageCount(body.count);
+    void appendGenerationDiagnosticsLog({
+      event: "image-route-request-start",
+      requestId: body.requestId,
+      conversationId: body.conversationId,
+      conversationTitle: body.conversationTitle,
+      userId: user?.id,
+      mode: "image",
+      model: body.model,
+      prompt,
+      settings: body.settings,
+      references: referenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+      extra: { requestedImageCount, rawCount: body.count, candidateMode: body.candidateMode, creditSource },
+    });
     console.log("[image-generation] api request start", {
       requestId: body.requestId,
       model: body.model,
@@ -135,11 +150,40 @@ export async function POST(request: Request) {
         });
       }
       const codedError = await createCodedApiError(new Error("图片平台没有返回图片，且没有返回可用原因。"), GENERIC_MEDIA_ERROR_MESSAGE, "image-generation empty delivery");
+      void appendGenerationDiagnosticsLog({
+        event: "image-route-empty-delivery",
+        requestId: body.requestId,
+        conversationId: body.conversationId,
+        conversationTitle: body.conversationTitle,
+        userId: user?.id,
+        mode: "image",
+        model: body.model,
+        prompt,
+        settings: body.settings,
+        references: referenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+        durationMs: Date.now() - routeStartedAt,
+        error: codedError.error,
+        extra: { requestedImageCount, providerReturnedImageCount },
+      });
       return NextResponse.json(codedError, { status: 502 });
     }
     const billableImageCount = deliveredImages.length;
     const deliveredImageDimensions = pickImageDimensions(result.imageDimensions, deliveredImages);
     const credit = user ? await chargeCredits(user.id, "image", result.usage, { conversationId: body.conversationId, conversationTitle: body.conversationTitle, requestId: body.requestId, label: "图片生成", model: body.model, imageCount: billableImageCount, metadata: mergeImageCreditMetadata(body.metadata, { ...getImageCreditParameterMetadata(body.settings, deliveredImageDimensions), originalPrompt: body.prompt, requestedImageCount, returnedImageCount: deliveredImages.length, providerReturnedImageCount, billableImageCount, mediaUrls: deliveredImages, allMediaUrls: deliveredImages, extraMediaUrls: [], delivered: deliveredImages.length > 0 }) }) : undefined;
+    void appendGenerationDiagnosticsLog({
+      event: "image-route-success",
+      requestId: body.requestId,
+      conversationId: body.conversationId,
+      conversationTitle: body.conversationTitle,
+      userId: user?.id,
+      mode: "image",
+      model: body.model,
+      prompt,
+      settings: body.settings,
+      references: referenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+      durationMs: Date.now() - routeStartedAt,
+      extra: { requestedImageCount, returnedImageCount: deliveredImages.length, providerReturnedImageCount, billableImageCount, deliveredImages: deliveredImages.map((url, index) => summarizeGeneratedReference(url, index)), dimensions: deliveredImageDimensions, credit },
+    });
     return NextResponse.json({ ...withChargedUsage(result, credit), images: deliveredImages, imageDimensions: deliveredImageDimensions, requestedImageCount, returnedImageCount: deliveredImages.length, providerReturnedImageCount, billableImageCount, credit });
   } catch (error) {
     const referenceImageCount = Array.isArray(body?.referenceImages) ? body.referenceImages.length : 0;
@@ -158,6 +202,20 @@ export async function POST(request: Request) {
       });
     }
     const codedError = await createCodedApiError(error, GENERIC_MEDIA_ERROR_MESSAGE, "image-generation request failed");
+    void appendGenerationDiagnosticsLog({
+      event: "image-route-failed",
+      requestId: body?.requestId,
+      conversationId: body?.conversationId,
+      conversationTitle: body?.conversationTitle,
+      mode: "image",
+      model: body?.model,
+      prompt: body?.prompt,
+      settings: body?.settings,
+      references: Array.isArray(body?.referenceImages) ? body.referenceImages.map((image, index) => summarizeGeneratedReference(image, index)) : undefined,
+      durationMs: Date.now() - routeStartedAt,
+      error,
+      extra: { errorCode: codedError.errorCode, userError: codedError.error, referenceImageCount },
+    });
     return NextResponse.json(codedError, { status: 500 });
   }
 }

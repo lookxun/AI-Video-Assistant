@@ -6,6 +6,7 @@ import { createGeneratedImageThumbnail, getLocalImageDimensions, saveRemoteAsset
 import { createVideoPosterFromLocalVideo } from "@/lib/video-poster";
 import { getOpenRouterHeaders, getRequiredOpenRouterApiKey } from "@/lib/openrouter-video";
 import { upsertVideoManifestEntry } from "@/lib/video-manifest";
+import { appendGenerationDiagnosticsLog, summarizeGeneratedReference } from "@/lib/generation-diagnostics-log";
 
 type MediaSaveType = "image" | "video";
 type MediaSaveStatus = "pending" | "downloading" | "saved" | "failed" | "expired";
@@ -195,6 +196,7 @@ async function processMediaSaveJob(id: string) {
         queuedMs: downloadStartedAt - job.createdAt,
         ...getRemoteUrlDebugInfo(job.remoteUrl),
       });
+      void appendGenerationDiagnosticsLog({ event: "media-save-download-start", requestId: job.requestId, userId: job.userId, mode: job.type, model: job.model, prompt: job.prompt, references: [summarizeGeneratedReference(job.remoteUrl, 0, "remote_asset")], extra: { id: job.id, type: job.type, attempt: job.attempts, queuedMs: downloadStartedAt - job.createdAt, ...getRemoteUrlDebugInfo(job.remoteUrl) } });
       const localUrl = await saveRemoteAsset(job.remoteUrl, job.type, getRequestInit(job), { userId: job.userId });
       const dimensions = job.type === "image" ? getLocalImageDimensions(localUrl) : undefined;
       const thumbnailUrl = job.type === "image" ? await createGeneratedImageThumbnail(localUrl).catch((error) => {
@@ -241,6 +243,7 @@ async function processMediaSaveJob(id: string) {
         dimensions,
         ...getRemoteUrlDebugInfo(job.remoteUrl),
       });
+      void appendGenerationDiagnosticsLog({ event: "media-save-download-saved", requestId: job.requestId, userId: job.userId, mode: job.type, model: job.model, prompt: job.prompt, references: [summarizeGeneratedReference(job.remoteUrl, 0, "remote_asset"), summarizeGeneratedReference(localUrl, 1, "local_asset")], durationMs: savedAt - downloadStartedAt, extra: { id: job.id, type: job.type, attempts: job.attempts, queuedMs: savedAt - job.createdAt, downloadMs: savedAt - downloadStartedAt, localUrl, thumbnailUrl, posterUrl, posterThumbnailUrl, aliSynced: aliSync.ok, aliSyncError: aliSync.error, dimensions, ...getRemoteUrlDebugInfo(job.remoteUrl) } });
     } catch (error) {
       const now = Date.now();
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -253,6 +256,7 @@ async function processMediaSaveJob(id: string) {
       });
 
       console.warn("[media-save] remote asset save failed", { id: job.id, type: job.type, requestId: job.requestId, model: job.model, attempts: job.attempts, expired, error: errorMessage.slice(0, 160), ...getRemoteUrlDebugInfo(job.remoteUrl) });
+      void appendGenerationDiagnosticsLog({ event: "media-save-download-failed", requestId: job.requestId, userId: job.userId, mode: job.type, model: job.model, prompt: job.prompt, references: [summarizeGeneratedReference(job.remoteUrl, 0, "remote_asset")], error, extra: { id: job.id, type: job.type, attempts: job.attempts, expired, nextRetryAt, nextStatus: nextJob?.status, ...getRemoteUrlDebugInfo(job.remoteUrl) } });
       if (nextJob && !expired) scheduleJob(nextJob);
     }
   } finally {
@@ -312,6 +316,7 @@ export async function enqueueRemoteAssetSave(input: {
       expiresAt: next.expiresAt,
       ...getRemoteUrlDebugInfo(next.remoteUrl),
     });
+    void appendGenerationDiagnosticsLog({ event: "media-save-queued", requestId: next.requestId, userId: next.userId, mode: next.type, model: next.model, prompt: next.prompt, references: [summarizeGeneratedReference(next.remoteUrl, 0, "remote_asset")], extra: { id, type: next.type, expiresAt: next.expiresAt, ...getRemoteUrlDebugInfo(next.remoteUrl) } });
     return { ...next };
   });
 

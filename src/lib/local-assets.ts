@@ -6,9 +6,10 @@ import { dirname, extname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import ffmpegPath from "ffmpeg-static";
+import { appendUploadDiagnosticsLog } from "@/lib/upload-diagnostics-log";
 
 type AssetType = "image" | "video";
-type SaveAssetOptions = { userId?: string };
+type SaveAssetOptions = { userId?: string; diagnostics?: { requestId?: string; fileName?: string; fileSize?: number } };
 
 const GENERATED_ROOT = join(process.cwd(), "public", "generated");
 const ASSET_UPLOAD_TEMP_ROOT = join(process.cwd(), ".runtime", "asset-upload-temp");
@@ -128,15 +129,18 @@ function createPublicAssetPath(type: AssetType, extension: string, options: Save
   };
 }
 
-async function writeGeneratedImageAsJpeg(buffer: Buffer, filePath: string) {
+async function writeGeneratedImageAsJpeg(buffer: Buffer, filePath: string, diagnostics?: SaveAssetOptions["diagnostics"] & { userId?: string; mimeType?: string; forceReencode?: boolean; stage?: string }) {
+  const startedAt = Date.now();
   if (!ffmpegPath) {
     await writeFile(filePath, buffer);
+    void appendUploadDiagnosticsLog({ event: "upload-image-ffmpeg-missing-raw-write", requestId: diagnostics?.requestId, userId: diagnostics?.userId, fileName: diagnostics?.fileName, mimeType: diagnostics?.mimeType, fileSize: diagnostics?.fileSize ?? buffer.length, forceReencode: diagnostics?.forceReencode, durationMs: Date.now() - startedAt, extra: { stage: diagnostics?.stage, filePath } });
     return;
   }
 
   const tempInputPath = `${filePath}.${randomUUID()}.input`;
   await writeFile(tempInputPath, buffer);
   try {
+    void appendUploadDiagnosticsLog({ event: "upload-image-reencode-start", requestId: diagnostics?.requestId, userId: diagnostics?.userId, fileName: diagnostics?.fileName, mimeType: diagnostics?.mimeType, fileSize: diagnostics?.fileSize ?? buffer.length, forceReencode: diagnostics?.forceReencode, extra: { stage: diagnostics?.stage } });
     await execFileAsync(ffmpegPath, [
       "-y",
       "-hide_banner",
@@ -150,6 +154,10 @@ async function writeGeneratedImageAsJpeg(buffer: Buffer, filePath: string) {
       "3",
       filePath,
     ], { maxBuffer: 20 * 1024 * 1024 });
+    void appendUploadDiagnosticsLog({ event: "upload-image-reencode-success", requestId: diagnostics?.requestId, userId: diagnostics?.userId, fileName: diagnostics?.fileName, mimeType: diagnostics?.mimeType, fileSize: diagnostics?.fileSize ?? buffer.length, forceReencode: diagnostics?.forceReencode, durationMs: Date.now() - startedAt, extra: { stage: diagnostics?.stage, filePath } });
+  } catch (error) {
+    void appendUploadDiagnosticsLog({ event: "upload-image-reencode-failed", requestId: diagnostics?.requestId, userId: diagnostics?.userId, fileName: diagnostics?.fileName, mimeType: diagnostics?.mimeType, fileSize: diagnostics?.fileSize ?? buffer.length, forceReencode: diagnostics?.forceReencode, durationMs: Date.now() - startedAt, error, extra: { stage: diagnostics?.stage, filePath } });
+    throw error;
   } finally {
     await unlink(tempInputPath).catch(() => undefined);
   }
@@ -183,7 +191,7 @@ export async function saveDataUrlAsset(dataUrl: string, type: AssetType, options
 
   await mkdir(asset.directory, { recursive: true });
   if (type === "image") {
-    await writeGeneratedImageAsJpeg(buffer, asset.filePath);
+    await writeGeneratedImageAsJpeg(buffer, asset.filePath, { ...options.diagnostics, userId: options.userId, mimeType: parsed.mimeType, fileSize: buffer.length, stage: "save-generated-asset" });
   } else {
     await writeFile(asset.filePath, buffer);
   }
@@ -212,27 +220,33 @@ export async function saveUploadedImageBufferAsset(buffer: Buffer, mimeType = "i
 
   await mkdir(directory, { recursive: true });
 
-  if (!existsSync(filePath)) await writeGeneratedImageAsJpeg(buffer, filePath);
+  if (!existsSync(filePath)) await writeGeneratedImageAsJpeg(buffer, filePath, { ...options.diagnostics, userId: options.userId, mimeType, fileSize: buffer.length, stage: `save-uploaded-image-${folder}` });
 
   return `/generated/${publicFolder}/${hash}.${extension}`;
 }
 
 export async function saveTemporaryUploadedImageBuffer(buffer: Buffer, mimeType = "image/jpeg", options: SaveAssetOptions & { forceReencode?: boolean } = {}) {
+  const startedAt = Date.now();
   const userSegment = getSafeUserSegment(options.userId) || "anonymous";
   const token = `${Date.now()}-${randomUUID()}`;
   const directory = join(ASSET_UPLOAD_TEMP_ROOT, userSegment);
   const filePath = join(directory, `${token}.jpg`);
   await mkdir(directory, { recursive: true });
   if (options.forceReencode || !isJpegMime(mimeType)) {
-    await writeGeneratedImageAsJpeg(buffer, filePath);
+    await writeGeneratedImageAsJpeg(buffer, filePath, { ...options.diagnostics, userId: options.userId, mimeType, fileSize: buffer.length, forceReencode: options.forceReencode, stage: "temporary-upload" });
   } else {
-    if (jpegNeedsReencode(buffer)) throw new Error("图片编码需要转码，请点击重试。");
+    if (jpegNeedsReencode(buffer)) {
+      void appendUploadDiagnosticsLog({ event: "temporary-upload-jpeg-needs-reencode", requestId: options.diagnostics?.requestId, userId: options.userId, fileName: options.diagnostics?.fileName, mimeType, fileSize: options.diagnostics?.fileSize ?? buffer.length, forceReencode: options.forceReencode, durationMs: Date.now() - startedAt, extra: { token } });
+      throw new Error("图片编码需要转码，请点击重试。");
+    }
     await writeFile(filePath, buffer);
   }
+  void appendUploadDiagnosticsLog({ event: "temporary-upload-buffer-saved", requestId: options.diagnostics?.requestId, userId: options.userId, fileName: options.diagnostics?.fileName, mimeType, fileSize: options.diagnostics?.fileSize ?? buffer.length, forceReencode: options.forceReencode, token, durationMs: Date.now() - startedAt, extra: { directory } });
   return { token };
 }
 
 export async function commitTemporaryUploadedImage(token: string, options: SaveAssetOptions = {}) {
+  const startedAt = Date.now();
   const userSegment = getSafeUserSegment(options.userId) || "anonymous";
   const safeToken = token.trim().replace(/[^A-Za-z0-9_-]/g, "");
   if (!safeToken) throw new Error("上传文件不存在");
@@ -249,6 +263,7 @@ export async function commitTemporaryUploadedImage(token: string, options: SaveA
   await mkdir(directory, { recursive: true });
   if (!existsSync(filePath)) await rename(tempPath, filePath);
   else await unlink(tempPath).catch(() => undefined);
+  void appendUploadDiagnosticsLog({ event: "temporary-upload-committed", requestId: options.diagnostics?.requestId, userId: options.userId, token: safeToken, durationMs: Date.now() - startedAt, extra: { url: `/generated/${publicFolder}/${hash}.jpg`, deduped: existsSync(filePath) } });
   return `/generated/${publicFolder}/${hash}.jpg`;
 }
 

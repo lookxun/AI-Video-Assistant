@@ -10,6 +10,7 @@ import { createGeneratedImageThumbnail, getLocalImageDimensions, saveGeneratedAs
 import { enqueueRemoteAssetSave } from "@/lib/media-save-queue";
 import { syncGeneratedFilesToAli } from "@/lib/ali-sync";
 import { toUserErrorMessage } from "@/lib/error-message";
+import { appendGenerationDiagnosticsLog, summarizeGeneratedReference } from "@/lib/generation-diagnostics-log";
 import { getBytePlusBaseUrl, getBytePlusModelForRequest, getConfiguredBytePlusApiKey, getConfiguredOpenRouterApiKey, getModelProviderPreference, isGeneralTextModelEnabled, isTextModelEnabled } from "@/lib/system-settings";
 import { sanitizeModelOutputText } from "@/lib/text-cleanup";
 
@@ -88,6 +89,7 @@ const MODELS_PER_PROVIDER = 3;
 
 async function saveImageForDisplay(source: string, meta: { requestId?: string; model?: string; userId?: string } = {}) {
   if (/^https?:\/\//i.test(source)) {
+    void appendGenerationDiagnosticsLog({ event: "media-save-remote-image-queued-from-provider", requestId: meta.requestId, userId: meta.userId, mode: "image", model: meta.model, references: [summarizeGeneratedReference(source, 0)] });
     void enqueueRemoteAssetSave({ remoteUrl: source, type: "image", requestId: meta.requestId, model: meta.model, userId: meta.userId });
     return source;
   }
@@ -110,6 +112,15 @@ async function saveImageForDisplay(source: string, meta: { requestId?: string; m
       aliSynced: aliSync.ok,
       aliSyncError: aliSync.error,
       dimensions: getLocalImageDimensions(localUrl),
+    });
+    void appendGenerationDiagnosticsLog({
+      event: "media-save-inline-image-saved",
+      requestId: meta.requestId,
+      userId: meta.userId,
+      mode: "image",
+      model: meta.model,
+      durationMs: Date.now() - startedAt,
+      extra: { localUrl, thumbnailUrl, aliSynced: aliSync.ok, aliSyncError: aliSync.error, dimensions: getLocalImageDimensions(localUrl) },
     });
   }
   return localUrl;
@@ -276,7 +287,12 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
-async function curlPostJson<T>(url: string, headers: Record<string, string>, body: unknown, fallback: string) {
+async function readResponseDiagnosticText(response: Response, maxLength = 1800) {
+  const text = await response.clone().text().catch((error) => `<<response text read failed: ${error instanceof Error ? error.message : String(error)}>>`);
+  return text.slice(0, maxLength);
+}
+
+async function curlPostJson<T>(url: string, headers: Record<string, string>, body: unknown, fallback: string, context?: { requestId?: string; mode?: string; provider?: string; model?: string; prompt?: string; references?: string[] }) {
   const bodyPath = join(tmpdir(), `yinzao-openrouter-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
 
   await writeFile(bodyPath, JSON.stringify(body));
@@ -292,6 +308,17 @@ async function curlPostJson<T>(url: string, headers: Record<string, string>, bod
     const status = Number(separatorIndex >= 0 ? stdout.slice(separatorIndex + 1).trim() : 0);
 
     if (status < 200 || status >= 300) {
+      void appendGenerationDiagnosticsLog({
+        event: "provider-curl-non-ok",
+        requestId: context?.requestId,
+        mode: context?.mode,
+        provider: context?.provider,
+        model: context?.model,
+        status,
+        prompt: context?.prompt,
+        references: context?.references?.map((url, index) => summarizeGeneratedReference(url, index)),
+        upstream: { url, body: text.slice(0, 1800) },
+      });
       try {
         const data = JSON.parse(text) as OpenRouterErrorResponse;
           throw new Error(`${fallback}：${toUserErrorMessage(data.error?.message ?? text)}`);
@@ -302,8 +329,30 @@ async function curlPostJson<T>(url: string, headers: Record<string, string>, bod
     }
 
     try {
-      return JSON.parse(text) as T;
+      const data = JSON.parse(text) as T;
+      void appendGenerationDiagnosticsLog({
+        event: "provider-curl-success",
+        requestId: context?.requestId,
+        mode: context?.mode,
+        provider: context?.provider,
+        model: context?.model,
+        status,
+        prompt: context?.prompt,
+        references: context?.references?.map((url, index) => summarizeGeneratedReference(url, index)),
+      });
+      return data;
     } catch {
+      void appendGenerationDiagnosticsLog({
+        event: "provider-curl-json-parse-failed",
+        requestId: context?.requestId,
+        mode: context?.mode,
+        provider: context?.provider,
+        model: context?.model,
+        status,
+        prompt: context?.prompt,
+        references: context?.references?.map((url, index) => summarizeGeneratedReference(url, index)),
+        upstream: { url, body: text.slice(0, 1800) },
+      });
       throw new Error(`${fallback}：平台响应不完整，请稍后重试。`);
     }
   } finally {
@@ -367,22 +416,96 @@ function getTextProviderConfig(model: string, mode?: ChatRequest["mode"]) {
   };
 }
 
-async function postChatCompletion(url: string, headers: Record<string, string>, body: Record<string, unknown>, fallback: string) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
+async function postChatCompletion(url: string, headers: Record<string, string>, body: Record<string, unknown>, fallback: string, context?: { requestId?: string; mode?: string; provider?: string; model?: string }) {
+  const startedAt = Date.now();
+  void appendGenerationDiagnosticsLog({
+    event: "text-provider-request-start",
+    requestId: context?.requestId,
+    mode: context?.mode,
+    provider: context?.provider,
+    model: context?.model ?? (typeof body.model === "string" ? body.model : undefined),
+    extra: { url, messageCount: Array.isArray(body.messages) ? body.messages.length : undefined, temperature: body.temperature },
   });
 
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    void appendGenerationDiagnosticsLog({
+      event: "text-provider-fetch-error",
+      requestId: context?.requestId,
+      mode: context?.mode,
+      provider: context?.provider,
+      model: context?.model ?? (typeof body.model === "string" ? body.model : undefined),
+      durationMs: Date.now() - startedAt,
+      error,
+      extra: { url },
+    });
+    throw error;
+  }
+
   if (!response.ok) {
+    const responseText = await readResponseDiagnosticText(response);
+    void appendGenerationDiagnosticsLog({
+      event: "text-provider-non-ok",
+      requestId: context?.requestId,
+      mode: context?.mode,
+      provider: context?.provider,
+      model: context?.model ?? (typeof body.model === "string" ? body.model : undefined),
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      upstream: { url, statusText: response.statusText, body: responseText },
+    });
     try {
-      return await curlPostJson<OpenRouterChatCompletionResponse>(url, headers, body, fallback);
-    } catch {
+      return await curlPostJson<OpenRouterChatCompletionResponse>(url, headers, body, fallback, { requestId: context?.requestId, mode: context?.mode, provider: context?.provider, model: context?.model ?? (typeof body.model === "string" ? body.model : undefined) });
+    } catch (curlError) {
+      void appendGenerationDiagnosticsLog({
+        event: "text-provider-curl-fallback-failed",
+        requestId: context?.requestId,
+        mode: context?.mode,
+        provider: context?.provider,
+        model: context?.model ?? (typeof body.model === "string" ? body.model : undefined),
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+        error: curlError,
+        upstream: { url, statusText: response.statusText, body: responseText },
+      });
       throw new Error(await getOpenRouterError(response, fallback));
     }
   }
 
-  return (await response.json()) as OpenRouterChatCompletionResponse;
+  try {
+    const data = (await response.json()) as OpenRouterChatCompletionResponse;
+    void appendGenerationDiagnosticsLog({
+      event: "text-provider-success",
+      requestId: context?.requestId,
+      mode: context?.mode,
+      provider: context?.provider,
+      model: context?.model ?? (typeof body.model === "string" ? body.model : undefined),
+      responseModel: data.model,
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      extra: { choiceCount: data.choices?.length, finishReason: data.choices?.[0]?.finish_reason, nativeFinishReason: data.choices?.[0]?.native_finish_reason },
+    });
+    return data;
+  } catch (error) {
+    void appendGenerationDiagnosticsLog({
+      event: "text-provider-json-parse-failed",
+      requestId: context?.requestId,
+      mode: context?.mode,
+      provider: context?.provider,
+      model: context?.model ?? (typeof body.model === "string" ? body.model : undefined),
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      error,
+      upstream: { url },
+    });
+    throw error;
+  }
 }
 
 function getMimeType(filePath: string) {
@@ -627,7 +750,7 @@ export async function sendToOpenRouter(request: ChatRequest): Promise<ChatRespon
     messages,
     temperature: 0.7,
   };
-  const data = await postChatCompletion(providerConfig.url, providerConfig.headers, body, "请求失败");
+  const data = await postChatCompletion(providerConfig.url, providerConfig.headers, body, "请求失败", { mode: request.mode, provider: providerConfig.provider, model: providerConfig.model });
 
   const rawContent = cleanModelText(data.choices?.[0]?.message?.content ?? "");
   const usage = await getUsageMeta(data, providerConfig.provider === "openrouter" ? request.model : providerConfig.model, providerConfig.provider === "openrouter");
@@ -748,7 +871,7 @@ export async function planAgentTask(request: Pick<ChatRequest, "model" | "messag
     ],
     temperature: 0.2,
   };
-  const data = await postChatCompletion(providerConfig.url, providerConfig.headers, body, "Agent 规划失败");
+  const data = await postChatCompletion(providerConfig.url, providerConfig.headers, body, "Agent 规划失败", { mode: request.mode === "general" ? "general-plan" : "agent-plan", provider: providerConfig.provider, model: providerConfig.model });
 
   return { ...parseAgentPlan(data.choices?.[0]?.message?.content ?? ""), usage: await getUsageMeta(data, providerConfig.provider === "openrouter" ? request.model : providerConfig.model, providerConfig.provider === "openrouter") };
 }
@@ -771,7 +894,7 @@ export async function classifyOpenRouterIntent(request: Pick<ChatRequest, "model
     ],
     temperature: 0,
   };
-  const data = await postChatCompletion(providerConfig.url, providerConfig.headers, body, "意图分类失败");
+  const data = await postChatCompletion(providerConfig.url, providerConfig.headers, body, "意图分类失败", { mode: "intent-classification", provider: providerConfig.provider, model: providerConfig.model });
 
   return { ...parseIntentClassification(data.choices?.[0]?.message?.content ?? ""), usage: await getUsageMeta(data, providerConfig.provider === "openrouter" ? request.model : providerConfig.model, providerConfig.provider === "openrouter") };
 }
@@ -972,19 +1095,81 @@ async function generateBytePlusImage(prompt: string, referenceImages: string[] =
     if (supportsBytePlusImageOutputFormat(bytePlusModel)) body.output_format = "jpeg";
 
     let providerDoneAt = startedAt;
-    const response = await fetchWithTimeout(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    }, IMAGE_PROVIDER_TIMEOUT_MS, "BytePlus 图片生成");
+    void appendGenerationDiagnosticsLog({
+      event: "image-provider-request-start",
+      requestId: options.requestId,
+      userId: options.userId,
+      mode: "image",
+      provider: "byteplus",
+      model,
+      prompt,
+      settings: options.settings,
+      references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+      extra: { url, bytePlusModel, count, size: bytePlusSize, candidateMode: options.candidateMode },
+    });
+
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      }, IMAGE_PROVIDER_TIMEOUT_MS, "BytePlus 图片生成");
+    } catch (error) {
+      void appendGenerationDiagnosticsLog({
+        event: "image-provider-fetch-error",
+        requestId: options.requestId,
+        userId: options.userId,
+        mode: "image",
+        provider: "byteplus",
+        model,
+        prompt,
+        settings: options.settings,
+        references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+        durationMs: Date.now() - startedAt,
+        error,
+        extra: { url, bytePlusModel, count, size: bytePlusSize },
+      });
+      throw error;
+    }
     providerDoneAt = Date.now();
 
     let data: BytePlusImageGenerationResponse;
     if (!response.ok) {
+      const responseText = await readResponseDiagnosticText(response);
+      void appendGenerationDiagnosticsLog({
+        event: "image-provider-non-ok",
+        requestId: options.requestId,
+        userId: options.userId,
+        mode: "image",
+        provider: "byteplus",
+        model,
+        status: response.status,
+        prompt,
+        settings: options.settings,
+        references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+        durationMs: providerDoneAt - startedAt,
+        upstream: { url, statusText: response.statusText, body: responseText },
+      });
       try {
-        data = await curlPostJson<BytePlusImageGenerationResponse>(url, headers, body, "BytePlus 图片生成失败");
+        data = await curlPostJson<BytePlusImageGenerationResponse>(url, headers, body, "BytePlus 图片生成失败", { requestId: options.requestId, mode: "image", provider: "byteplus", model, prompt, references: safeReferenceImages });
         providerDoneAt = Date.now();
       } catch (curlError) {
+        void appendGenerationDiagnosticsLog({
+          event: "image-provider-curl-fallback-failed",
+          requestId: options.requestId,
+          userId: options.userId,
+          mode: "image",
+          provider: "byteplus",
+          model,
+          status: response.status,
+          prompt,
+          settings: options.settings,
+          references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+          durationMs: Date.now() - startedAt,
+          error: curlError,
+          upstream: { url, statusText: response.statusText, body: responseText },
+        });
         const curlMessage = curlError instanceof Error ? curlError.message : "";
         if (/curl|schannel|closed abruptly|close_notify|command failed/i.test(curlMessage)) throw new Error("网络连接异常，请稍后重试。");
         if (curlMessage) throw new Error(curlMessage);
@@ -994,6 +1179,21 @@ async function generateBytePlusImage(prompt: string, referenceImages: string[] =
       try {
         data = (await response.json()) as BytePlusImageGenerationResponse;
       } catch (parseError) {
+        void appendGenerationDiagnosticsLog({
+          event: "image-provider-json-parse-failed",
+          requestId: options.requestId,
+          userId: options.userId,
+          mode: "image",
+          provider: "byteplus",
+          model,
+          status: response.status,
+          prompt,
+          settings: options.settings,
+          references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+          durationMs: Date.now() - startedAt,
+          error: parseError,
+          extra: { url, bytePlusModel },
+        });
         const parseMessage = parseError instanceof Error ? parseError.message : "图片平台返回解析失败";
         throw new Error(`BytePlus 图片平台响应解析失败：${parseMessage}`);
       }
@@ -1006,6 +1206,20 @@ async function generateBytePlusImage(prompt: string, referenceImages: string[] =
     if (displayImages.length === 0) {
       const reason = cleanNoImageReason(data.error?.message) || "empty image result";
       console.error("[image-generation] BytePlus no image returned", { model: bytePlusModel, responseId: data.id, reason });
+      void appendGenerationDiagnosticsLog({
+        event: "image-provider-empty-result",
+        requestId: options.requestId,
+        userId: options.userId,
+        mode: "image",
+        provider: "byteplus",
+        model,
+        status: response.status,
+        prompt,
+        settings: options.settings,
+        references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+        durationMs: Date.now() - startedAt,
+        upstream: { responseId: data.id, reason, error: data.error },
+      });
       throw new Error(reason ? `BytePlus 图片平台没有返回图片：${reason}` : "BytePlus 图片平台没有返回图片，且没有返回可用原因。");
     }
 
@@ -1037,6 +1251,21 @@ async function generateBytePlusImage(prompt: string, referenceImages: string[] =
       saveQueueMs: saveDoneAt - providerDoneAt,
       dimensionsMs: dimensionsDoneAt - saveDoneAt,
       totalMs: dimensionsDoneAt - startedAt,
+    });
+    void appendGenerationDiagnosticsLog({
+      event: "image-provider-success",
+      requestId: options.requestId,
+      userId: options.userId,
+      mode: "image",
+      provider: "byteplus",
+      model,
+      responseModel: bytePlusModel,
+      status: response.status,
+      prompt,
+      settings: options.settings,
+      references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+      durationMs: dimensionsDoneAt - startedAt,
+      extra: { returnedImages: images.length, displayImages: displayImages.length, selectedImages: selectedImages.length, providerMs: providerDoneAt - startedAt, saveQueueMs: saveDoneAt - providerDoneAt, dimensionsMs: dimensionsDoneAt - saveDoneAt, dimensions: imageDimensions },
     });
 
     return {
@@ -1110,20 +1339,82 @@ export async function generateOpenRouterImage(prompt: string, referenceImages: s
       ...(useImageConfig ? { image_config: imageConfig } : {}),
     };
     const headers = getOpenRouterHeaders(apiKey);
-    const response = await fetchWithTimeout(OPENROUTER_URL, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    }, IMAGE_PROVIDER_TIMEOUT_MS, "图片生成");
+    void appendGenerationDiagnosticsLog({
+      event: "image-provider-request-start",
+      requestId: options.requestId,
+      userId: options.userId,
+      mode: "image",
+      provider: "openrouter",
+      model,
+      prompt,
+      settings: options.settings,
+      references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+      extra: { url: OPENROUTER_URL, useImageConfig, imageConfig, modalities, count, candidateMode: options.candidateMode },
+    });
+
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(OPENROUTER_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      }, IMAGE_PROVIDER_TIMEOUT_MS, "图片生成");
+    } catch (error) {
+      void appendGenerationDiagnosticsLog({
+        event: "image-provider-fetch-error",
+        requestId: options.requestId,
+        userId: options.userId,
+        mode: "image",
+        provider: "openrouter",
+        model,
+        prompt,
+        settings: options.settings,
+        references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+        durationMs: Date.now() - startedAt,
+        error,
+        extra: { url: OPENROUTER_URL, useImageConfig, imageConfig, modalities },
+      });
+      throw error;
+    }
 
     let data: OpenRouterChatCompletionResponse;
     let providerDoneAt = startedAt;
 
     if (!response.ok) {
+      const responseText = await readResponseDiagnosticText(response);
+      void appendGenerationDiagnosticsLog({
+        event: "image-provider-non-ok",
+        requestId: options.requestId,
+        userId: options.userId,
+        mode: "image",
+        provider: "openrouter",
+        model,
+        status: response.status,
+        prompt,
+        settings: options.settings,
+        references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+        durationMs: Date.now() - startedAt,
+        upstream: { url: OPENROUTER_URL, statusText: response.statusText, body: responseText },
+      });
       try {
-        data = await curlPostJson<OpenRouterChatCompletionResponse>(OPENROUTER_URL, headers, body, "图片生成失败");
+        data = await curlPostJson<OpenRouterChatCompletionResponse>(OPENROUTER_URL, headers, body, "图片生成失败", { requestId: options.requestId, mode: "image", provider: "openrouter", model, prompt, references: safeReferenceImages });
         providerDoneAt = Date.now();
       } catch (curlError) {
+        void appendGenerationDiagnosticsLog({
+          event: "image-provider-curl-fallback-failed",
+          requestId: options.requestId,
+          userId: options.userId,
+          mode: "image",
+          provider: "openrouter",
+          model,
+          status: response.status,
+          prompt,
+          settings: options.settings,
+          references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+          durationMs: Date.now() - startedAt,
+          error: curlError,
+          upstream: { url: OPENROUTER_URL, statusText: response.statusText, body: responseText },
+        });
         const curlMessage = curlError instanceof Error ? curlError.message : "";
         if (/curl|schannel|closed abruptly|close_notify|command failed/i.test(curlMessage)) throw new Error("网络连接异常，请稍后重试。");
         if (curlMessage) throw new Error(curlMessage);
@@ -1134,6 +1425,21 @@ export async function generateOpenRouterImage(prompt: string, referenceImages: s
         data = (await response.json()) as OpenRouterChatCompletionResponse;
         providerDoneAt = Date.now();
       } catch (parseError) {
+        void appendGenerationDiagnosticsLog({
+          event: "image-provider-json-parse-failed",
+          requestId: options.requestId,
+          userId: options.userId,
+          mode: "image",
+          provider: "openrouter",
+          model,
+          status: response.status,
+          prompt,
+          settings: options.settings,
+          references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+          durationMs: Date.now() - startedAt,
+          error: parseError,
+          extra: { url: OPENROUTER_URL },
+        });
         const parseMessage = parseError instanceof Error ? parseError.message : "图片平台返回解析失败";
         throw new Error(`图片平台响应解析失败：${parseMessage}`);
       }
@@ -1161,6 +1467,21 @@ export async function generateOpenRouterImage(prompt: string, referenceImages: s
         finishReason: data.choices?.[0]?.finish_reason,
         nativeFinishReason: data.choices?.[0]?.native_finish_reason,
       });
+      void appendGenerationDiagnosticsLog({
+        event: "image-provider-empty-result",
+        requestId: options.requestId,
+        userId: options.userId,
+        mode: "image",
+        provider: "openrouter",
+        model,
+        responseModel: data.model,
+        status: response.status,
+        prompt,
+        settings: options.settings,
+        references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+        durationMs: Date.now() - startedAt,
+        upstream: { responseId: data.id, reason: noImageReason || "empty image result", finishReason: data.choices?.[0]?.finish_reason, nativeFinishReason: data.choices?.[0]?.native_finish_reason, choiceCount: data.choices?.length },
+      });
       throw new Error(noImageReason ? `图片平台没有返回图片：${noImageReason}` : "图片平台没有返回图片，且没有返回可用原因。");
     }
 
@@ -1186,6 +1507,21 @@ export async function generateOpenRouterImage(prompt: string, referenceImages: s
       providerMs: providerDoneAt - startedAt,
       saveQueueMs: Date.now() - providerDoneAt,
       totalMs: Date.now() - startedAt,
+    });
+    void appendGenerationDiagnosticsLog({
+      event: "image-provider-success",
+      requestId: options.requestId,
+      userId: options.userId,
+      mode: "image",
+      provider: "openrouter",
+      model,
+      responseModel: data.model,
+      status: response.status,
+      prompt,
+      settings: options.settings,
+      references: safeReferenceImages.map((image, index) => summarizeGeneratedReference(image, index)),
+      durationMs: Date.now() - startedAt,
+      extra: { returnedImages: images.length, displayImages: displayImages.length, selectedImages: selectedImages.length, asyncSave: images.some((image) => /^https?:\/\//i.test(image)), providerMs: providerDoneAt - startedAt, saveQueueMs: Date.now() - providerDoneAt, dimensions: imageDimensions },
     });
 
     return {

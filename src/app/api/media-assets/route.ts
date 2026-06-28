@@ -57,6 +57,127 @@ function getString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function dbDateToMs(value: Date | null | undefined) {
+  return value ? value.getTime() : undefined;
+}
+
+function mediaCategoryToLegacyType(category: string, mediaType: string) {
+  if (category === "workflow_videos" || mediaType === "video") return "shot_video";
+  if (category === "character_image" || category === "scene_image" || category === "shot_image") return category;
+  if (category === "trash") return "trash";
+  return "other";
+}
+
+function normalizePreviewMeta(value: Prisma.JsonValue | null, media: { mediaType: string; model: string | null; ratio: string | null; resolution: string | null; imageSize: string | null; videoDuration: string | null; width: number | null; height: number | null }) {
+  if (isRecord(value)) return value;
+  if (!media.model && !media.ratio && !media.resolution && !media.imageSize && !media.videoDuration && !media.width && !media.height) return undefined;
+  return {
+    modelLabel: media.model || "-",
+    ratio: media.width && media.height ? `${media.width}:${media.height}` : media.ratio || "-",
+    sizeText: media.width && media.height ? `${media.width} × ${media.height}` : media.imageSize || "-",
+    resolution: media.resolution || media.imageSize || "-",
+    duration: media.videoDuration || undefined,
+    mode: media.mediaType === "video" ? "video" : "image",
+  };
+}
+
+export async function GET(request: Request) {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: "未登录" }, { status: 401 });
+
+  const url = new URL(request.url);
+  const workflowId = url.searchParams.get("workflowId")?.trim();
+  if (!workflowId) return NextResponse.json({ assets: [] });
+
+  const rows = await prisma.userAssetState.findMany({
+    where: {
+      userId: user.id,
+      hiddenAt: null,
+      deletedAt: null,
+      mediaAsset: { archivedAt: null, workflowId, workspaceKind: "workflow" },
+    },
+    select: {
+      id: true,
+      currentName: true,
+      currentCategory: true,
+      previousCategory: true,
+      deletedAt: true,
+      purgeAt: true,
+      bytePlusAssetId: true,
+      bytePlusAssetGroupId: true,
+      bytePlusAssetStatus: true,
+      bytePlusAssetError: true,
+      bytePlusAssetUpdatedAt: true,
+      mediaAsset: {
+        select: {
+          id: true,
+          mediaType: true,
+          url: true,
+          posterUrl: true,
+          thumbnailUrl: true,
+          sourceKind: true,
+          sourcePrompt: true,
+          promptSource: true,
+          reversePrompt: true,
+          previewMeta: true,
+          model: true,
+          ratio: true,
+          resolution: true,
+          imageSize: true,
+          videoDuration: true,
+          width: true,
+          height: true,
+          conversationId: true,
+          messageId: true,
+          workflowId: true,
+          workflowNodeId: true,
+          createdAt: true,
+          firstSeenAt: true,
+          systemName: true,
+          initialName: true,
+        },
+      },
+    },
+    orderBy: [{ mediaAsset: { firstSeenAt: "desc" } }, { mediaAsset: { createdAt: "desc" } }, { id: "desc" }],
+  });
+
+  const assets = rows.map((row) => {
+    const media = row.mediaAsset;
+    const isWorkflowCategory = row.currentCategory === "workflow_images" || row.currentCategory === "workflow_uploads" || row.currentCategory === "workflow_videos";
+    const promptSource = media.reversePrompt && media.reversePrompt !== "上传图片" ? "reverse" : row.currentCategory === "workflow_uploads" || media.sourceKind.includes("upload") ? "upload" : media.promptSource || "generated";
+    return {
+      id: row.id,
+      mediaId: media.id,
+      type: mediaCategoryToLegacyType(row.currentCategory, media.mediaType),
+      name: row.currentName || media.systemName || media.initialName || "未命名资产",
+      systemName: media.systemName || media.initialName || undefined,
+      url: media.url,
+      thumbnailUrl: media.thumbnailUrl || undefined,
+      posterUrl: media.posterUrl || undefined,
+      librarySource: isWorkflowCategory ? "workflow" : "conversation",
+      sourcePrompt: media.reversePrompt || media.sourcePrompt || (promptSource === "upload" ? "上传图片" : ""),
+      promptSource,
+      lockedType: true,
+      previewMeta: normalizePreviewMeta(media.previewMeta, media),
+      sessionId: media.workflowId || media.conversationId || "",
+      messageId: media.messageId || undefined,
+      workflowId: media.workflowId || undefined,
+      workflowNodeId: media.workflowNodeId || undefined,
+      previousType: row.previousCategory || undefined,
+      createdAt: dbDateToMs(media.firstSeenAt) ?? dbDateToMs(media.createdAt) ?? Date.now(),
+      deletedAt: dbDateToMs(row.deletedAt),
+      purgeAt: dbDateToMs(row.purgeAt),
+      bytePlusAssetId: row.bytePlusAssetId || undefined,
+      bytePlusAssetGroupId: row.bytePlusAssetGroupId || undefined,
+      bytePlusAssetStatus: row.bytePlusAssetStatus || undefined,
+      bytePlusAssetError: row.bytePlusAssetError || undefined,
+      bytePlusAssetUpdatedAt: dbDateToMs(row.bytePlusAssetUpdatedAt),
+    };
+  });
+
+  return NextResponse.json({ assets });
+}
+
 async function getWorkflowNodeSourcePrompt(userId: string, workflowId: string | undefined, workflowNodeId: string | undefined) {
   if (!workflowId || !workflowNodeId) return undefined;
   const workflow = await prisma.workspaceWorkflow.findUnique({
@@ -99,6 +220,7 @@ export async function POST(request: Request) {
   const dimensions = isRecord(body.dimensions) ? body.dimensions : undefined;
   const width = typeof dimensions?.width === "number" ? Math.floor(dimensions.width) : undefined;
   const height = typeof dimensions?.height === "number" ? Math.floor(dimensions.height) : undefined;
+  const durationSeconds = typeof body.durationSeconds === "number" && Number.isFinite(body.durationSeconds) && body.durationSeconds > 0 ? body.durationSeconds : undefined;
   const settings = isRecord(body.settings) ? body.settings : undefined;
   const settingsJson = settings as Prisma.InputJsonValue | undefined;
   const previewMetaJson = (isRecord(body.previewMeta) ? body.previewMeta : undefined) as Prisma.InputJsonValue | undefined;
@@ -132,6 +254,7 @@ export async function POST(request: Request) {
       previewMeta: previewMetaJson,
       width,
       height,
+      durationSeconds,
       systemName: persistName,
       initialName: persistName,
       initialCategory: currentCategory,
@@ -163,6 +286,7 @@ export async function POST(request: Request) {
       previewMeta: previewMetaJson,
       width,
       height,
+      durationSeconds,
       systemName: persistName,
       initialName: persistName,
       initialCategory: currentCategory,
